@@ -1,0 +1,18 @@
+[
+  {
+    "name": "SumMin_SmallerLeader",
+    "description": "Players may prefer to select the index i in landmark_positions that minimizes squared_distance(ego_agent_position, landmark_positions[i]) + squared_distance(other_agent_position, landmark_positions[i]). Break ties by smaller squared_distance(min(ego_agent_position, other_agent_position), landmark_positions[i]) using lexicographic order on (x, y), then by the smallest i."
+  },
+  {
+    "name": "SumMin_LargerLeader",
+    "description": "Players may prefer to select the index i in landmark_positions that minimizes squared_distance(ego_agent_position, landmark_positions[i]) + squared_distance(other_agent_position, landmark_positions[i]). Break ties by smaller squared_distance(max(ego_agent_position, other_agent_position), landmark_positions[i]) using lexicographic order on (x, y), then by the smallest i."
+  },
+  {
+    "name": "EgoMin_SmallerLeader",
+    "description": "Players may prefer to select the index i in landmark_positions that minimizes squared_distance(ego_agent_position, landmark_positions[i]). Break ties by smaller squared_distance(min(ego_agent_position, other_agent_position), landmark_positions[i]) using lexicographic order on (x, y), then by the smallest i."
+  },
+  {
+    "name": "EgoMin_LargerLeader",
+    "description": "Players may prefer to select the index i in landmark_positions that minimizes squared_distance(ego_agent_position, landmark_positions[i]). Break ties by smaller squared_distance(max(ego_agent_position, other_agent_position), landmark_positions[i]) using lexicographic order on (x, y), then by the smallest i."
+  }
+]
