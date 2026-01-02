@@ -27,7 +27,7 @@ Do not include markdown formatting or explanations.
 Only import torch before function definition if necessary. Do not include any other imports.
 """
 
-def generate_policy(client, behavior, observation_format):
+def generate_policy(client, behavior, observation_format, previous_policy=None, error_message=None):
     prompt = POLICY_GENERATION_PROMPT.format(OBSERVATION_FORMAT=observation_format)
     
     messages = [
@@ -35,6 +35,16 @@ def generate_policy(client, behavior, observation_format):
         {"role": "user", "content": json.dumps(behavior)}
     ]
     
+    if previous_policy and error_message:
+        refinement_message = (
+            f"The previous policy generated produced the following error:\n"
+            f"{error_message}\n\n"
+            f"Here is the previous policy code:\n"
+            f"```python\n{previous_policy}\n```\n\n"
+            f"Please fix the error and provide the corrected policy code."
+        )
+        messages.append({"role": "user", "content": refinement_message})
+
     response = client.chat.completions.create(
         model="gpt-5",
         messages=messages
@@ -56,7 +66,7 @@ def save_policy_to_file(policy_code, save_file):
         f.write(policy_code)
     print(f"Saved policy to {save_file}")
 
-def generate_and_save_policy(client: OpenAI, behavior_path, behavior_index, policy_path):
+def generate_and_save_policy(client: OpenAI, behavior_path, behavior_index, policy_path, previous_policy = None, error_message = None):
     # Load behavior
     if os.path.isdir(behavior_path):
         behavior_file = os.path.join(behavior_path, "behaviors.json")
@@ -74,7 +84,7 @@ def generate_and_save_policy(client: OpenAI, behavior_path, behavior_index, poli
     print(f"Generating policy for behavior: {behavior['name']}")
     print(f"Description: {behavior['description']}")
     
-    policy_code = generate_policy(client, behavior, prompt_data.OBSERVATION_FORMAT)
+    policy_code = generate_policy(client, behavior, prompt_data.OBSERVATION_FORMAT, previous_policy, error_message)
     
     print("Generated Policy Code:")
     print(policy_code)

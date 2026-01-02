@@ -11,7 +11,7 @@ class InContextStrategy(BehaviorGenerationStrategy):
         Generate 4 behaviors in an in-context manner, using previously generated behaviors as context.
         """
         behaviors = []
-        for _ in range(4):
+        for _ in range(5):
             behavior = self.generate_single(client, environment_description)
             behaviors.append(behavior)
         return behaviors

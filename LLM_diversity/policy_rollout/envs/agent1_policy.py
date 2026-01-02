@@ -1,83 +1,56 @@
+import torch
+
 def agent1_policy(obs):
-    d = obs.shape[0]
-    agent_pos = obs[0:2]
-    agent_vel = obs[2:4]
+    # Parse observation
+    pos = obs[0:2]
+    vel = obs[2:4]
+    if obs.numel() <= 6:
+        # Not enough information; stay still
+        return vel.new_zeros(1, 2)
+    # Assume single other agent (last two entries)
+    other_rel = obs[-2:]
+    lm_flat = obs[4:-2]
+    L = lm_flat.numel() // 2
+    if L <= 0:
+        # No landmarks; mild damping
+        force = -0.3 * vel
+        return force.view(1, 2)
 
-    remaining = d - 4
-    if remaining < 2:
-        return agent_pos.new_zeros((1, 2))
+    landmarks_rel = lm_flat.view(L, 2)
 
-    # Assume one other agent if possible; otherwise treat as none
-    L = max(int((remaining - 2) // 2), 0)
-    if 4 + 2 * L + 2 <= d:
-        other_present = True
+    # Distances
+    d_ego = torch.norm(landmarks_rel, dim=1)
+    d_other = torch.norm(landmarks_rel - other_rel.unsqueeze(0), dim=1)
+
+    # Selection with tie-breakers:
+    # 1) smallest distance to ego
+    # 2) smallest sum of distances to ego and other
+    # 3) lowest index
+    tol = 1e-6
+    min_d_ego = d_ego.min()
+    mask1 = (d_ego - min_d_ego).abs() <= tol
+
+    if mask1.sum() > 1:
+        sum_scores = d_ego + d_other
+        min_sum = sum_scores[mask1].min()
+        mask2 = mask1 & ((sum_scores - min_sum).abs() <= tol)
+        idxs = torch.nonzero(mask2, as_tuple=False).squeeze(-1)
+        selected_idx = idxs.min()
     else:
-        L = max(int(remaining // 2), 0)
-        other_present = False
+        selected_idx = torch.argmin(d_ego)
 
-    if L == 0:
-        return agent_pos.new_zeros((1, 2))
+    target_rel = landmarks_rel[selected_idx]
 
-    landmarks_rel = obs[4:4 + 2 * L]
-    if other_present:
-        other_rel = obs[4 + 2 * L:4 + 2 * L + 2]
-    else:
-        other_rel = agent_pos.new_zeros(2)
+    # Proportional-derivative control toward selected landmark
+    k_p = obs.new_tensor(1.5)
+    k_d = obs.new_tensor(0.3)
+    force = k_p * target_rel - k_d * vel
 
-    other_pos = agent_pos + other_rel
-    leader = 0.5 * (agent_pos + other_pos + (agent_pos - other_pos).abs())
-
-    best_i = 0
-    best_primary = None
-    best_secondary = None
-    best_lex = None
-    eps = 1e-12
-
-    for i in range(L):
-        rel = landmarks_rel[2 * i:2 * i + 2]
-        ego_d2 = float((rel * rel).sum())
-        lpos = agent_pos + rel
-        diff_leader = lpos - leader
-        leader_d2 = float((diff_leader * diff_leader).sum())
-        lex_tuple = (float(lpos[0]), float(lpos[1]))
-
-        if best_primary is None:
-            best_primary = ego_d2
-            best_secondary = leader_d2
-            best_lex = lex_tuple
-            best_i = i
-        else:
-            if ego_d2 < best_primary - eps:
-                best_primary = ego_d2
-                best_secondary = leader_d2
-                best_lex = lex_tuple
-                best_i = i
-            elif abs(ego_d2 - best_primary) <= eps:
-                if leader_d2 < best_secondary - eps:
-                    best_primary = ego_d2
-                    best_secondary = leader_d2
-                    best_lex = lex_tuple
-                    best_i = i
-                elif abs(leader_d2 - best_secondary) <= eps:
-                    if lex_tuple < best_lex:
-                        best_primary = ego_d2
-                        best_secondary = leader_d2
-                        best_lex = lex_tuple
-                        best_i = i
-                    elif lex_tuple == best_lex and i < best_i:
-                        best_primary = ego_d2
-                        best_secondary = leader_d2
-                        best_lex = lex_tuple
-                        best_i = i
-
-    target_rel = landmarks_rel[2 * best_i:2 * best_i + 2]
-    kp = 1.0
-    kd = 0.3
-    force = kp * target_rel - kd * agent_vel
-
-    norm = force.norm(p=2)
-    max_force = 1.0
-    if norm > max_force:
-        force = force * (max_force / (norm + 1e-8))
+    # Saturate force magnitude
+    max_force = obs.new_tensor(1.0)
+    eps = obs.new_tensor(1e-8)
+    norm = torch.norm(force)
+    scale = torch.clamp(max_force / (norm + eps), max=1.0)
+    force = force * scale
 
     return force.view(1, 2)

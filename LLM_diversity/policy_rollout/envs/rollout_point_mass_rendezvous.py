@@ -36,8 +36,8 @@ def test_behavior_following(max_steps: int = 200):
         try:
             action_0 = agent1_policy(obs[0].squeeze(0))
             action_1 = agent2_policy(obs[1].squeeze(0))
-        except Exception:
-            return None, None
+        except Exception as e:
+            return states, images, str(e)
 
         actions = [action_0, action_1]
 
@@ -56,7 +56,7 @@ def test_behavior_following(max_steps: int = 200):
         time.sleep(0.05)
 
     # Return trajectory of states and rollout images
-    return states, images
+    return states, images, None
 
 # def agent1_policy(obs):
 #     return torch.tensor([[0.0, 0.0]])
@@ -116,9 +116,15 @@ def save_rollout(states, images, folder_path):
             f.write(f"Step {idx}: {state}\n")
 
 def rollout_behavior(save_path: str = "results/rollout/test"):
-    states, images = test_behavior_following()
+    states, images, error = test_behavior_following()
+    if error:
+        return error
     save_rollout(states, images, save_path)
+    return None
 
 if __name__ == "__main__":
-    states, images = test_behavior_following()
-    save_rollout(states, images, "results/rollout")
+    states, images, error = test_behavior_following()
+    if error:
+        print(f"Rollout failed: {error}")
+    else:
+        save_rollout(states, images, "results/rollout")

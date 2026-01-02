@@ -1,3 +1,6 @@
 /LLM_diversity/results/*
 */__pycache__/
 *.pyc
+LLM_diversity/policy_rollout/envs/__pycache__/rollout_point_mass_rendezvous.cpython-312.pyc
+LLM_diversity/behavior_generation/__pycache__/in_context.cpython-312.pyc
+LLM_diversity/cfg/__pycache__/cfg_point_mass_rendezvous.cpython-312.pyc
