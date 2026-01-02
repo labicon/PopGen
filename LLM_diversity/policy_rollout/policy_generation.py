@@ -59,7 +59,7 @@ def generate_policy(client, behavior, observation_format, previous_policy=None, 
     if code.endswith("```"):
         code = code[:-3]
         
-    return code.strip()
+    return code.strip(), messages
 
 def save_policy_to_file(policy_code, save_file):
     with open(save_file, "w") as f:
@@ -84,12 +84,13 @@ def generate_and_save_policy(client: OpenAI, behavior_path, behavior_index, poli
     print(f"Generating policy for behavior: {behavior['name']}")
     print(f"Description: {behavior['description']}")
     
-    policy_code = generate_policy(client, behavior, prompt_data.OBSERVATION_FORMAT, previous_policy, error_message)
+    policy_code, messages = generate_policy(client, behavior, prompt_data.OBSERVATION_FORMAT, previous_policy, error_message)
     
     print("Generated Policy Code:")
     print(policy_code)
     
     save_policy_to_file(policy_code, policy_path)
+    return messages, policy_code
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate policy from behavior description.")

@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Optional, Union
 import json
 import base64
 import os
+import io
+from PIL import Image
 
 class BehaviorEvaluator:
     def __init__(self):
@@ -150,6 +152,11 @@ Provide your evaluation and reasoning.
 # Function to encode the image
 def encode_image(image_path: str) -> Union[str, List[str]]:
     if os.path.isdir(image_path):
+        # Check for GIF first
+        gif_path = os.path.join(image_path, "rollout.gif")
+        if os.path.exists(gif_path):
+            return encode_gif(gif_path)
+            
         encoded_images = []
         # List files matching image_*.png
         files = [f for f in os.listdir(image_path) if f.startswith("image_") and f.endswith(".png")]
@@ -161,9 +168,29 @@ def encode_image(image_path: str) -> Union[str, List[str]]:
             with open(file_path, "rb") as image_file:
                 encoded_images.append(base64.b64encode(image_file.read()).decode("utf-8"))
         return encoded_images
+    elif image_path.endswith(".gif"):
+        return encode_gif(image_path)
     else:
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode("utf-8")
+
+def encode_gif(gif_path: str, num_frames: int = 5) -> List[str]:
+    encoded_frames = []
+    try:
+        with Image.open(gif_path) as im:
+            total_frames = im.n_frames
+            step = max(1, total_frames // num_frames)
+            for i in range(0, total_frames, step):
+                im.seek(i)
+                frame = im.convert("RGB")
+                buffered = io.BytesIO()
+                frame.save(buffered, format="JPEG")
+                encoded_frames.append(base64.b64encode(buffered.getvalue()).decode("utf-8"))
+                if len(encoded_frames) >= num_frames:
+                    break
+    except Exception as e:
+        print(f"Error encoding GIF {gif_path}: {e}")
+    return encoded_frames
         
 if __name__ == "__main__":
     import sys

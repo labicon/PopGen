@@ -83,24 +83,26 @@ def save_rollout(states, images, folder_path):
         shutil.rmtree(folder_path)
     os.makedirs(folder_path, exist_ok=True)
 
-    # Save 5 evenly distributed images
-    num_images = 5
+    # Save images as GIF
     if len(images) > 0:
-        img_indices = np.linspace(0, len(images) - 1, num_images, dtype=int)
-        # Use unique indices to avoid duplicates if len(images) < num_images
-        img_indices = np.unique(img_indices)
-        
-        for idx in img_indices:
-            img_data = images[idx]
+        frames = []
+        for img_data in images:
             # Handle if render returns a list (common in vectorized envs)
             if isinstance(img_data, list):
                 img_array = img_data[0]
             else:
                 img_array = img_data
-                
-            img = Image.fromarray(img_array.astype(np.uint8))
-            # Save with step index in filename for clarity
-            img.save(os.path.join(folder_path, f"image_{idx}.png"))
+            
+            frames.append(Image.fromarray(img_array.astype(np.uint8)))
+            
+        if frames:
+            frames[0].save(
+                os.path.join(folder_path, "rollout.gif"),
+                save_all=True,
+                append_images=frames[1:],
+                duration=50,  # Duration between frames in milliseconds
+                loop=0
+            )
 
     # Save 200 evenly distributed states
     num_states = 20

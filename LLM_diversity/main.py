@@ -28,7 +28,7 @@ def generate_policy_rollout_evaluate(client, behavior, behavior_index, behavior_
         
         # Generate Policy
         try:            
-            generate_and_save_policy(
+            prompt, policy_code = generate_and_save_policy(
                 client, 
                 behavior_path=behavior_output_path, 
                 behavior_index=behavior_index, 
@@ -37,15 +37,15 @@ def generate_policy_rollout_evaluate(client, behavior, behavior_index, behavior_
                 error_message=error_message
             )
             
-            with open(config.POLICY_FILE_PATH, "r") as f:
-                policy_code = f.read()
             print("Generated Policy Code (snippet):")
             print(policy_code[:200] + "...")
             
-            # Save policy code for logging
+            # Save policy code and prompt for logging
             os.makedirs(config.POLICY_OUTPUT, exist_ok=True)
             with open(os.path.join(config.POLICY_OUTPUT, f"policy_{behavior_index}_attempt_{alignment_attempt}.py"), "w") as f:
                 f.write(policy_code)
+            with open(os.path.join(config.POLICY_OUTPUT, f"prompt_{behavior_index}_attempt_{alignment_attempt}.json"), "w") as f:
+                json.dump(prompt, f, indent=2)
             print(f"Saved policy code to {os.path.join(config.POLICY_OUTPUT, f'policy_{behavior_index}_attempt_{alignment_attempt}.py')}")
             
         except Exception as e:
