@@ -115,7 +115,9 @@ Behavior Description: {behavior_description.get('description', '')}
 Trajectory Data:
 {trajectory}
 
-Evaluate how well the agent followed the behavior description based on the trajectory data and the provided sequential images.
+Evaluate how well the agent 0 followed the behavior description based on the trajectory data and the provided sequential images.
+It is not important to evaluate agent 1's behavior. Focus on agent 0 only.
+In the images, agent 0 is red and agent 1 is blue.
 Provide your evaluation and reasoning.
 """
         
@@ -194,15 +196,15 @@ def encode_gif(gif_path: str, num_frames: int = 5) -> List[str]:
         
 if __name__ == "__main__":
     import sys
-    # Add parent directory to path to import config
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # Add parent directory to path to allow imports
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     import LLM_diversity.cfg.config as config
 
     client = OpenAI(api_key=config.OPENAI_API_KEY)
     evaluator = BehaviorEvaluator()
 
     base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    data_path = os.path.join(base_path, "results", "rollout", "test")
+    data_path = os.path.join(base_path, "results", "test_rollout")
     
     trajectory_path = os.path.join(data_path, "trajectory.txt")
     if os.path.exists(trajectory_path):
@@ -210,8 +212,8 @@ if __name__ == "__main__":
             trajectory = f.read()
 
         behavior_description = {
-            "name": "Stay Still",
-            "description": "The agents should stay at their initial positions and not move."
+        "name": "Rightmost-ClosestMidpoint",
+        "description": "Players may prefer to select the landmark with the largest x-coordinate; among landmarks with the same x, select the one with minimum Euclidean distance to the midpoint ((ego_agent_position + other_agent_position)/2). Break remaining ties by the lowest index in landmark_positions."
         }
 
         print("Evaluating...")

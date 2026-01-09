@@ -67,13 +67,19 @@ def generate_policy_rollout_evaluate(client, behavior, behavior_index, behavior_
             # We need to reload the module to pick up the new policy if it was regenerated
             if "rollout_module" in sys.modules:
                 del sys.modules["rollout_module"]
+            
+            # Force reload of the policy module by removing it from sys.modules
+            # This is crucial because the policy file has been overwritten
+            if "policy_rollout.envs.agent0_policy" in sys.modules:
+                print("Reloading policy module...")
+                del sys.modules["policy_rollout.envs.agent0_policy"]
                 
             spec = importlib.util.spec_from_file_location("rollout_module", rollout_script_path)
             rollout_module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(rollout_module)
             
             # Call the rollout function
-            rollout_module.rollout_behavior(save_path=test_output_dir)
+            rollout_module.rollout_behavior(save_path=test_output_dir, attempt=alignment_attempt)
             
             print("Rollout completed successfully.")
             rollout_success = True

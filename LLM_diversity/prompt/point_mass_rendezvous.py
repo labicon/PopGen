@@ -5,6 +5,8 @@ There are 4 landmarks available, representing different potential solutions.
 Each landmark is represented by its (x, y) coordinates.
 The agents must agree on which landmark to go to without explicit communication.
 
+There are two agents: Agent 0 (Red) and Agent 1 (Blue).
+
 When you want to describe agent behaviors as code, these are the accessible variables:
 - `ego_agent_position`: A tuple (x, y) representing the position of ego agent.
 - `other_agent_position`: A tuple (x, y) representing the position of other agent.
@@ -18,10 +20,12 @@ def observation(self, agent: Agent):
     obs = [agent.state.pos, agent.state.vel]
 
     # Landmarks relative pos
+    # In here, we have 4 landmarks
     for landmark in self.world.landmarks:
         obs.append(landmark.state.pos - agent.state.pos)
 
     # Other agents relative pos
+    # In here, we have only 1 other agent
     for a in self.world.agents:
         if a != agent:
             obs.append(a.state.pos - agent.state.pos)

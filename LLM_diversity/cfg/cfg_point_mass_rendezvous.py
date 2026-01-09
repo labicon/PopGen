@@ -28,7 +28,7 @@ MAX_BEHAVIORS = 5
 
 # Source file for environment rollout
 ROLLOUT_SOURCE_FILE = "policy_rollout/envs/rollout_point_mass_rendezvous.py"
-POLICY_FILE_PATH = "policy_rollout/envs/agent1_policy.py"
+POLICY_FILE_PATH = "policy_rollout/envs/agent0_policy.py"
 
 ENVIRONMENT_PROMPT_FILE = "prompt/point_mass_rendezvous.py"
 

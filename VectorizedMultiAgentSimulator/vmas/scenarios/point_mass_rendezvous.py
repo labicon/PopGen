@@ -40,12 +40,20 @@ class Scenario(BaseScenario):
 
         # Add agents
         for i in range(self.n_agents):
-            agent = Agent(
-                name=f"agent_{i}",
-                collide=True,
-                shape=Sphere(radius=self.agent_radius),
-                color=Color.BLUE,
-            )
+            if i == 0:
+                agent = Agent(
+                    name=f"agent_{i}",
+                    collide=True,
+                    shape=Sphere(radius=self.agent_radius),
+                    color=Color.RED,
+                )
+            else:
+                agent = Agent(
+                    name=f"agent_{i}",
+                    collide=True,
+                    shape=Sphere(radius=self.agent_radius),
+                    color=Color.BLUE,
+                )
             world.add_agent(agent)
 
         # Add landmarks
