@@ -1,0 +1,24 @@
+defaults:
+  - env: point_mass_rendezvous
+  - _self_
+
+# Behavior generation strategy
+strategy: stratified  # Options: stratified, in_context
+
+# LLM model selection (litellm format)
+llm_model: openai/gpt-5-nano
+
+# Pipeline settings
+max_behaviors: 5
+max_alignment_retries: 5
+max_rollout_retries: 3
+
+# Output directory (relative to working directory)
+output_dir: ./results
+
+hydra:
+  run:
+    dir: ${output_dir}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${output_dir}/multirun/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
