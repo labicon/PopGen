@@ -41,18 +41,18 @@ def run_behavior_pipeline(cfg: DictConfig):
     logging.info("=" * 60)
     logging.info(f"Strategy:    {cfg.strategy}")
     logging.info(f"LLM Model:   {cfg.llm_model}")
-    logging.info(f"Environment: {cfg.env.name}")
+    logging.info(f"Environment: {cfg.env}")
     logging.info(f"Output:      {cfg.output_dir}")
     logging.info("-" * 60)
 
     # Create output directories
-    run_id = f"{cfg.env.name}__{cfg.strategy}__{cfg.llm_model.split('/')[-1]}"
+    run_id = f"{cfg.env}__{cfg.strategy}__{cfg.llm_model.split('/')[-1]}"
     extended_output_dir = os.path.join(cfg.output_dir, run_id)
     behavior_file_path = os.path.join(extended_output_dir, "behaviors.json")
     os.makedirs(extended_output_dir, exist_ok=True)
 
     # Load env
-    env = importlib.import_module(cfg.env.env_path)
+    env = importlib.import_module(f"popgen.envs.{cfg.env}")
     env_description = env.ENVIRONMENT_DESCRIPTION
     observation_format = env.OBSERVATION_FORMAT
     rollout_fn = env.rollout_behavior

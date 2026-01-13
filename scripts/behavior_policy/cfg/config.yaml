@@ -1,6 +1,5 @@
-defaults:
-  - env: point_mass_rendezvous
-  - _self_
+# Environment selection
+env: football
 
 # Behavior generation strategy
 strategy: stratified  # Options: stratified, in_context
