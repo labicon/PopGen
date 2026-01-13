@@ -1,18 +1,15 @@
-from .behavior import (
-    BehaviorGenerationStrategy,
-    Behavior,
-    BehaviorList,
+from .diversity import (
     InContextStrategy,
     StratifiedStrategy,
 )
 from .policy import PolicyGenerator, Policy
+from .reward import RewardFnGenerator, Reward
 
 __all__ = [
-    "BehaviorGenerationStrategy",
-    "Behavior",
-    "BehaviorList",
     "InContextStrategy",
     "StratifiedStrategy",
     "PolicyGenerator",
     "Policy",
+    "RewardFnGenerator",
+    "Reward",
 ]

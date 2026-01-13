@@ -1,45 +1,43 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from popgen.population.evaluation import BehaviorEvaluator, BehaviorEvaluation
-from popgen.population.generation import Behavior
-
+from popgen.population import (
+    BehaviorEvaluator, 
+    EvaluationResult,
+    Behavior
+)
 
 class TestBehaviorEvaluationModel:
     def test_evaluation_creation(self):
-        evaluation = BehaviorEvaluation(evaluation=True, reasoning="Agent followed behavior")
+        evaluation = EvaluationResult(evaluation=True, reasoning="Agent followed behavior")
         assert evaluation.evaluation is True
         assert evaluation.reasoning == "Agent followed behavior"
 
     def test_evaluation_from_dict(self):
         data = {"evaluation": False, "reasoning": "Agent deviated"}
-        evaluation = BehaviorEvaluation.model_validate(data)
+        evaluation = EvaluationResult.model_validate(data)
         assert evaluation.evaluation is False
         assert evaluation.reasoning == "Agent deviated"
 
     def test_evaluation_to_dict(self):
-        evaluation = BehaviorEvaluation(evaluation=True, reasoning="Good")
+        evaluation = EvaluationResult(evaluation=True, reasoning="Good")
         data = evaluation.model_dump()
         assert data == {"evaluation": True, "reasoning": "Good"}
 
     def test_evaluation_missing_field_raises(self):
         with pytest.raises(ValueError):
-            BehaviorEvaluation(evaluation=True)
+            EvaluationResult(evaluation=True)
 
 
 class TestBehaviorEvaluator:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.evaluation.evaluator.litellm.completion") as mock:
+        with patch("popgen.population.evaluator.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
     def evaluator(self):
-        return BehaviorEvaluator()
-
-    def test_init_default_model(self):
-        evaluator = BehaviorEvaluator()
-        assert evaluator.model == "openai/gpt-5"
+        return BehaviorEvaluator(model="gpt-5-nano")
 
     def test_init_custom_model(self):
         evaluator = BehaviorEvaluator(model="gpt-4-turbo")
@@ -50,7 +48,7 @@ def _mock_evaluation_response(evaluation: bool, reasoning: str) -> MagicMock:
     """Helper to create a mock LLM response with JSON content."""
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = BehaviorEvaluation(
+    mock_response.choices[0].message.content = EvaluationResult(
         evaluation=evaluation, reasoning=reasoning
     ).model_dump_json()
     return mock_response
@@ -59,12 +57,12 @@ def _mock_evaluation_response(evaluation: bool, reasoning: str) -> MagicMock:
 class TestEvaluateTrajectory:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.evaluation.evaluator.litellm.completion") as mock:
+        with patch("popgen.population.evaluator.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
     def evaluator(self):
-        return BehaviorEvaluator()
+        return BehaviorEvaluator(model="gpt-5-nano")
 
     def test_evaluate_trajectory_with_behavior_object(self, mock_completion, evaluator):
         mock_completion.return_value = _mock_evaluation_response(True, "Followed correctly")
@@ -128,30 +126,30 @@ class TestEvaluateTrajectory:
         evaluator.evaluate_trajectory("trajectory", behavior)
 
         call_args = mock_completion.call_args
-        assert call_args.kwargs["response_format"] == BehaviorEvaluation
+        assert call_args.kwargs["response_format"] == EvaluationResult
 
 
 class TestEvaluateTrajectoryAndImages:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.evaluation.evaluator.litellm.completion") as mock:
+        with patch("popgen.population.evaluator.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
     def mock_encode_image(self):
-        with patch("popgen.population.evaluation.evaluator.encode_image") as mock:
+        with patch("popgen.population.evaluator.encode_image") as mock:
             mock.return_value = "base64encodedimage"
             yield mock
 
     @pytest.fixture
     def mock_encode_gif(self):
-        with patch("popgen.population.evaluation.evaluator.encode_gif") as mock:
+        with patch("popgen.population.evaluator.encode_gif") as mock:
             mock.return_value = ["frame1", "frame2"]
             yield mock
 
     @pytest.fixture
     def evaluator(self):
-        return BehaviorEvaluator()
+        return BehaviorEvaluator(model="gpt-5-nano")
 
     def test_evaluate_with_images_success(self, mock_completion, mock_encode_image, evaluator):
         mock_completion.return_value = _mock_evaluation_response(True, "Visual confirms behavior")

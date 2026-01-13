@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from popgen.population.generation import PolicyGenerator, Policy, Behavior
+from popgen.population.generation.policy.generator import PolicyGenerator, Policy, PolicyCode
 
 
 class TestPolicyModel:
@@ -26,14 +26,58 @@ class TestPolicyModel:
             Policy(code="some code")
 
 
-class TestPolicyGenerator:
-    def test_init_default_model(self):
-        generator = PolicyGenerator()
-        assert generator.model == "openai/gpt-5"
+class TestPolicyCodeModel:
+    def test_policy_code_creation(self):
+        policy_code = PolicyCode(code="def agent0_policy(obs): pass\n\ndef agent1_policy(obs): pass")
+        assert "agent0_policy" in policy_code.code
+        assert "agent1_policy" in policy_code.code
 
+    def test_policy_code_from_dict(self):
+        data = {"code": "def agent0_policy(obs): return obs"}
+        policy_code = PolicyCode.model_validate(data)
+        assert "agent0_policy" in policy_code.code
+
+
+class TestPolicyGenerator:
     def test_init_custom_model(self):
         generator = PolicyGenerator(model="gpt-4-turbo")
         assert generator.model == "gpt-4-turbo"
+
+
+class TestGenerate:
+    @pytest.fixture
+    def mock_completion(self):
+        with patch("popgen.population.generation.policy.generator.litellm.completion") as mock:
+            yield mock
+
+    @pytest.fixture
+    def generator(self):
+        return PolicyGenerator(model="openai/gpt-4")
+
+    @pytest.fixture
+    def behavior(self):
+        return '{"name": "Aggressive", "description": "Always moves toward target"}'
+
+    def test_generate_success(self, mock_completion, generator, behavior):
+        mock_response_0 = MagicMock()
+        mock_response_0.choices = [MagicMock()]
+        mock_response_0.choices[0].message.content = "def agent0_policy(obs):\n    return obs"
+
+        mock_response_1 = MagicMock()
+        mock_response_1.choices = [MagicMock()]
+        mock_response_1.choices[0].message.content = "def agent1_policy(obs):\n    return obs"
+
+        mock_completion.side_effect = [mock_response_0, mock_response_1]
+
+        policy_code = generator.generate(
+            behavior=behavior,
+            observation_format="obs is a tensor",
+        )
+
+        assert isinstance(policy_code, PolicyCode)
+        assert "agent0_policy" in policy_code.code
+        assert "agent1_policy" in policy_code.code
+        assert mock_completion.call_count == 2
 
 
 class TestGenerateStandalonePolicy:
@@ -44,19 +88,19 @@ class TestGenerateStandalonePolicy:
 
     @pytest.fixture
     def generator(self):
-        return PolicyGenerator()
+        return PolicyGenerator(model="openai/gpt-4")
 
     @pytest.fixture
     def behavior(self):
-        return Behavior(name="Aggressive", description="Always moves toward target")
+        return '{"name": "Aggressive", "description": "Always moves toward target"}'
 
-    def test_generate_policy_success(self, mock_completion, generator, behavior):
+    def test_generate_standalone_policy_success(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "def agent0_policy(obs):\n    return obs"
         mock_completion.return_value = mock_response
 
-        policy = generator.generate_policy(
+        policy = generator._generate_standalone_policy(
             behavior=behavior,
             observation_format="obs is a tensor",
             agent_id=0,
@@ -67,13 +111,13 @@ class TestGenerateStandalonePolicy:
         assert "agent0_policy" in policy.code
         mock_completion.assert_called_once()
 
-    def test_generate_policy_for_agent1(self, mock_completion, generator, behavior):
+    def test_generate_standalone_policy_for_agent1(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "def agent1_policy(obs):\n    return obs"
         mock_completion.return_value = mock_response
 
-        policy = generator.generate_policy(
+        policy = generator._generate_standalone_policy(
             behavior=behavior,
             observation_format="obs is a tensor",
             agent_id=1,
@@ -84,13 +128,13 @@ class TestGenerateStandalonePolicy:
         messages = call_args.kwargs["messages"]
         assert "agent1" in messages[0]["content"]
 
-    def test_generate_policy_includes_behavior_in_message(self, mock_completion, generator, behavior):
+    def test_generate_standalone_policy_includes_behavior_in_message(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "def agent0_policy(obs): pass"
         mock_completion.return_value = mock_response
 
-        generator.generate_policy(
+        generator._generate_standalone_policy(
             behavior=behavior,
             observation_format="tensor format",
             agent_id=0,
@@ -101,13 +145,13 @@ class TestGenerateStandalonePolicy:
         user_message = messages[1]["content"]
         assert "Aggressive" in user_message
 
-    def test_generate_policy_includes_observation_format(self, mock_completion, generator, behavior):
+    def test_generate_standalone_policy_includes_observation_format(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "def agent0_policy(obs): pass"
         mock_completion.return_value = mock_response
 
-        generator.generate_policy(
+        generator._generate_standalone_policy(
             behavior=behavior,
             observation_format="custom observation format here",
             agent_id=0,
@@ -118,21 +162,21 @@ class TestGenerateStandalonePolicy:
         system_message = messages[0]["content"]
         assert "custom observation format here" in system_message
 
-    def test_generate_policy_with_refinement(self, mock_completion, generator, behavior):
+    def test_generate_standalone_policy_with_feedbacks(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "def agent0_policy(obs): return fixed"
         mock_completion.return_value = mock_response
 
-        previous = "def agent0_policy(obs): return broken"
-        error = "Agent moved in wrong direction"
+        feedbacks = [
+            ("def agent0_policy(obs): return broken", "Agent moved in wrong direction")
+        ]
 
-        policy = generator.generate_policy(
+        policy = generator._generate_standalone_policy(
             behavior=behavior,
             observation_format="obs format",
             agent_id=0,
-            previous_policy=previous,
-            error_message=error,
+            feedbacks=feedbacks,
         )
 
         call_args = mock_completion.call_args
@@ -142,18 +186,34 @@ class TestGenerateStandalonePolicy:
         assert "broken" in refinement_message
         assert "wrong direction" in refinement_message
 
-    def test_generate_policy_refinement_not_added_without_both_params(self, mock_completion, generator, behavior):
+    def test_generate_standalone_policy_no_refinement_with_empty_feedbacks(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "def agent0_policy(obs): pass"
         mock_completion.return_value = mock_response
 
-        generator.generate_policy(
+        generator._generate_standalone_policy(
             behavior=behavior,
             observation_format="obs format",
             agent_id=0,
-            previous_policy="some code",
-            error_message=None,
+            feedbacks=[],
+        )
+
+        call_args = mock_completion.call_args
+        messages = call_args.kwargs["messages"]
+        assert len(messages) == 2
+
+    def test_generate_standalone_policy_no_refinement_with_none_feedbacks(self, mock_completion, generator, behavior):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "def agent0_policy(obs): pass"
+        mock_completion.return_value = mock_response
+
+        generator._generate_standalone_policy(
+            behavior=behavior,
+            observation_format="obs format",
+            agent_id=0,
+            feedbacks=None,
         )
 
         call_args = mock_completion.call_args
@@ -169,15 +229,15 @@ class TestGenerateCoordinatingPolicy:
 
     @pytest.fixture
     def generator(self):
-        return PolicyGenerator()
+        return PolicyGenerator(model="openai/gpt-4")
 
     @pytest.fixture
     def agent0_behavior(self):
-        return Behavior(name="Leader", description="Takes initiative")
+        return '{"name": "Leader", "description": "Takes initiative"}'
 
     @pytest.fixture
     def agent1_behavior(self):
-        return Behavior(name="Follower", description="Follows partner")
+        return '{"name": "Follower", "description": "Follows partner"}'
 
     def test_generate_coordinating_policy(self, mock_completion, generator, agent0_behavior, agent1_behavior):
         mock_response = MagicMock()
@@ -187,7 +247,7 @@ class TestGenerateCoordinatingPolicy:
 
         agent0_code = "def agent0_policy(obs): return lead(obs)"
 
-        policy = generator.generate_policy(
+        policy = generator._generate_coordinating_policy(
             behavior=agent1_behavior,
             observation_format="obs format",
             agent_id=1,
@@ -207,7 +267,7 @@ class TestGenerateCoordinatingPolicy:
 
         agent0_code = "def agent0_policy(obs): return special_action(obs)"
 
-        generator.generate_policy(
+        generator._generate_coordinating_policy(
             behavior=agent1_behavior,
             observation_format="obs format",
             agent_id=1,
@@ -228,7 +288,7 @@ class TestGenerateCoordinatingPolicy:
         mock_response.choices[0].message.content = "def agent1_policy(obs): pass"
         mock_completion.return_value = mock_response
 
-        generator.generate_policy(
+        generator._generate_coordinating_policy(
             behavior=agent1_behavior,
             observation_format="obs format",
             agent_id=1,
@@ -245,7 +305,7 @@ class TestGenerateCoordinatingPolicy:
 class TestCleanCode:
     @pytest.fixture
     def generator(self):
-        return PolicyGenerator()
+        return PolicyGenerator(model="openai/gpt-4")
 
     def test_clean_code_removes_python_markdown(self, generator):
         code = "```python\ndef func(): pass\n```"

@@ -1,124 +1,39 @@
 import pytest
 from unittest.mock import patch, MagicMock
+from pydantic import BaseModel
 
-from popgen.population.generation import (
-    Behavior,
-    BehaviorList,
-    BehaviorGenerationStrategy,
+from popgen.population.generation.diversity import (
+    GenerationStrategy,
     InContextStrategy,
     StratifiedStrategy,
 )
 
 
-class TestBehaviorModel:
-    def test_behavior_creation(self):
-        behavior = Behavior(name="Aggressive", description="Always attacks first")
-        assert behavior.name == "Aggressive"
-        assert behavior.description == "Always attacks first"
-
-    def test_behavior_from_dict(self):
-        data = {"name": "Defensive", "description": "Prioritizes safety"}
-        behavior = Behavior.model_validate(data)
-        assert behavior.name == "Defensive"
-        assert behavior.description == "Prioritizes safety"
-
-    def test_behavior_to_dict(self):
-        behavior = Behavior(name="Balanced", description="Adapts to situation")
-        data = behavior.model_dump()
-        assert data == {"name": "Balanced", "description": "Adapts to situation"}
-
-    def test_behavior_missing_field_raises(self):
-        with pytest.raises(ValueError):
-            Behavior(name="Incomplete")
+class SampleItem(BaseModel):
+    """A sample item for generation testing."""
+    name: str
+    description: str
 
 
-class TestBehaviorListModel:
-    def test_behavior_list_creation(self):
-        behaviors = [
-            Behavior(name="A", description="Desc A"),
-            Behavior(name="B", description="Desc B"),
-        ]
-        behavior_list = BehaviorList(behaviors=behaviors)
-        assert len(behavior_list.behaviors) == 2
-        assert behavior_list.behaviors[0].name == "A"
-
-    def test_behavior_list_from_dict(self):
-        data = {
-            "behaviors": [
-                {"name": "X", "description": "Desc X"},
-                {"name": "Y", "description": "Desc Y"},
-            ]
-        }
-        behavior_list = BehaviorList.model_validate(data)
-        assert len(behavior_list.behaviors) == 2
-
-    def test_empty_behavior_list(self):
-        behavior_list = BehaviorList(behaviors=[])
-        assert len(behavior_list.behaviors) == 0
-
-
-class TestBehaviorGenerationStrategy:
-    def test_cannot_instantiate_abstract_class(self):
-        with pytest.raises(TypeError):
-            BehaviorGenerationStrategy()
-
-    def test_behavior_list_to_string_empty(self):
-        class ConcreteStrategy(BehaviorGenerationStrategy):
-            def generate(self, environment_description, **kwargs):
-                return []
-
-        strategy = ConcreteStrategy()
-        result = str(BehaviorList(behaviors=[]))
-        assert result == ""
-
-    def test_behavior_list_to_string_with_behaviors(self):
-        class ConcreteStrategy(BehaviorGenerationStrategy):
-            def generate(self, environment_description, **kwargs):
-                return []
-
-        strategy = ConcreteStrategy()
-        behaviors = [
-            Behavior(name="Alpha", description="First behavior"),
-            Behavior(name="Beta", description="Second behavior"),
-        ]
-        result = str(BehaviorList(behaviors=behaviors))
-        assert "Alpha: First behavior" in result
-        assert "Beta: Second behavior" in result
-
-    def test_default_model(self):
-        class ConcreteStrategy(BehaviorGenerationStrategy):
-            def generate(self, environment_description, **kwargs):
-                return []
-
-        strategy = ConcreteStrategy()
-        assert strategy.model == "openai/gpt-5"
-
-    def test_custom_model(self):
-        class ConcreteStrategy(BehaviorGenerationStrategy):
-            def generate(self, environment_description, **kwargs):
-                return []
-
-        strategy = ConcreteStrategy(model="claude-3-opus-20240229")
-        assert strategy.model == "claude-3-opus-20240229"
-
-
-def _mock_behavior_response(name: str, description: str) -> MagicMock:
-    """Helper to create a mock LLM response with JSON content for a single Behavior."""
+def _mock_item_response(name: str, description: str) -> MagicMock:
+    """Helper to create a mock LLM response with JSON content for a single SampleItem."""
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = Behavior(
+    mock_response.choices[0].message.content = SampleItem(
         name=name, description=description
     ).model_dump_json()
     return mock_response
 
 
-def _mock_behavior_list_response(behaviors: list[Behavior]) -> MagicMock:
-    """Helper to create a mock LLM response with JSON content for a BehaviorList."""
+def _mock_item_list_response(items: list[SampleItem]) -> MagicMock:
+    """Helper to create a mock LLM response with JSON content for a list of SampleItems."""
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = BehaviorList(
-        behaviors=behaviors
-    ).model_dump_json()
+    # Create dynamic list model
+    from pydantic import create_model
+    from typing import List
+    list_model = create_model("SampleItemList", items=(List[SampleItem], ...))
+    mock_response.choices[0].message.content = list_model(items=items).model_dump_json()
     return mock_response
 
 
@@ -130,49 +45,102 @@ def _mock_text_response(content: str) -> MagicMock:
     return mock_response
 
 
+class TestGenerationStrategy:
+    def test_cannot_instantiate_abstract_class(self):
+        with pytest.raises(TypeError):
+            GenerationStrategy(model="openai/gpt-4", output_type=SampleItem)
+
+    def test_list_to_string_empty(self):
+        class ConcreteStrategy(GenerationStrategy):
+            def generate(self, environment_description, **kwargs):
+                return []
+
+        strategy = ConcreteStrategy(model="openai/gpt-4", output_type=SampleItem)
+        result = strategy._list_to_string([])
+        assert result == "None"
+
+    def test_list_to_string_with_items(self):
+        class ConcreteStrategy(GenerationStrategy):
+            def generate(self, environment_description, **kwargs):
+                return []
+
+        strategy = ConcreteStrategy(model="openai/gpt-4", output_type=SampleItem)
+        items = [
+            SampleItem(name="Alpha", description="First item"),
+            SampleItem(name="Beta", description="Second item"),
+        ]
+        result = strategy._list_to_string(items)
+        assert "Alpha" in result
+        assert "Beta" in result
+
+    def test_custom_model(self):
+        class ConcreteStrategy(GenerationStrategy):
+            def generate(self, environment_description, **kwargs):
+                return []
+
+        strategy = ConcreteStrategy(model="claude-3-opus-20240229", output_type=SampleItem)
+        assert strategy.model == "claude-3-opus-20240229"
+
+    def test_output_type_stored(self):
+        class ConcreteStrategy(GenerationStrategy):
+            def generate(self, environment_description, **kwargs):
+                return []
+
+        strategy = ConcreteStrategy(model="openai/gpt-4", output_type=SampleItem)
+        assert strategy.output_type == SampleItem
+
+    def test_generated_items_initialized_empty(self):
+        class ConcreteStrategy(GenerationStrategy):
+            def generate(self, environment_description, **kwargs):
+                return []
+
+        strategy = ConcreteStrategy(model="openai/gpt-4", output_type=SampleItem)
+        assert strategy.generated_items == []
+
+
 class TestInContextStrategy:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.generation.behavior.in_context.litellm.completion") as mock:
+        with patch("popgen.population.generation.diversity.in_context.litellm.completion") as mock:
             yield mock
 
-    def test_init_default_model(self):
-        strategy = InContextStrategy()
-        assert strategy.model == "openai/gpt-5"
-
     def test_init_custom_model(self):
-        strategy = InContextStrategy(model="gpt-4-turbo")
+        strategy = InContextStrategy(model="gpt-4-turbo", output_type=SampleItem)
         assert strategy.model == "gpt-4-turbo"
 
-    def test_generate_single_success(self, mock_completion):
-        mock_completion.return_value = _mock_behavior_response("Test", "Test description")
+    def test_init_output_type(self):
+        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
+        assert strategy.output_type == SampleItem
 
-        strategy = InContextStrategy()
-        result = strategy.generate_single("Test environment")
+    def test_generate_single_success(self, mock_completion):
+        mock_completion.return_value = _mock_item_response("Test", "Test description")
+
+        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
+        result = strategy._generate_single("Test environment")
 
         assert result.name == "Test"
         assert result.description == "Test description"
-        assert len(strategy.behavior_list) == 1
+        assert len(strategy.generated_items) == 1
         mock_completion.assert_called_once()
 
-    def test_generate_multiple_behaviors(self, mock_completion):
+    def test_generate_multiple_items(self, mock_completion):
         mock_completion.side_effect = [
-            _mock_behavior_response(f"Behavior{i}", f"Description {i}")
+            _mock_item_response(f"Item{i}", f"Description {i}")
             for i in range(3)
         ]
 
-        strategy = InContextStrategy()
-        results = strategy.generate("Test environment", num_behaviors=3)
+        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
+        results = strategy.generate("Test environment", num_items=3)
 
         assert len(results) == 3
         assert mock_completion.call_count == 3
         for i, result in enumerate(results):
-            assert result.name == f"Behavior{i}"
+            assert result.name == f"Item{i}"
 
-    def test_generate_default_num_behaviors(self, mock_completion):
-        mock_completion.return_value = _mock_behavior_response("Test", "Test")
+    def test_generate_default_num_items(self, mock_completion):
+        mock_completion.return_value = _mock_item_response("Test", "Test")
 
-        strategy = InContextStrategy()
+        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
         results = strategy.generate("Test environment")
 
         assert len(results) == 5
@@ -182,11 +150,11 @@ class TestInContextStrategy:
         mock_completion.side_effect = [
             Exception("First failure"),
             Exception("Second failure"),
-            _mock_behavior_response("Success", "After retry"),
+            _mock_item_response("Success", "After retry"),
         ]
 
-        strategy = InContextStrategy()
-        result = strategy.generate_single("Test environment")
+        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
+        result = strategy._generate_single("Test environment")
 
         assert result.name == "Success"
         assert mock_completion.call_count == 3
@@ -194,45 +162,43 @@ class TestInContextStrategy:
     def test_generate_single_raises_after_max_retries(self, mock_completion):
         mock_completion.side_effect = Exception("Persistent failure")
 
-        strategy = InContextStrategy()
+        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
         with pytest.raises(Exception, match="Persistent failure"):
-            strategy.generate_single("Test environment")
+            strategy._generate_single("Test environment")
 
         assert mock_completion.call_count == 5
 
-    def test_previous_behaviors_included_in_prompt(self, mock_completion):
-        mock_completion.return_value = _mock_behavior_response("New", "New behavior")
+    def test_previous_items_included_in_prompt(self, mock_completion):
+        mock_completion.return_value = _mock_item_response("New", "New item")
 
-        strategy = InContextStrategy()
-        strategy.behavior_list = [
-            Behavior(name="Existing", description="Already generated")
-        ]
+        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
+        existing_items = [SampleItem(name="Existing", description="Already generated")]
 
-        strategy.generate_single("Test environment")
+        strategy._generate_single("Test environment", previous_items=existing_items)
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
-        assert "Existing: Already generated" in messages[0]["content"]
+        assert "Existing" in messages[0]["content"]
 
 
 class TestStratifiedStrategy:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.generation.behavior.simplestrat.litellm.completion") as mock:
+        with patch("popgen.population.generation.diversity.simplestrat.litellm.completion") as mock:
             yield mock
 
-    def test_init_default_model(self):
-        strategy = StratifiedStrategy()
-        assert strategy.model == "openai/gpt-5"
-
     def test_init_custom_model(self):
-        strategy = StratifiedStrategy(model="gpt-4-turbo")
+        strategy = StratifiedStrategy(model="gpt-4-turbo", output_type=SampleItem)
         assert strategy.model == "gpt-4-turbo"
+
+    def test_init_output_type(self):
+        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        assert strategy.output_type == SampleItem
 
     def test_generate_single_divider(self, mock_completion):
         mock_completion.return_value = _mock_text_response("Risk tolerance: low vs high")
 
-        strategy = StratifiedStrategy()
+        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
         result = strategy._generate_single_divider("Test environment", [])
 
         assert result == "Risk tolerance: low vs high"
@@ -241,7 +207,7 @@ class TestStratifiedStrategy:
     def test_generate_single_divider_with_existing(self, mock_completion):
         mock_completion.return_value = _mock_text_response("Cooperation: selfish vs altruistic")
 
-        strategy = StratifiedStrategy()
+        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
         result = strategy._generate_single_divider(
             "Test environment",
             ["Risk tolerance: low vs high"]
@@ -251,50 +217,65 @@ class TestStratifiedStrategy:
         messages = call_args.kwargs["messages"]
         assert "Risk tolerance: low vs high" in messages[0]["content"]
 
-    def test_generate_behaviors_from_dividers(self, mock_completion):
-        behaviors = [
-            Behavior(name=f"B{i}", description=f"Desc {i}")
+    def test_generate_items_from_dividers(self, mock_completion):
+        items = [
+            SampleItem(name=f"I{i}", description=f"Desc {i}")
             for i in range(4)
         ]
-        mock_completion.return_value = _mock_behavior_list_response(behaviors)
+        mock_completion.return_value = _mock_item_list_response(items)
 
-        strategy = StratifiedStrategy()
-        result = strategy._generate_behaviors_from_dividers(
+        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        result = strategy._generate_items_from_dividers(
             "Test environment",
-            "Divider 1",
-            "Divider 2"
+            ["Divider 1", "Divider 2"],
+            num_items=4
         )
 
         assert len(result) == 4
-        assert len(strategy.behavior_list) == 4
-        call_args = mock_completion.call_args
-        assert call_args.kwargs["response_format"] == BehaviorList
+        assert len(strategy.generated_items) == 4
 
     def test_generate_full_flow(self, mock_completion):
-        behaviors = [
-            Behavior(name=f"B{i}", description=f"Desc {i}")
+        items = [
+            SampleItem(name=f"I{i}", description=f"Desc {i}")
             for i in range(4)
         ]
 
         mock_completion.side_effect = [
             _mock_text_response("Divider 1"),
             _mock_text_response("Divider 2"),
-            _mock_behavior_list_response(behaviors),
+            _mock_item_list_response(items),
         ]
 
-        strategy = StratifiedStrategy()
+        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
         result = strategy.generate("Test environment")
 
         assert len(result) == 4
         assert mock_completion.call_count == 3
 
+    def test_generate_with_custom_num_items(self, mock_completion):
+        items = [
+            SampleItem(name=f"I{i}", description=f"Desc {i}")
+            for i in range(6)
+        ]
+
+        mock_completion.side_effect = [
+            _mock_text_response("Divider 1"),
+            _mock_text_response("Divider 2"),
+            _mock_item_list_response(items),
+        ]
+
+        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        result = strategy.generate("Test environment", num_items=6)
+
+        assert len(result) == 6
+
     def test_list_to_string_empty(self):
-        strategy = StratifiedStrategy()
+        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
         result = strategy._list_to_string([])
         assert result == "None"
 
     def test_list_to_string_with_items(self):
-        strategy = StratifiedStrategy()
+        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
         result = strategy._list_to_string(["Item 1", "Item 2"])
         assert "- Item 1" in result
         assert "- Item 2" in result

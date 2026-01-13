@@ -1,114 +1,127 @@
+#  Copyright (c) ProrokLab.
+#
+#  This source code is licensed under the license found in the
+#  LICENSE file in the root directory of this source tree.
+import random
 import time
+
 import torch
+
 from vmas import make_env
-from pyglet.window import key
+from vmas.simulator.core import Agent
+from vmas.simulator.utils import save_video
 
-def test_manual_control():
-    # Create environment
-    # We use 1 environment for manual control
-    env = make_env(
-        scenario="point_mass_rendezvous",
-        num_envs=1,
-        device="cpu",
-        continuous_actions=True,
-        n_agents=2,
-        mode="PMR-C",
-    )
-    
-    # Reset environment
-    env.reset()
-    
-    # Initialize rendering to create the viewer
-    env.render(mode="human")
-    
-    # Access the viewer window from the environment
-    # If env is wrapped, use env.unwrapped.viewer
-    # If env is not wrapped, use env.viewer
-    if hasattr(env, "unwrapped"):
-        viewer = env.unwrapped.viewer
+
+def _get_deterministic_action(agent: Agent, continuous: bool, env):
+    if continuous:
+        action = -agent.action.u_range_tensor.expand(env.batch_dim, agent.action_size)
     else:
-        viewer = env.viewer
-    
-    if viewer is None:
-        print("Viewer not initialized. Make sure you have a display.")
-        return
+        action = (
+            torch.tensor([1], device=env.device, dtype=torch.long)
+            .unsqueeze(-1)
+            .expand(env.batch_dim, 1)
+        )
+    return action.clone()
 
-    # Dictionary to track key states
-    keys = {
-        "w": False, "a": False, "s": False, "d": False,
-        "up": False, "down": False, "left": False, "right": False
-    }
-    
-    # Key press handler
-    def on_key_press(symbol, modifiers):
-        if symbol == key.W: keys["w"] = True
-        elif symbol == key.S: keys["s"] = True
-        elif symbol == key.A: keys["a"] = True
-        elif symbol == key.D: keys["d"] = True
-        elif symbol == key.UP: keys["up"] = True
-        elif symbol == key.DOWN: keys["down"] = True
-        elif symbol == key.LEFT: keys["left"] = True
-        elif symbol == key.RIGHT: keys["right"] = True
 
-    # Key release handler
-    def on_key_release(symbol, modifiers):
-        if symbol == key.W: keys["w"] = False
-        elif symbol == key.S: keys["s"] = False
-        elif symbol == key.A: keys["a"] = False
-        elif symbol == key.D: keys["d"] = False
-        elif symbol == key.UP: keys["up"] = False
-        elif symbol == key.DOWN: keys["down"] = False
-        elif symbol == key.LEFT: keys["left"] = False
-        elif symbol == key.RIGHT: keys["right"] = False
+def use_vmas_env(
+    render: bool = False,
+    save_render: bool = False,
+    num_envs: int = 32,
+    n_steps: int = 100,
+    random_action: bool = False,
+    device: str = "cpu",
+    scenario_name: str = "point_mass_rendezvous",
+    continuous_actions: bool = True,
+    visualize_render: bool = True,
+    dict_spaces: bool = True,
+    **kwargs,
+):
+    """Example function to use a vmas environment
 
-    # Attach handlers to the viewer window
-    viewer.window.push_handlers(on_key_press, on_key_release)
-    
-    print("Controls:")
-    print("Agent 0: W, A, S, D")
-    print("Agent 1: Arrows")
-    print("Press Ctrl+C to exit")
-    
-    try:
-        while True:
-            # Construct actions
-            # Action shape: (num_envs, action_dim)
-            # For point mass, action is force (2D)
-            
-            # Agent 0 actions (WASD)
-            action_0 = torch.zeros(1, 2)
-            if keys["w"]: action_0[0, 1] += 1.0
-            if keys["s"]: action_0[0, 1] -= 1.0
-            if keys["a"]: action_0[0, 0] -= 1.0
-            if keys["d"]: action_0[0, 0] += 1.0
-            
-            # Agent 1 actions (Arrows)
-            action_1 = torch.zeros(1, 2)
-            if keys["up"]: action_1[0, 1] += 1.0
-            if keys["down"]: action_1[0, 1] -= 1.0
-            if keys["left"]: action_1[0, 0] -= 1.0
-            if keys["right"]: action_1[0, 0] += 1.0
-            
-            actions = [action_0, action_1]
-            
-            # Step environment
-            obs, rews, dones, info = env.step(actions)
-            
-            # Render the environment
-            env.render(mode="human")
-            
-            # Check for done
-            if dones.any():
-                print("Goal reached! Resetting...")
-                env.reset()
-            
-            # Control frame rate
-            time.sleep(0.05)
-            
-    except KeyboardInterrupt:
-        print("\nExiting...")
-    finally:
-        env.close()
+    Args:
+        continuous_actions (bool): Whether the agents have continuous or discrete actions
+        scenario_name (str): Name of scenario
+        device (str): Torch device to use
+        render (bool): Whether to render the scenario
+        save_render (bool):  Whether to save render of the scenario
+        num_envs (int): Number of vectorized environments
+        n_steps (int): Number of steps before returning done
+        random_action (bool): Use random actions or have all agents perform the down action
+        visualize_render (bool, optional): Whether to visualize the render. Defaults to ``True``.
+        dict_spaces (bool, optional): Weather to return obs, rewards, and infos as dictionaries with agent names.
+            By default, they are lists of len # of agents
+        kwargs (dict, optional): Keyword arguments to pass to the scenario
+
+    Returns:
+
+    """
+    assert not (save_render and not render), "To save the video you have to render it"
+
+    env = make_env(
+        scenario=scenario_name,
+        num_envs=num_envs,
+        device=device,
+        continuous_actions=continuous_actions,
+        dict_spaces=dict_spaces,
+        wrapper=None,
+        seed=None,
+        # Environment specific variables
+        **kwargs,
+    )
+
+    frame_list = []  # For creating a gif
+    init_time = time.time()
+    step = 0
+
+    for _ in range(n_steps):
+        step += 1
+        print(f"Step {step}")
+
+        # VMAS actions can be either a list of tensors (one per agent)
+        # or a dict of tensors (one entry per agent with its name as key)
+        # Both action inputs can be used independently of what type of space its chosen
+        dict_actions = random.choice([True, False])
+
+        actions = {} if dict_actions else []
+        for agent in env.agents:
+            if not random_action:
+                action = _get_deterministic_action(agent, continuous_actions, env)
+            else:
+                action = env.get_random_action(agent)
+            if dict_actions:
+                actions.update({agent.name: action})
+            else:
+                actions.append(action)
+
+        obs, rews, dones, info = env.step(actions)
+
+        if render:
+            frame = env.render(
+                mode="rgb_array",
+                agent_index_focus=None,  # Can give the camera an agent index to focus on
+                # visualize_when_rgb=visualize_render,
+            )
+            if save_render:
+                frame_list.append(frame)
+
+    total_time = time.time() - init_time
+    print(
+        f"It took: {total_time}s for {n_steps} steps of {num_envs} parallel environments on device {device} "
+        f"for {scenario_name} scenario."
+    )
+
+    if render and save_render:
+        save_video(scenario_name, frame_list, fps=1 / env.scenario.world.dt)
+
 
 if __name__ == "__main__":
-    test_manual_control()
+    use_vmas_env(
+        scenario_name="point_mass_rendezvous",
+        render=True,
+        save_render=False,
+        random_action=True,
+        continuous_actions=False,
+        # Environment specific
+        n_agents=2,
+    )

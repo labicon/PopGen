@@ -1,4 +1,4 @@
-# Behavior Generation Pipeline
+# Behavior Generation Pipeline (Policy Code)
 
 A multi-stage pipeline for generating, evaluating, and aligning cooperative multi-agent behaviors using Large Language Models (LLMs).
 
