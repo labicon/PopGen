@@ -1,7 +1,7 @@
 ENVIRONMENT_DESCRIPTION = """
 You are in the blue team which consist of two agents. You must coordinate with a teammate to score a ball in football.
 You cannot communicate with your teammate explicitly.
-Opponent red team also consist of 2 agents. 
+Opponent red team also consist of 2 agents.
 Blue team should score a goal by getting the ball into the red team's goal area while preventing the red team from scoring in your goal area.
 
 There are two agents for blue team: Agent 0 and Agent 1.
@@ -197,3 +197,5 @@ def observation_base(
 
     return torch.cat(list(obs.values()), dim=-1)
 """
+
+EGO_VISUAL_DESCRIPTION = "The ego agent is represented as the blue football player with the tag #1."

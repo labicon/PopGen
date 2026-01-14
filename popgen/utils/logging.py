@@ -1,7 +1,10 @@
 import json
 import os
+from typing import Any
+
 import numpy as np
 from PIL import Image
+
 
 def _save_rollout_gif(images, save_path, filename="rollout.gif"):
     # Save images as GIF
@@ -13,27 +16,21 @@ def _save_rollout_gif(images, save_path, filename="rollout.gif"):
         else:
             img_array = img_data
         frames.append(Image.fromarray(img_array.astype(np.uint8)))
-        
+
     if frames:
         frames[0].save(
             os.path.join(save_path, filename),
             save_all=True,
             append_images=frames[1:],
             duration=50,  # Duration between frames in milliseconds
-            loop=0
+            loop=0,
         )
 
-def _save_rollout_data(rollout_data, save_path, num_states: int = 20):
-    # Sample states to save
-    if len(rollout_data) <= num_states:
-        state_indices = np.arange(len(rollout_data))
-    else:
-        state_indices = np.linspace(0, len(rollout_data) - 1, num_states, dtype=int)
-        state_indices = np.unique(state_indices)
 
+def _save_rollout_data(rollout_data, save_path):
     # Save rollout states as jsonl
     with open(os.path.join(save_path, "rollout_data.jsonl"), "w") as f:
-        for idx in state_indices:
+        for idx in range(len(rollout_data)):
             state = rollout_data[idx]
             state["step"] = idx
             # ensure all numpy types are converted to native python types
@@ -42,14 +39,151 @@ def _save_rollout_data(rollout_data, save_path, num_states: int = 20):
                     state[key] = value.item()
             f.write(f"{json.dumps(state)}\n")
 
+
 # TODO: check this
-def save_rollout(rollout_data, images, save_path, num_states: int = 20):
+def save_rollout(rollout_data, images, save_path):
     # Ensure the folder exists
     os.makedirs(save_path, exist_ok=True)
 
     # Save images as GIF
     if len(images) > 0:
-        _save_rollout_gif(images, save_path, filename=f"rollout.gif")
+        _save_rollout_gif(images, save_path, filename="rollout.gif")
 
     # Save rollout data
-    _save_rollout_data(rollout_data, save_path, num_states=num_states)
+    _save_rollout_data(rollout_data, save_path)
+
+
+def uniform_sample(items: list[Any], n_samples: int) -> list[Any]:
+    """
+    Uniformly sample items from a list.
+
+    Args:
+        items: List of items to sample from.
+        n_samples: Maximum number of items to return.
+
+    Returns:
+        List of uniformly sampled items.
+    """
+    if len(items) <= n_samples:
+        return items
+    indices = np.linspace(0, len(items) - 1, n_samples, dtype=int)
+    indices = np.unique(indices)
+    return [items[i] for i in indices]
+
+
+def load_rollout(rollout_path: str, states_samples: int = 20, images_samples: int = 5) -> tuple[list[dict[str, Any]] | None, list[np.ndarray] | None]:
+    """
+    Load rollout data and images from a saved rollout directory.
+
+    Args:
+        rollout_path: Path to the rollout directory (saved by save_rollout).
+        states_samples: Maximum number of states to sample uniformly.
+        images_samples: Maximum number of images to sample uniformly.
+
+    Returns:
+        Tuple of (rollout_data, images) where each is None if not present.
+        - rollout_data: List of state dictionaries (uniformly sampled)
+        - images: List of numpy arrays (uniformly sampled frames from the GIF)
+    """
+    rollout_data = None
+    images = None
+
+    # Load rollout data from JSONL
+    data_path = os.path.join(rollout_path, "rollout_data.jsonl")
+    if os.path.exists(data_path):
+        all_states = []
+        with open(data_path) as f:
+            for line in f:
+                if line.strip():
+                    all_states.append(json.loads(line))
+        rollout_data = uniform_sample(all_states, states_samples)
+
+    # Load images from GIF
+    gif_path = os.path.join(rollout_path, "rollout.gif")
+    if os.path.exists(gif_path):
+        all_frames = []
+        gif = Image.open(gif_path)
+        try:
+            while True:
+                frame = np.array(gif.convert("RGB"))
+                all_frames.append(frame)
+                gif.seek(gif.tell() + 1)
+        except EOFError:
+            pass  # End of frames
+        images = uniform_sample(all_frames, images_samples)
+
+    return rollout_data, images
+
+
+def encode_images_to_base64(images: list[np.ndarray]) -> list[str]:
+    """
+    Encode a list of images (numpy arrays) to base64 strings.
+
+    Args:
+        images: List of images as numpy arrays.
+
+    Returns:
+        List of base64-encoded image strings.
+    """
+    import base64
+    from io import BytesIO
+
+    encoded_images = []
+    for img_array in images:
+        pil_img = Image.fromarray(img_array.astype(np.uint8))
+        buffered = BytesIO()
+        pil_img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        encoded_images.append(img_str)
+
+    return encoded_images
+
+
+def rollout_states_to_str(rollout_data: list[dict[str, Any]]) -> str:
+    """
+    Encode rollout into a string format suitable for LLM consumption.
+
+    Args:
+        rollout_data: List of state dictionaries.
+
+    Returns:
+        A formatted string representation of all rollout states.
+    """
+
+    all_lines = []
+
+    if not rollout_data:
+        return "Empty rollout"
+
+    # all_lines.append(f"Rollout {rollout_idx + 1} ({len(rollout_data)} total steps, showing {len(state_indices)} sampled states):")
+    # all_lines.append("-" * 60)
+
+    for idx, state in enumerate(rollout_data):
+        state_line = f"Step {idx}: "
+
+        # Format each key-value pair in the state
+        state_parts = []
+        for key, value in state.items():
+            if key == "step":
+                continue  # Skip redundant step key
+            # Convert numpy types to native Python types
+            if isinstance(value, np.ndarray):
+                value = value.tolist()
+            elif isinstance(value, np.generic):
+                value = value.item()
+            # Format floats with limited precision
+            if isinstance(value, float):
+                state_parts.append(f"{key}={value:.4f}")
+            elif isinstance(value, list) and all(isinstance(v, (int, float)) for v in value):
+                formatted_list = [f"{v:.4f}" if isinstance(v, float) else str(v) for v in value]
+                state_parts.append(f"{key}=[{', '.join(formatted_list)}]")
+            else:
+                state_parts.append(f"{key}={value}")
+
+        state_line += ", ".join(state_parts)
+        all_lines.append(state_line)
+
+    # all_lines.append("-" * 60)
+    # all_lines.append("")  # Blank line between rollouts
+
+    return "\n".join(all_lines).rstrip()

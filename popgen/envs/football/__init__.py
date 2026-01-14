@@ -1,4 +1,4 @@
-from .prompts import ENVIRONMENT_DESCRIPTION, OBSERVATION_FORMAT
-from .rollout import rollout_behavior
+from .prompts import EGO_VISUAL_DESCRIPTION, ENVIRONMENT_DESCRIPTION, OBSERVATION_FORMAT
+from .rollout import rollout_fn
 
-__ALL__ = ["ENVIRONMENT_DESCRIPTION", "OBSERVATION_FORMAT", "rollout_behavior"]
+__ALL__ = ["ENVIRONMENT_DESCRIPTION", "OBSERVATION_FORMAT", "EGO_VISUAL_DESCRIPTION", "rollout_fn"]

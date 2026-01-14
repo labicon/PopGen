@@ -143,30 +143,8 @@ class TestInContextStrategy:
         strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
         results = strategy.generate("Test environment")
 
-        assert len(results) == 5
-        assert mock_completion.call_count == 5
-
-    def test_generate_single_retries_on_failure(self, mock_completion):
-        mock_completion.side_effect = [
-            Exception("First failure"),
-            Exception("Second failure"),
-            _mock_item_response("Success", "After retry"),
-        ]
-
-        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
-        result = strategy._generate_single("Test environment")
-
-        assert result.name == "Success"
-        assert mock_completion.call_count == 3
-
-    def test_generate_single_raises_after_max_retries(self, mock_completion):
-        mock_completion.side_effect = Exception("Persistent failure")
-
-        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
-        with pytest.raises(Exception, match="Persistent failure"):
-            strategy._generate_single("Test environment")
-
-        assert mock_completion.call_count == 5
+        assert len(results) == 4
+        assert mock_completion.call_count == 4
 
     def test_previous_items_included_in_prompt(self, mock_completion):
         mock_completion.return_value = _mock_item_response("New", "New item")

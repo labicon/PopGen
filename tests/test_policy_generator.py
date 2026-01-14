@@ -1,29 +1,9 @@
+import json
 import pytest
 from unittest.mock import patch, MagicMock
 
-from popgen.population.generation.policy.generator import PolicyGenerator, Policy, PolicyCode
-
-
-class TestPolicyModel:
-    def test_policy_creation(self):
-        policy = Policy(code="def agent0_policy(obs): pass", agent_id=0)
-        assert policy.code == "def agent0_policy(obs): pass"
-        assert policy.agent_id == 0
-
-    def test_policy_from_dict(self):
-        data = {"code": "def agent1_policy(obs): return obs", "agent_id": 1}
-        policy = Policy.model_validate(data)
-        assert policy.agent_id == 1
-        assert "agent1_policy" in policy.code
-
-    def test_policy_to_dict(self):
-        policy = Policy(code="code here", agent_id=0)
-        data = policy.model_dump()
-        assert data == {"code": "code here", "agent_id": 0}
-
-    def test_policy_missing_field_raises(self):
-        with pytest.raises(ValueError):
-            Policy(code="some code")
+from popgen.population.generation.policy_generator import PolicyGenerator, PolicyCode
+from popgen.utils.parsing import clean_code
 
 
 class TestPolicyCodeModel:
@@ -32,10 +12,19 @@ class TestPolicyCodeModel:
         assert "agent0_policy" in policy_code.code
         assert "agent1_policy" in policy_code.code
 
+    def test_policy_code_creation_with_reasoning(self):
+        policy_code = PolicyCode(code="def agent0_policy(obs): pass", reasoning="Some reasoning")
+        assert policy_code.reasoning == "Some reasoning"
+
     def test_policy_code_from_dict(self):
         data = {"code": "def agent0_policy(obs): return obs"}
         policy_code = PolicyCode.model_validate(data)
         assert "agent0_policy" in policy_code.code
+
+    def test_policy_code_to_dict(self):
+        policy_code = PolicyCode(code="code here", reasoning="reasoning here")
+        data = policy_code.model_dump()
+        assert data == {"code": "code here", "reasoning": "reasoning here"}
 
 
 class TestPolicyGenerator:
@@ -47,7 +36,7 @@ class TestPolicyGenerator:
 class TestGenerate:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.generation.policy.generator.litellm.completion") as mock:
+        with patch("popgen.population.generation.policy_generator.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
@@ -61,11 +50,17 @@ class TestGenerate:
     def test_generate_success(self, mock_completion, generator, behavior):
         mock_response_0 = MagicMock()
         mock_response_0.choices = [MagicMock()]
-        mock_response_0.choices[0].message.content = "def agent0_policy(obs):\n    return obs"
+        mock_response_0.choices[0].message.content = json.dumps({
+            "code": "def agent0_policy(obs):\n    return obs",
+            "reasoning": "Move toward target"
+        })
 
         mock_response_1 = MagicMock()
         mock_response_1.choices = [MagicMock()]
-        mock_response_1.choices[0].message.content = "def agent1_policy(obs):\n    return obs"
+        mock_response_1.choices[0].message.content = json.dumps({
+            "code": "def agent1_policy(obs):\n    return obs",
+            "reasoning": "Coordinate with agent0"
+        })
 
         mock_completion.side_effect = [mock_response_0, mock_response_1]
 
@@ -83,7 +78,7 @@ class TestGenerate:
 class TestGenerateStandalonePolicy:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.generation.policy.generator.litellm.completion") as mock:
+        with patch("popgen.population.generation.policy_generator.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
@@ -97,7 +92,10 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_success(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_policy(obs):\n    return obs"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_policy(obs):\n    return obs",
+            "reasoning": "Move aggressively"
+        })
         mock_completion.return_value = mock_response
 
         policy = generator._generate_standalone_policy(
@@ -106,32 +104,17 @@ class TestGenerateStandalonePolicy:
             agent_id=0,
         )
 
-        assert isinstance(policy, Policy)
-        assert policy.agent_id == 0
+        assert isinstance(policy, PolicyCode)
         assert "agent0_policy" in policy.code
         mock_completion.assert_called_once()
-
-    def test_generate_standalone_policy_for_agent1(self, mock_completion, generator, behavior):
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent1_policy(obs):\n    return obs"
-        mock_completion.return_value = mock_response
-
-        policy = generator._generate_standalone_policy(
-            behavior=behavior,
-            observation_format="obs is a tensor",
-            agent_id=1,
-        )
-
-        assert policy.agent_id == 1
-        call_args = mock_completion.call_args
-        messages = call_args.kwargs["messages"]
-        assert "agent1" in messages[0]["content"]
 
     def test_generate_standalone_policy_includes_behavior_in_message(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_policy(obs): pass"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_policy(obs): pass",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         generator._generate_standalone_policy(
@@ -148,7 +131,10 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_includes_observation_format(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_policy(obs): pass"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_policy(obs): pass",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         generator._generate_standalone_policy(
@@ -165,14 +151,17 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_with_feedbacks(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_policy(obs): return fixed"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_policy(obs): return fixed",
+            "reasoning": "Fixed the issue"
+        })
         mock_completion.return_value = mock_response
 
         feedbacks = [
             ("def agent0_policy(obs): return broken", "Agent moved in wrong direction")
         ]
 
-        policy = generator._generate_standalone_policy(
+        generator._generate_standalone_policy(
             behavior=behavior,
             observation_format="obs format",
             agent_id=0,
@@ -189,7 +178,10 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_no_refinement_with_empty_feedbacks(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_policy(obs): pass"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_policy(obs): pass",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         generator._generate_standalone_policy(
@@ -206,7 +198,10 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_no_refinement_with_none_feedbacks(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_policy(obs): pass"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_policy(obs): pass",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         generator._generate_standalone_policy(
@@ -224,7 +219,7 @@ class TestGenerateStandalonePolicy:
 class TestGenerateCoordinatingPolicy:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.generation.policy.generator.litellm.completion") as mock:
+        with patch("popgen.population.generation.policy_generator.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
@@ -242,7 +237,10 @@ class TestGenerateCoordinatingPolicy:
     def test_generate_coordinating_policy(self, mock_completion, generator, agent0_behavior, agent1_behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent1_policy(obs):\n    return coordinate(obs)"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent1_policy(obs):\n    return coordinate(obs)",
+            "reasoning": "Coordinate with leader"
+        })
         mock_completion.return_value = mock_response
 
         agent0_code = "def agent0_policy(obs): return lead(obs)"
@@ -255,14 +253,16 @@ class TestGenerateCoordinatingPolicy:
             partner_policy=agent0_code,
         )
 
-        assert policy.agent_id == 1
         assert "agent1_policy" in policy.code
         mock_completion.assert_called_once()
 
     def test_coordinating_policy_includes_partner_info(self, mock_completion, generator, agent0_behavior, agent1_behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent1_policy(obs): pass"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent1_policy(obs): pass",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         agent0_code = "def agent0_policy(obs): return special_action(obs)"
@@ -285,7 +285,10 @@ class TestGenerateCoordinatingPolicy:
     def test_coordinating_policy_uses_partner_prompt(self, mock_completion, generator, agent0_behavior, agent1_behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent1_policy(obs): pass"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent1_policy(obs): pass",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         generator._generate_coordinating_policy(
@@ -303,31 +306,27 @@ class TestGenerateCoordinatingPolicy:
 
 
 class TestCleanCode:
-    @pytest.fixture
-    def generator(self):
-        return PolicyGenerator(model="openai/gpt-4")
-
-    def test_clean_code_removes_python_markdown(self, generator):
+    def test_clean_code_removes_python_markdown(self):
         code = "```python\ndef func(): pass\n```"
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def func(): pass"
 
-    def test_clean_code_removes_generic_markdown(self, generator):
+    def test_clean_code_removes_generic_markdown(self):
         code = "```\ndef func(): pass\n```"
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def func(): pass"
 
-    def test_clean_code_handles_no_markdown(self, generator):
+    def test_clean_code_handles_no_markdown(self):
         code = "def func(): pass"
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def func(): pass"
 
-    def test_clean_code_strips_whitespace(self, generator):
+    def test_clean_code_strips_whitespace(self):
         code = "  \n def func(): pass \n  "
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def func(): pass"
 
-    def test_clean_code_handles_only_trailing_markdown(self, generator):
+    def test_clean_code_handles_only_trailing_markdown(self):
         code = "def func(): pass\n```"
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def func(): pass"

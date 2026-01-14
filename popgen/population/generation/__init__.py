@@ -1,15 +1,17 @@
+from .base import BaseGenerator
 from .diversity import (
     InContextStrategy,
     StratifiedStrategy,
 )
-from .policy import PolicyGenerator, Policy
-from .reward import RewardFnGenerator, Reward
+from .policy_generator import PolicyCode, PolicyGenerator
+from .reward_generator import Reward, RewardFnGenerator
 
 __all__ = [
+    "BaseGenerator",
     "InContextStrategy",
     "StratifiedStrategy",
     "PolicyGenerator",
-    "Policy",
+    "PolicyCode",
     "RewardFnGenerator",
     "Reward",
 ]

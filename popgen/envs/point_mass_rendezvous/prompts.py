@@ -32,3 +32,5 @@ def observation(self, agent: Agent):
 
     return torch.cat(obs, dim=-1)
 """
+
+EGO_VISUAL_DESCRIPTION = "The ego agent is represented as the red point mass."

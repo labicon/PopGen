@@ -1,0 +1,8 @@
+env: point_mass_rendezvous
+strategy: stratified
+llm_model: openai/gpt-5-mini
+max_behaviors: 5
+max_alignment_retries: 3
+n_eval_rollouts: 1
+n_workers: 4
+output_dir: scripts/behavior_policy/results/example_pm_rdv

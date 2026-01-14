@@ -1,10 +1,3 @@
-import time
-import torch
-import os
-import sys
-import shutil
-import numpy as np
-from PIL import Image
 from vmas import make_env
 
 # def agent0_policy(obs):
@@ -12,6 +5,7 @@ from vmas import make_env
 
 # def agent1_policy(obs):
 #     return torch.tensor([[0.0, 0.0]])
+
 
 def get_state_point_mass_rendezvous(env):
     state = {}
@@ -27,7 +21,8 @@ def get_state_point_mass_rendezvous(env):
 
     return state
 
-def rollout_behavior(agent0_policy: callable, agent1_policy: callable):
+
+def rollout_fn(agent0_policy: callable, agent1_policy: callable):
     # Create environment
     # We use 1 environment for manual control
     max_steps = 200
@@ -59,7 +54,7 @@ def rollout_behavior(agent0_policy: callable, agent1_policy: callable):
             action_1 = agent1_policy(obs[1].squeeze(0))
         except Exception as e:
             return states, images, str(e)
-        
+
         # Step environment
         obs, rews, dones, info = env.step([action_0, action_1])
 

@@ -1,7 +1,9 @@
+import json
 import pytest
 from unittest.mock import patch, MagicMock
 
-from popgen.population.generation.reward.generator import RewardFnGenerator, Reward
+from popgen.population.generation.reward_generator import RewardFnGenerator, Reward
+from popgen.utils.parsing import clean_code
 
 
 class TestRewardModel:
@@ -46,7 +48,7 @@ class TestRewardFnGenerator:
 class TestGenerate:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.generation.reward.generator.litellm.completion") as mock:
+        with patch("popgen.population.generation.reward_generator.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
@@ -64,7 +66,10 @@ class TestGenerate:
     def test_generate_success(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_reward(obs, action, next_obs, done):\n    return 1.0"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_reward(obs, action, next_obs, done):\n    return 1.0",
+            "reasoning": "Reward for moving toward target"
+        })
         mock_completion.return_value = mock_response
 
         reward = generator.generate(
@@ -79,7 +84,10 @@ class TestGenerate:
     def test_generate_includes_behavior_in_message(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_reward(obs, action, next_obs, done): return 0"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_reward(obs, action, next_obs, done): return 0",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         generator.generate(
@@ -95,7 +103,10 @@ class TestGenerate:
     def test_generate_includes_codebase_context_in_system_prompt(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_reward(obs, action, next_obs, done): return 0"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_reward(obs, action, next_obs, done): return 0",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         generator.generate(
@@ -111,14 +122,17 @@ class TestGenerate:
     def test_generate_with_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_reward(obs, action, next_obs, done): return fixed"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_reward(obs, action, next_obs, done): return fixed",
+            "reasoning": "Fixed the issue"
+        })
         mock_completion.return_value = mock_response
 
         feedbacks = [
             ("def agent0_reward(obs, action, next_obs, done): return broken", "IndexError: tensor index out of range")
         ]
 
-        reward = generator.generate(
+        generator.generate(
             behavior=behavior,
             codebase_context=codebase_context,
             feedbacks=feedbacks,
@@ -134,7 +148,10 @@ class TestGenerate:
     def test_generate_with_multiple_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_reward(obs, action, next_obs, done): return fixed"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_reward(obs, action, next_obs, done): return fixed",
+            "reasoning": "Fixed the issues"
+        })
         mock_completion.return_value = mock_response
 
         feedbacks = [
@@ -159,7 +176,10 @@ class TestGenerate:
     def test_generate_no_refinement_with_empty_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_reward(obs, action, next_obs, done): pass"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_reward(obs, action, next_obs, done): pass",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         generator.generate(
@@ -175,7 +195,10 @@ class TestGenerate:
     def test_generate_no_refinement_with_none_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_reward(obs, action, next_obs, done): pass"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_reward(obs, action, next_obs, done): pass",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         generator.generate(
@@ -191,7 +214,10 @@ class TestGenerate:
     def test_generate_uses_correct_model(self, mock_completion, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "def agent0_reward(obs, action, next_obs, done): pass"
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def agent0_reward(obs, action, next_obs, done): pass",
+            "reasoning": "reasoning"
+        })
         mock_completion.return_value = mock_response
 
         generator = RewardFnGenerator(model="custom-model")
@@ -205,47 +231,43 @@ class TestGenerate:
 
 
 class TestCleanCode:
-    @pytest.fixture
-    def generator(self):
-        return RewardFnGenerator(model="openai/gpt-4")
-
-    def test_clean_code_removes_python_markdown(self, generator):
+    def test_clean_code_removes_python_markdown(self):
         code = "```python\ndef agent0_reward(obs, action, next_obs, done): pass\n```"
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def agent0_reward(obs, action, next_obs, done): pass"
 
-    def test_clean_code_removes_generic_markdown(self, generator):
+    def test_clean_code_removes_generic_markdown(self):
         code = "```\ndef agent0_reward(obs, action, next_obs, done): pass\n```"
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def agent0_reward(obs, action, next_obs, done): pass"
 
-    def test_clean_code_handles_no_markdown(self, generator):
+    def test_clean_code_handles_no_markdown(self):
         code = "def agent0_reward(obs, action, next_obs, done): pass"
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def agent0_reward(obs, action, next_obs, done): pass"
 
-    def test_clean_code_strips_whitespace(self, generator):
+    def test_clean_code_strips_whitespace(self):
         code = "  \n def agent0_reward(obs, action, next_obs, done): pass \n  "
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def agent0_reward(obs, action, next_obs, done): pass"
 
-    def test_clean_code_handles_only_trailing_markdown(self, generator):
+    def test_clean_code_handles_only_trailing_markdown(self):
         code = "def agent0_reward(obs, action, next_obs, done): pass\n```"
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def agent0_reward(obs, action, next_obs, done): pass"
 
-    def test_clean_code_handles_only_leading_python_markdown(self, generator):
+    def test_clean_code_handles_only_leading_python_markdown(self):
         code = "```python\ndef agent0_reward(obs, action, next_obs, done): pass"
-        result = generator._clean_code(code)
+        result = clean_code(code)
         assert result == "def agent0_reward(obs, action, next_obs, done): pass"
 
-    def test_clean_code_handles_multiline_code(self, generator):
+    def test_clean_code_handles_multiline_code(self):
         code = """```python
 def agent0_reward(obs, action, next_obs, done):
     distance = obs[0]
     return -distance
 ```"""
-        result = generator._clean_code(code)
+        result = clean_code(code)
         expected = """def agent0_reward(obs, action, next_obs, done):
     distance = obs[0]
     return -distance"""

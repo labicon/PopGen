@@ -1,15 +1,14 @@
-from typing import List, Any, Type, TypeVar
-from pydantic import BaseModel, create_model
+from typing import Any, TypeVar
+
 import litellm
+from pydantic import BaseModel, create_model
 
 from .base import GenerationStrategy
-
 
 T = TypeVar("T", bound=BaseModel)
 
 
-DIVIDER_GENERATION_PROMPT = \
-"""You are analyzing a multi-agent environment to identify key strategic dimensions that differentiate player {item_type}.
+DIVIDER_GENERATION_PROMPT = """You are analyzing a multi-agent environment to identify key strategic dimensions that differentiate player {item_type}.
 
 Environment Description:
 {environment_description}
@@ -26,8 +25,7 @@ Identify a NEW strategic dimension (divider) that could meaningfully partition t
 
 Respond with just the divider description (e.g. for player behavior, "Risk tolerance: conservative vs aggressive" or "Cooperation level: selfish vs altruistic")."""
 
-GENERATION_PROMPT = \
-"""You are designing diverse player {item_type} for a multi-agent environment.
+GENERATION_PROMPT = """You are designing diverse player {item_type} for a multi-agent environment.
 
 Environment Description:
 {environment_description}
@@ -38,7 +36,7 @@ Item Description:
 Strategic dividers to consider:
 {dividers}
 
-Generate a diverse set of player {item_type} that span the strategic space defined by these dividers. 
+Generate a diverse set of player {item_type} that span the strategic space defined by these dividers.
 
 Generate exactly {num_items} distinct {item_type}."""
 
@@ -46,10 +44,10 @@ Generate exactly {num_items} distinct {item_type}."""
 class StratifiedStrategy(GenerationStrategy):
     """Generate diverse items by first identifying strategic dividers, then sampling from partitions."""
 
-    def __init__(self, model: str, output_type: Type[T]):
+    def __init__(self, model: str, output_type: type[T]):
         super().__init__(model, output_type)
 
-    def generate(self, environment_description: str, **kwargs: Any) -> List[T]:
+    def generate(self, environment_description: str, **kwargs: Any) -> list[T]:
         """
         Generate items by first identifying strategic dividers and then sampling from partitions.
         """
@@ -64,12 +62,12 @@ class StratifiedStrategy(GenerationStrategy):
 
         return items
 
-    def _generate_single_divider(self, environment_description: str, existing_dividers: List[str]) -> str:
+    def _generate_single_divider(self, environment_description: str, existing_dividers: list[str]) -> str:
         prompt = DIVIDER_GENERATION_PROMPT.format(
             environment_description=environment_description,
             existing_dividers=self._list_to_string(existing_dividers),
             item_type=self.output_type.__name__,
-            item_description=self.output_type.__doc__
+            item_description=self.output_type.__doc__,
         )
 
         response = litellm.completion(
@@ -79,7 +77,7 @@ class StratifiedStrategy(GenerationStrategy):
 
         return response.choices[0].message.content.strip()
 
-    def _generate_items_from_dividers(self, environment_description: str, dividers: List[str], num_items: int) -> List[T]:
+    def _generate_items_from_dividers(self, environment_description: str, dividers: list[str], num_items: int) -> list[T]:
         prompt = GENERATION_PROMPT.format(
             environment_description=environment_description,
             dividers=self._list_to_string(dividers),
@@ -91,7 +89,7 @@ class StratifiedStrategy(GenerationStrategy):
         # generate list response format dynamically based on output_type
         list_response_format = create_model(
             f"{self.output_type.__name__}List",
-            items=(List[self.output_type], ...),
+            items=(list[self.output_type], ...),
         )
 
         response = litellm.completion(

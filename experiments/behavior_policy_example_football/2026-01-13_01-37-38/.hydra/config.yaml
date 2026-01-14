@@ -1,6 +1,0 @@
-strategy: stratified
-env: football
-llm_model: openai/gpt-5-nano
-max_behaviors: 5
-max_alignment_retries: 5
-output_dir: experiments/behavior_policy_example_football

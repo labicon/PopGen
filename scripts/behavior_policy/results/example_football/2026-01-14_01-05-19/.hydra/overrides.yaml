@@ -1,0 +1,3 @@
+- output_dir=scripts/behavior_policy/results/example_football
+- n_eval_rollouts=1
+- n_workers=4

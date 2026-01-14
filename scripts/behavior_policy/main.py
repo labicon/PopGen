@@ -6,6 +6,7 @@ import importlib
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
+from pqdm.processes import pqdm
 
 from popgen.population import (
     FeedbackGenerationPipeline,
@@ -32,6 +33,41 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _process_behavior_worker(args):
+    """Module-level worker function for parallel processing."""
+    idx, behavior_dict, env_name, llm_model, extended_output_dir, max_alignment_retries, policy_generator_kwargs, evaluation_kwargs = args
+
+    # Reconstruct objects in this process
+    behavior = Behavior.model_validate(behavior_dict)
+    env = importlib.import_module(f"popgen.envs.{env_name}")
+    rollout_fn = env.rollout_fn
+
+    policy_generator = PolicyGenerator(model=llm_model)
+    evaluator = BehaviorEvaluator(model=llm_model)
+
+    agent_generation_pipeline = FeedbackGenerationPipeline(
+        generator=policy_generator,
+        evaluator=evaluator,
+        rollout_fn=rollout_fn,
+        output_dir=extended_output_dir,
+    )
+
+    logging.info(f"Processing Behavior [{idx}]: {behavior.name}")
+    success, eval_data = agent_generation_pipeline(
+        behavior=behavior,
+        behavior_index=idx,
+        num_attempts=max_alignment_retries,
+        generation_kwargs=policy_generator_kwargs,
+        evaluation_kwargs=evaluation_kwargs,
+    )
+    return {
+        "behavior": behavior.name,
+        "success": success,
+        "attempts": eval_data.get("generation", {}).get("attempts", 0),
+        "details": eval_data,
+    }
+
+
 def run_behavior_pipeline(cfg: DictConfig):
     """Runs the full behavior generation, policy generation, rollout, and evaluation pipeline."""
     # ----------- Configuration ----------- #
@@ -55,7 +91,8 @@ def run_behavior_pipeline(cfg: DictConfig):
     env = importlib.import_module(f"popgen.envs.{cfg.env}")
     env_description = env.ENVIRONMENT_DESCRIPTION
     observation_format = env.OBSERVATION_FORMAT
-    rollout_fn = env.rollout_behavior
+    ego_visual_description = env.EGO_VISUAL_DESCRIPTION
+    rollout_fn = env.rollout_fn
 
     # Initialize generators
     if cfg.strategy == "in_context":
@@ -64,15 +101,13 @@ def run_behavior_pipeline(cfg: DictConfig):
         behavior_generator = StratifiedStrategy(model=cfg.llm_model, output_type=Behavior)
     else:
         raise ValueError(f"Unknown strategy: {cfg.strategy}")
-    policy_generator = PolicyGenerator(model=cfg.llm_model)
+
     policy_generator_kwargs = {"observation_format": observation_format}
-    evaluator = BehaviorEvaluator(model=cfg.llm_model)
-    agent_generation_pipeline = FeedbackGenerationPipeline(
-        generator=policy_generator,
-        evaluator=evaluator,
-        rollout_fn=rollout_fn,
-        output_dir=extended_output_dir,
-    )
+    evaluation_kwargs = {
+        "ego_visual_description": ego_visual_description,
+        "ego_name": "agent0",
+        "n_rollouts": cfg.n_eval_rollouts,
+    }
 
     # ------------------ Generate Behavior ------------- #
 
@@ -113,25 +148,44 @@ def run_behavior_pipeline(cfg: DictConfig):
 
     logging.info("")
     logging.info("STAGE 2: Policy Generation & Evaluation")
+    logging.info(f"Processing {len(behaviors)} behaviors with {cfg.n_workers} worker(s)")
     logging.info("-" * 40)
 
-    results_summary = []
-
-    for idx, behavior in enumerate(behaviors):
-        logging.info(f"Processing Behavior [{idx}]: {behavior.name}")
-        success, eval_data = agent_generation_pipeline(
-            behavior=behavior,
-            behavior_index=idx,
-            num_attempts=cfg.max_alignment_retries,
-            **policy_generator_kwargs
+    if cfg.n_workers > 1:
+        # Prepare args for parallel processing (must be picklable)
+        behavior_args = [
+            (idx, behavior.model_dump(), cfg.env, cfg.llm_model, extended_output_dir,
+             cfg.max_alignment_retries, policy_generator_kwargs, evaluation_kwargs)
+            for idx, behavior in enumerate(behaviors)
+        ]
+        results_summary = pqdm(behavior_args, _process_behavior_worker, n_jobs=cfg.n_workers, disable=True)
+    else:
+        # Sequential processing
+        policy_generator = PolicyGenerator(model=cfg.llm_model)
+        evaluator = BehaviorEvaluator(model=cfg.llm_model)
+        agent_generation_pipeline = FeedbackGenerationPipeline(
+            generator=policy_generator,
+            evaluator=evaluator,
+            rollout_fn=rollout_fn,
+            output_dir=extended_output_dir,
         )
 
-        results_summary.append({
-            "behavior": behavior.name,
-            "success": success,
-            "attempts": idx + 1,
-            "details": eval_data,
-        })
+        results_summary = []
+        for idx, behavior in enumerate(behaviors):
+            logging.info(f"Processing Behavior [{idx}]: {behavior.name}")
+            success, eval_data = agent_generation_pipeline(
+                behavior=behavior,
+                behavior_index=idx,
+                num_attempts=cfg.max_alignment_retries,
+                generation_kwargs=policy_generator_kwargs,
+                evaluation_kwargs=evaluation_kwargs,
+            )
+            results_summary.append({
+                "behavior": behavior.name,
+                "success": success,
+                "attempts": eval_data.get("generation", {}).get("attempts", 0),
+                "details": eval_data,
+            })
 
     # ----------------- Summary ------------ #
 

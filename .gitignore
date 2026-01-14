@@ -1,6 +1,5 @@
 # Project specific
-/LLM_diversity/results/*
-scripts/behavior_generation/results/
+experiments/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

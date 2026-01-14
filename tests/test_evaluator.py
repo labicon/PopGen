@@ -1,13 +1,15 @@
 import pytest
+import numpy as np
 from unittest.mock import patch, MagicMock
 
 from popgen.population import (
-    BehaviorEvaluator, 
+    BehaviorEvaluator,
     EvaluationResult,
     Behavior
 )
 
-class TestBehaviorEvaluationModel:
+
+class TestEvaluationResultModel:
     def test_evaluation_creation(self):
         evaluation = EvaluationResult(evaluation=True, reasoning="Agent followed behavior")
         assert evaluation.evaluation is True
@@ -30,15 +32,6 @@ class TestBehaviorEvaluationModel:
 
 
 class TestBehaviorEvaluator:
-    @pytest.fixture
-    def mock_completion(self):
-        with patch("popgen.population.evaluator.litellm.completion") as mock:
-            yield mock
-
-    @pytest.fixture
-    def evaluator(self):
-        return BehaviorEvaluator(model="gpt-5-nano")
-
     def test_init_custom_model(self):
         evaluator = BehaviorEvaluator(model="gpt-4-turbo")
         assert evaluator.model == "gpt-4-turbo"
@@ -54,7 +47,7 @@ def _mock_evaluation_response(evaluation: bool, reasoning: str) -> MagicMock:
     return mock_response
 
 
-class TestEvaluateTrajectory:
+class TestEvaluateRollouts:
     @pytest.fixture
     def mock_completion(self):
         with patch("popgen.population.evaluator.litellm.completion") as mock:
@@ -64,174 +57,178 @@ class TestEvaluateTrajectory:
     def evaluator(self):
         return BehaviorEvaluator(model="gpt-5-nano")
 
-    def test_evaluate_trajectory_with_behavior_object(self, mock_completion, evaluator):
+    @pytest.fixture
+    def sample_rollout_states(self):
+        return [[{"position": [0, 0], "velocity": [1, 0]}, {"position": [1, 0], "velocity": [1, 0]}]]
+
+    @pytest.fixture
+    def sample_rollout_images(self):
+        return [[np.zeros((64, 64, 3), dtype=np.uint8)]]
+
+    def test_evaluate_rollouts_with_behavior_object(self, mock_completion, evaluator, sample_rollout_states):
         mock_completion.return_value = _mock_evaluation_response(True, "Followed correctly")
 
         behavior = Behavior(name="Test", description="Test behavior")
-        result = evaluator.evaluate_trajectory("trajectory data", behavior)
+        result = evaluator.evaluate_rollouts(
+            behavior=behavior,
+            ego_name="Agent1",
+            ego_visual_description="A red circle",
+            rollouts_states=sample_rollout_states,
+        )
 
         assert result.evaluation is True
         assert result.reasoning == "Followed correctly"
         mock_completion.assert_called_once()
 
-    def test_evaluate_trajectory_with_dict(self, mock_completion, evaluator):
+    def test_evaluate_rollouts_without_images(self, mock_completion, evaluator, sample_rollout_states):
         mock_completion.return_value = _mock_evaluation_response(False, "Did not follow")
 
-        behavior = {"name": "Test", "description": "Test behavior"}
-        result = evaluator.evaluate_trajectory("trajectory data", behavior)
+        behavior = Behavior(name="Test", description="Test behavior")
+        result = evaluator.evaluate_rollouts(
+            behavior=behavior,
+            ego_name="Agent1",
+            ego_visual_description="A red circle",
+            rollouts_states=sample_rollout_states,
+            rollouts_images=None,
+        )
 
         assert result.evaluation is False
         assert result.reasoning == "Did not follow"
 
-    def test_evaluate_trajectory_includes_behavior_in_prompt(self, mock_completion, evaluator):
+    def test_evaluate_rollouts_includes_behavior_in_prompt(self, mock_completion, evaluator, sample_rollout_states):
         mock_completion.return_value = _mock_evaluation_response(True, "OK")
 
         behavior = Behavior(name="Aggressive", description="Always attacks first")
-        evaluator.evaluate_trajectory("some trajectory", behavior)
+        evaluator.evaluate_rollouts(
+            behavior=behavior,
+            ego_name="Attacker",
+            ego_visual_description="A red triangle",
+            rollouts_states=sample_rollout_states,
+        )
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
         user_content = messages[1]["content"]
-        assert "Aggressive" in user_content
-        assert "Always attacks first" in user_content
-        assert "some trajectory" in user_content
 
-    def test_evaluate_trajectory_retries_on_failure(self, mock_completion, evaluator):
-        mock_completion.side_effect = [
-            Exception("First failure"),
-            Exception("Second failure"),
-            _mock_evaluation_response(True, "Success after retry"),
-        ]
+        # user_content is a list of content blocks
+        text_content = "".join(
+            block["text"] for block in user_content if block["type"] == "text"
+        )
+        assert "Aggressive" in text_content
+        assert "Always attacks first" in text_content
 
-        behavior = Behavior(name="Test", description="Test")
-        result = evaluator.evaluate_trajectory("trajectory", behavior)
-
-        assert result.evaluation is True
-        assert mock_completion.call_count == 3
-
-    def test_evaluate_trajectory_returns_failure_after_max_retries(self, mock_completion, evaluator):
-        mock_completion.side_effect = Exception("Persistent failure")
-
-        behavior = Behavior(name="Test", description="Test")
-        result = evaluator.evaluate_trajectory("trajectory", behavior)
-
-        assert result.evaluation is False
-        assert "Evaluation failed" in result.reasoning
-        assert mock_completion.call_count == 5
-
-    def test_evaluate_trajectory_uses_correct_response_format(self, mock_completion, evaluator):
+    def test_evaluate_rollouts_uses_correct_response_format(self, mock_completion, evaluator, sample_rollout_states):
         mock_completion.return_value = _mock_evaluation_response(True, "OK")
 
         behavior = Behavior(name="Test", description="Test")
-        evaluator.evaluate_trajectory("trajectory", behavior)
+        evaluator.evaluate_rollouts(
+            behavior=behavior,
+            ego_name="Agent1",
+            ego_visual_description="A circle",
+            rollouts_states=sample_rollout_states,
+        )
 
         call_args = mock_completion.call_args
         assert call_args.kwargs["response_format"] == EvaluationResult
 
+    def test_evaluate_rollouts_returns_failure_on_exception(self, mock_completion, evaluator, sample_rollout_states):
+        mock_completion.side_effect = Exception("API error")
 
-class TestEvaluateTrajectoryAndImages:
+        behavior = Behavior(name="Test", description="Test")
+        result = evaluator.evaluate_rollouts(
+            behavior=behavior,
+            ego_name="Agent1",
+            ego_visual_description="A circle",
+            rollouts_states=sample_rollout_states,
+        )
+
+        assert result.evaluation is False
+        assert "Evaluation failed" in result.reasoning
+
+
+class TestEvaluateRolloutsWithImages:
     @pytest.fixture
     def mock_completion(self):
         with patch("popgen.population.evaluator.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
-    def mock_encode_image(self):
-        with patch("popgen.population.evaluator.encode_image") as mock:
-            mock.return_value = "base64encodedimage"
-            yield mock
-
-    @pytest.fixture
-    def mock_encode_gif(self):
-        with patch("popgen.population.evaluator.encode_gif") as mock:
-            mock.return_value = ["frame1", "frame2"]
+    def mock_encode_images(self):
+        with patch("popgen.population.evaluator.encode_images_to_base64") as mock:
+            mock.return_value = ["base64encodedimage"]
             yield mock
 
     @pytest.fixture
     def evaluator(self):
         return BehaviorEvaluator(model="gpt-5-nano")
 
-    def test_evaluate_with_images_success(self, mock_completion, mock_encode_image, evaluator):
+    @pytest.fixture
+    def sample_rollout_states(self):
+        return [[{"position": [0, 0]}, {"position": [1, 0]}]]
+
+    @pytest.fixture
+    def sample_rollout_images(self):
+        return [[np.zeros((64, 64, 3), dtype=np.uint8)]]
+
+    def test_evaluate_with_images_success(self, mock_completion, mock_encode_images, evaluator, sample_rollout_states, sample_rollout_images):
         mock_completion.return_value = _mock_evaluation_response(True, "Visual confirms behavior")
 
         behavior = Behavior(name="Test", description="Test behavior")
-        result = evaluator.evaluate_trajectory_and_images(
-            "trajectory data",
-            ["/path/to/image.png"],
-            behavior
+        result = evaluator.evaluate_rollouts(
+            behavior=behavior,
+            ego_name="Agent1",
+            ego_visual_description="A red circle",
+            rollouts_states=sample_rollout_states,
+            rollouts_images=sample_rollout_images,
         )
 
         assert result.evaluation is True
         assert result.reasoning == "Visual confirms behavior"
-        mock_encode_image.assert_called_once_with("/path/to/image.png")
+        mock_encode_images.assert_called_once()
 
-    def test_evaluate_with_multiple_images(self, mock_completion, mock_encode_image, evaluator):
-        mock_encode_image.return_value = "encoded"
+    def test_evaluate_with_images_includes_images_in_content(self, mock_completion, mock_encode_images, evaluator, sample_rollout_states, sample_rollout_images):
+        mock_encode_images.return_value = ["base64data"]
         mock_completion.return_value = _mock_evaluation_response(True, "OK")
 
         behavior = Behavior(name="Test", description="Test")
-        evaluator.evaluate_trajectory_and_images(
-            "trajectory",
-            ["/path/1.png", "/path/2.png", "/path/3.png"],
-            behavior
+        evaluator.evaluate_rollouts(
+            behavior=behavior,
+            ego_name="Agent1",
+            ego_visual_description="A circle",
+            rollouts_states=sample_rollout_states,
+            rollouts_images=sample_rollout_images,
         )
-
-        assert mock_encode_image.call_count == 3
-
-    def test_evaluate_with_images_includes_images_in_content(self, mock_completion, mock_encode_image, evaluator):
-        mock_encode_image.return_value = "base64data"
-        mock_completion.return_value = _mock_evaluation_response(True, "OK")
-
-        behavior = Behavior(name="Test", description="Test")
-        evaluator.evaluate_trajectory_and_images("trajectory", ["/path/img.png"], behavior)
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
         user_content = messages[1]["content"]
 
         assert isinstance(user_content, list)
-        assert user_content[0]["type"] == "text"
-        assert user_content[1]["type"] == "image_url"
-        assert "base64data" in user_content[1]["image_url"]["url"]
+        image_entries = [c for c in user_content if c["type"] == "image_url"]
+        assert len(image_entries) == 1
+        assert "base64data" in image_entries[0]["image_url"]["url"]
 
-    def test_evaluate_with_gif_uses_encode_gif(self, mock_completion, mock_encode_gif, evaluator):
-        mock_encode_gif.return_value = ["frame1", "frame2", "frame3"]
+    def test_evaluate_with_multiple_rollouts(self, mock_completion, mock_encode_images, evaluator):
+        mock_encode_images.return_value = ["img1", "img2"]
         mock_completion.return_value = _mock_evaluation_response(True, "OK")
 
-        behavior = Behavior(name="Test", description="Test")
-        evaluator.evaluate_trajectory_and_images("trajectory", ["/path/rollout.gif"], behavior)
-
-        mock_encode_gif.assert_called_once_with("/path/rollout.gif")
-
-        call_args = mock_completion.call_args
-        messages = call_args.kwargs["messages"]
-        user_content = messages[1]["content"]
-
-        image_entries = [c for c in user_content if c["type"] == "image_url"]
-        assert len(image_entries) == 3
-
-    def test_evaluate_with_images_returns_failure_on_encode_error(self, mock_encode_image, evaluator):
-        mock_encode_image.side_effect = Exception("Cannot read image")
-
-        behavior = Behavior(name="Test", description="Test")
-        result = evaluator.evaluate_trajectory_and_images(
-            "trajectory",
-            ["/bad/path.png"],
-            behavior
-        )
-
-        assert result.evaluation is False
-        assert "Failed to read images" in result.reasoning
-
-    def test_evaluate_with_images_retries_on_completion_failure(self, mock_completion, mock_encode_image, evaluator):
-        mock_encode_image.return_value = "encoded"
-        mock_completion.side_effect = [
-            Exception("API error"),
-            _mock_evaluation_response(True, "Success after retry"),
+        rollouts_states = [
+            [{"step": 0}, {"step": 1}],
+            [{"step": 0}, {"step": 1}],
+        ]
+        rollouts_images = [
+            [np.zeros((64, 64, 3), dtype=np.uint8), np.zeros((64, 64, 3), dtype=np.uint8)],
+            [np.zeros((64, 64, 3), dtype=np.uint8), np.zeros((64, 64, 3), dtype=np.uint8)],
         ]
 
         behavior = Behavior(name="Test", description="Test")
-        result = evaluator.evaluate_trajectory_and_images("trajectory", ["/path/img.png"], behavior)
+        result = evaluator.evaluate_rollouts(
+            behavior=behavior,
+            ego_name="Agent1",
+            ego_visual_description="A circle",
+            rollouts_states=rollouts_states,
+            rollouts_images=rollouts_images,
+        )
 
         assert result.evaluation is True
-        assert mock_completion.call_count == 2
+        assert mock_encode_images.call_count == 2  # Once per rollout

@@ -1,10 +1,5 @@
 import time
-import torch
-import os
-import sys
-import shutil
-import numpy as np
-from PIL import Image
+
 from vmas import make_env
 
 # def agent0_policy(obs):
@@ -12,6 +7,7 @@ from vmas import make_env
 
 # def agent1_policy(obs):
 #     return torch.tensor([[0.0, 0.0]])
+
 
 def get_state_football(env):
     state = {}
@@ -44,7 +40,8 @@ def get_state_football(env):
 
     return state
 
-def rollout_behavior(agent0_policy: callable, agent1_policy: callable):
+
+def rollout_fn(agent0_policy: callable, agent1_policy: callable):
     # Create environment
     # We use 1 environment for manual control
     max_steps = 200
