@@ -31,8 +31,7 @@ def _mock_item_list_response(items: list[SampleItem]) -> MagicMock:
     mock_response.choices = [MagicMock()]
     # Create dynamic list model
     from pydantic import create_model
-    from typing import List
-    list_model = create_model("SampleItemList", items=(List[SampleItem], ...))
+    list_model = create_model("SampleItemList", items=(list[SampleItem], ...))
     mock_response.choices[0].message.content = list_model(items=items).model_dump_json()
     return mock_response
 

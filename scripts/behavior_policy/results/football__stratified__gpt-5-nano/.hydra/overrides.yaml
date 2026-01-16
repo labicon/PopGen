@@ -1,0 +1,5 @@
+- output_dir=scripts/behavior_policy/results
+- env=football
+- n_eval_rollouts=3
+- n_workers=12
+- max_alignment_retries=1

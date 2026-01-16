@@ -1,5 +1,0 @@
-- output_dir=scripts/behavior_policy/results/example_football
-- env=football
-- n_eval_rollouts=3
-- n_workers=4
-- strategy=in_context

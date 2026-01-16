@@ -1,25 +1,43 @@
 # Behavior Generation Pipeline (Policy Code)
 
-A multi-stage pipeline for generating, evaluating, and aligning cooperative multi-agent behaviors using Large Language Models (LLMs).
+A multi-stage pipeline for generating, evaluating, and aligning cooperative multi-agent behaviors using LLMs.
 
 ## Overview
 
-This pipeline automatically generates diverse cooperative behaviors for multi-agent environments, synthesizes corresponding policies using LLMs, executes rollouts, and evaluates whether the policies align with the intended behaviors. The system iteratively refines policies until they successfully demonstrate the target behaviors.
+This pipeline generates diverse behaviors for a multi-agent environment, synthesizes Python policies with an LLM, runs rollouts, and evaluates alignment between intended and observed behavior. Misaligned policies are iteratively refined with feedback until they pass or the retry budget is exhausted.
 
 ## Features
 
-- **Behavior Generation**: Two strategies for generating diverse cooperative behaviors
+- **Behavior Generation**: Two strategies
   - `in_context`: Context-based behavior generation
   - `stratified`: Stratified sampling across behavior dimensions
-- **Policy Synthesis**: LLM-powered policy code generation for cooperative agents
-- **Automated Rollout**: Execute policies in simulation and capture trajectories
-- **Evaluation**: Vision-language model evaluation of behavior alignment using images and states
-- **Iterative Refinement**: Automatic retry with feedback for misaligned behaviors
+- **Policy Synthesis**: LLM-generated policy code for cooperative agents
+- **Automated Rollouts**: Execute policies and capture trajectories
+- **Evaluation**: Vision-language model evaluation using images and states
+- **Iterative Refinement**: Retry with feedback for misaligned behaviors
 - **Caching**: Save and reuse generated behaviors across runs
+
+## Quickstart
+
+From the repo root:
+
+```bash
+# Run with default configuration
+python scripts/behavior_policy/main.py
+
+# Override configuration parameters
+python scripts/behavior_policy/main.py env=point_mass_rendezvous strategy=in_context
+
+# Change model
+python scripts/behavior_policy/main.py llm_model=anthropic/claude-3-opus
+
+# Increase retry limits
+python scripts/behavior_policy/main.py max_alignment_retries=5
+```
 
 ## Configuration
 
-The pipeline uses Hydra for configuration management. Configuration file is located in `cfg/config.yaml`:
+The pipeline uses Hydra for configuration management. Default configuration is in `scripts/behavior_policy/cfg/config.yaml`:
 
 ```yaml
 # Environment selection
@@ -53,25 +71,7 @@ output_dir: ./results
 | `n_workers` | Number of parallel workers for behavior processing (default: 1) |
 | `output_dir` | Root directory for pipeline outputs |
 
-## Usage
-
-### Basic Usage
-
-```bash
-# Run with default configuration
-python main.py
-
-# Override configuration parameters
-python main.py env=point_mass_rendezvous strategy=in_context
-
-# Change model
-python main.py llm_model=anthropic/claude-3-opus
-
-# Increase retry limits
-python main.py max_alignment_retries=5
-```
-
-### Environment Requirements
+## Environment Requirements
 
 Each environment module in `popgen/envs/<env_name>/` must provide:
 
@@ -88,11 +88,11 @@ See [Adding a New Environment](../../docs/add_env.md) for detailed instructions.
 
 ### Stage 1: Behavior Generation
 
-Generates a diverse set of cooperative behaviors based on the environment description.
+Generates a diverse set of cooperative behaviors from the environment description.
 
 **Outputs:**
 - `behaviors.json`: List of generated behaviors with names and descriptions
-- Cached and reused if file exists
+- Cached and reused if the file exists
 
 **Example Behavior:**
 ```json
@@ -102,20 +102,20 @@ Generates a diverse set of cooperative behaviors based on the environment descri
 }
 ```
 
-### Stage 2: Policy Generation & Evaluation
+### Stage 2: Policy Generation and Evaluation
 
 For each behavior, iteratively:
-1. **Generate Policy**: LLM generates Python code for agent policies
+1. **Generate Policy**: LLM generates Python policy code
 2. **Run Rollouts**: Execute policies in simulation (configurable number of rollouts)
-3. **Evaluate**: Vision-language model assesses behavior alignment using images and states
+3. **Evaluate**: Vision-language model assesses alignment using images and states
 4. **Refine**: If misaligned, retry with feedback
 
 **Outputs per behavior:**
 ```
 behavior_<idx>/
   attempt_<n>/
-    policy.py             # Generated policy code
-    evaluation.json       # Evaluation results with reasoning
+    policy.py              # Generated policy code
+    evaluation.json        # Evaluation results with reasoning
     rollouts/
       rollout_0/
         rollout_data.jsonl  # Sampled trajectory states
@@ -127,8 +127,9 @@ behavior_<idx>/
 ## Output Structure
 
 ```
-results/
-  <env>__<strategy>__<model>/
+<output_dir>/
+  <run_name>/
+    summary.json
     behaviors.json
     behavior_0/
       attempt_0/
@@ -143,23 +144,14 @@ results/
       ...
 ```
 
-## Log Format
+### Output Files (Examples)
 
-Logs use a structured prefix format for tracking progress:
-
-```
-[B=0 | A=1] Message
- │     └─ Alignment attempt index
- └─ Behavior index
-```
-
-**Example:**
-```
-[B=2 | A=0] Generating policy...
-[B=2 | A=0] Running rollout (1/3)...
-[B=2 | A=0] Evaluating rollout...
-[B=2 | A=0] SUCCESS – Alignment succeeded on attempt 1
-```
+- `summary.json`: Run-level rollup (counts, latencies, per-attempt success map).
+  - Example fields: `n_behaviors`, `n_succeeded`, `n_attempts`, `avg_latencies`, `total_latencies`, `behavior_steps_to_success`, `attempt_summaries`.
+- `evaluation.json`: Per-attempt evaluation metrics and reasoning from the judge model.
+  - Example fields: `instance_metrics`, `overall_metrics`, `metadata`.
+- `rollout_data.jsonl`: One JSON object per step with state features (positions, velocities, ball/goal info, step index).
+  - Example keys: `blue_agent0_pos`, `blue_agent0_vel`, `red_agent0_pos`, `ball_pos`, `goal_pos`, `step`.
 
 ## Error Handling
 
@@ -171,47 +163,12 @@ The pipeline includes robust error handling:
 
 ## Examples
 
-### Generate behaviors for point mass environment
-
 ```bash
-python main.py env=point_mass_rendezvous strategy=in_context
+python scripts/behavior_policy/main.py env=point_mass_rendezvous strategy=in_context
+python scripts/behavior_policy/main.py strategy=stratified llm_model=openai/gpt-4o
+python scripts/behavior_policy/main.py n_eval_rollouts=3 max_alignment_retries=5
+python scripts/behavior_policy/main.py n_workers=4
 ```
-
-### Use stratified strategy with GPT-4o
-
-```bash
-python main.py strategy=stratified llm_model=openai/gpt-4o
-```
-
-### Run multiple evaluation rollouts
-
-```bash
-python main.py n_eval_rollouts=3 max_alignment_retries=5
-```
-
-### Run with parallel workers
-
-```bash
-python main.py n_workers=4
-```
-
-## Extending
-
-### Adding a New Environment
-
-See the detailed guide: [Adding a New Environment](../../docs/add_env.md)
-
-Quick steps:
-1. Create `popgen/envs/<env_name>/` folder
-2. Implement `prompts.py` with `ENVIRONMENT_DESCRIPTION`, `OBSERVATION_FORMAT`, `EGO_VISUAL_DESCRIPTION`
-3. Implement `rollout.py` with `rollout_fn()`
-4. Create `__init__.py` exporting all components
-
-### Adding a New Generation Strategy
-
-1. Implement strategy class inheriting from base strategy
-2. Override `generate()` method
-3. Register in `main.py` strategy selection
 
 ## Troubleshooting
 
@@ -219,7 +176,7 @@ Quick steps:
 - **Solution**: Delete `results/<run_id>/behaviors.json` to force regeneration
 
 **Issue**: LLM API errors
-- **Solution**: Check `.env` file for valid API keys (e.g., `OPENAI_API_KEY`)
+- **Solution**: Check `.env` for valid API keys (e.g., `OPENAI_API_KEY`)
 
 **Issue**: Alignment failures persist
 - **Solution**: Increase `max_alignment_retries` or simplify behavior descriptions

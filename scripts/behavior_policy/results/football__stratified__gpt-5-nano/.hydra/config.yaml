@@ -1,0 +1,11 @@
+env: football
+strategy: stratified
+llm_model: openai/gpt-5-nano
+max_behaviors: 5
+max_alignment_retries: 1
+n_eval_rollouts: 3
+adherence_threshold: 1.0
+n_workers: 12
+align: true
+output_dir: scripts/behavior_policy/results
+run_name: ${env}__${strategy}__${basename:${llm_model}}
