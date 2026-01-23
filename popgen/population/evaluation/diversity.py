@@ -125,7 +125,7 @@ class DiversityEvaluator(BaseEvaluator):
             "vocabulary_richness": calculate_stats([m["vocabulary_richness"] for m in instance_metrics]),
         }
 
-    def _compute_semantic_diversity(self, texts: list[str]) -> tuple[float, float]:
+    def _compute_semantic_diversity(self, texts: list[str], batch_size: int = 32) -> tuple[float, float]:
         """Compute semantic diversity using sentence embeddings.
 
         Args:
@@ -134,7 +134,7 @@ class DiversityEvaluator(BaseEvaluator):
         Returns:
             Tuple of (diversity_score, mean_pairwise_similarity)
         """
-        embeddings = self.model.encode(texts, convert_to_numpy=True)
+        embeddings = self.model.encode(texts, batch_size=batch_size, convert_to_numpy=True, show_progress_bar=False)
         similarity_matrix = cosine_similarity(embeddings)
 
         # Get upper triangle (excluding diagonal) for pairwise similarities
