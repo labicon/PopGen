@@ -1,0 +1,10 @@
+[
+  "The ego agent prioritizes ball possession over defending its own goal.",
+  "The ego agent positions itself to receive passes from the teammate when in proximity.",
+  "The ego agent stays primarily between the ball and its own goal when defending.",
+  "The ego agent attempts to intercept opponent passes by predicting their path.",
+  "The ego agent avoids long, risky dribbles that could lead to loss of possession.",
+  "The ego agent maintains appropriate spacing to avoid crowding the teammate.",
+  "The ego agent advances toward the opponent's goal when the ball is in the opponent's half.",
+  "The ego agent relies on implicit environmental cues rather than explicit signaling to coordinate with the teammate."
+]
