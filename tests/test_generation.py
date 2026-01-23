@@ -44,6 +44,15 @@ def _mock_text_response(content: str) -> MagicMock:
     return mock_response
 
 
+def _mock_property_list_response(properties: list[str]) -> MagicMock:
+    """Helper to create a mock LLM response with PropertyList JSON content."""
+    from popgen.population.generation.diversity.simplestrat import PropertyList
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = PropertyList(properties=properties).model_dump_json()
+    return mock_response
+
+
 class TestGenerationStrategy:
     def test_cannot_instantiate_abstract_class(self):
         with pytest.raises(TypeError):
@@ -119,7 +128,8 @@ class TestInContextStrategy:
 
         assert result.name == "Test"
         assert result.description == "Test description"
-        assert len(strategy.generated_items) == 1
+        # _generate_single doesn't add to generated_items; only generate() does
+        assert len(strategy.generated_items) == 0
         mock_completion.assert_called_once()
 
     def test_generate_multiple_items(self, mock_completion):
@@ -155,7 +165,8 @@ class TestInContextStrategy:
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
-        assert "Existing" in messages[0]["content"]
+        # Previous items are in user prompt (messages[1]), not system prompt (messages[0])
+        assert "Existing" in messages[1]["content"]
 
 
 class TestStratifiedStrategy:
@@ -172,73 +183,71 @@ class TestStratifiedStrategy:
         strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
         assert strategy.output_type == SampleItem
 
-    def test_generate_single_divider(self, mock_completion):
-        mock_completion.return_value = _mock_text_response("Risk tolerance: low vs high")
+    def test_generate_properties(self, mock_completion):
+        mock_completion.return_value = _mock_property_list_response(["Property 1", "Property 2"])
 
         strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
-        result = strategy._generate_single_divider("Test environment", [])
+        result = strategy.generate_properties("Test environment", num_properties=2, candidate_rate=1.0)
 
-        assert result == "Risk tolerance: low vs high"
+        assert result == ["Property 1", "Property 2"]
         mock_completion.assert_called_once()
 
-    def test_generate_single_divider_with_existing(self, mock_completion):
-        mock_completion.return_value = _mock_text_response("Cooperation: selfish vs altruistic")
+    def test_generate_properties_prompt_contains_request(self, mock_completion):
+        mock_completion.return_value = _mock_property_list_response(["Property 1"])
 
         strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
-        result = strategy._generate_single_divider(
-            "Test environment",
-            ["Risk tolerance: low vs high"]
-        )
+        strategy.generate_properties("My specific request", num_properties=1, candidate_rate=1.0)
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
-        assert "Risk tolerance: low vs high" in messages[0]["content"]
+        assert "My specific request" in messages[1]["content"]
 
-    def test_generate_items_from_dividers(self, mock_completion):
-        items = [
-            SampleItem(name=f"I{i}", description=f"Desc {i}")
-            for i in range(4)
-        ]
-        mock_completion.return_value = _mock_item_list_response(items)
+    def test_generate_item_from_properties(self, mock_completion):
+        mock_completion.return_value = _mock_item_response("TestItem", "Test description")
 
         strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
-        result = strategy._generate_items_from_dividers(
+        result = strategy.generate_item_from_properties(
             "Test environment",
-            ["Divider 1", "Divider 2"],
-            num_items=4
+            ["Property 1", "Property 2"]
         )
 
-        assert len(result) == 4
-        assert len(strategy.generated_items) == 4
+        assert result.name == "TestItem"
+        assert result.description == "Test description"
+        mock_completion.assert_called_once()
 
-    def test_generate_full_flow(self, mock_completion):
-        items = [
-            SampleItem(name=f"I{i}", description=f"Desc {i}")
-            for i in range(4)
-        ]
+    @patch("popgen.population.generation.diversity.simplestrat.random.random")
+    def test_generate_full_flow(self, mock_random, mock_completion):
+        # Mock random to deterministically select properties
+        mock_random.return_value = 0.3  # < 0.5, so all properties selected
 
         mock_completion.side_effect = [
-            _mock_text_response("Divider 1"),
-            _mock_text_response("Divider 2"),
-            _mock_item_list_response(items),
+            _mock_property_list_response(["Property 1", "Property 2"]),
+            _mock_item_response("I0", "Desc 0"),
+            _mock_item_response("I1", "Desc 1"),
+            _mock_item_response("I2", "Desc 2"),
+            _mock_item_response("I3", "Desc 3"),
         ]
 
         strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
         result = strategy.generate("Test environment")
 
         assert len(result) == 4
-        assert mock_completion.call_count == 3
+        # 1 call for properties + 4 calls for items
+        assert mock_completion.call_count == 5
 
-    def test_generate_with_custom_num_items(self, mock_completion):
-        items = [
-            SampleItem(name=f"I{i}", description=f"Desc {i}")
-            for i in range(6)
-        ]
+    @patch("popgen.population.generation.diversity.simplestrat.random.random")
+    def test_generate_with_custom_num_items(self, mock_random, mock_completion):
+        # Mock random to deterministically select properties
+        mock_random.return_value = 0.3  # < 0.5, so all properties selected
 
         mock_completion.side_effect = [
-            _mock_text_response("Divider 1"),
-            _mock_text_response("Divider 2"),
-            _mock_item_list_response(items),
+            _mock_property_list_response(["Property 1", "Property 2", "Property 3"]),
+            _mock_item_response("I0", "Desc 0"),
+            _mock_item_response("I1", "Desc 1"),
+            _mock_item_response("I2", "Desc 2"),
+            _mock_item_response("I3", "Desc 3"),
+            _mock_item_response("I4", "Desc 4"),
+            _mock_item_response("I5", "Desc 5"),
         ]
 
         strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)

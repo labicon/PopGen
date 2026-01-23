@@ -13,19 +13,20 @@ class GenerationStrategy(ABC):
     The output type is specified via constructor arguments.
     """
 
-    def __init__(self, model: str, output_type: type[T]):
+    def __init__(self, model: str, output_type: type[T], output_dir: str | None = None):
         super().__init__()
         self.generated_items: list[T] = []
         self.model = model
         self.output_type = output_type
+        self.output_dir = output_dir
 
     @abstractmethod
-    def generate(self, environment_description: str, **kwargs: Any) -> list[T]:
+    def generate(self, input_prompt: str, **kwargs: Any) -> list[T]:
         """
-        Generate items based on the environment description.
+        Generate items based on the input prompt.
 
         Args:
-            environment_description: A description of the environment.
+            input_prompt: A prompt describing the generation task.
             **kwargs: Additional arguments specific to the strategy.
 
         Returns:
