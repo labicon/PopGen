@@ -5,8 +5,9 @@ from .diversity import (
     VerbalizedSamplingStrategy,
     load_strategy,
 )
-from .policy_generator import PolicyCode, PolicyGenerator
-from .reward_generator import Reward, RewardFnGenerator
+from .policy_generator import PolicyCodeGenerator
+from .reward_generator import RewardFnGenerator
+from .rollout_synthetizer import RolloutSynthetizer, RolloutSynthetizerResult
 
 __all__ = [
     "BaseGenerator",
@@ -14,8 +15,8 @@ __all__ = [
     "StratifiedStrategy",
     "VerbalizedSamplingStrategy",
     "load_strategy",
-    "PolicyGenerator",
-    "PolicyCode",
+    "PolicyCodeGenerator",
     "RewardFnGenerator",
-    "Reward",
+    "RolloutSynthetizer",
+    "RolloutSynthetizerResult",
 ]

@@ -15,4 +15,5 @@ pip install -e deps/BenchMARL
 Create a `.env` file at root with your API keys. You can copy the `.env.example`.
 
 ## Examples
-- **Diverse Teammate Generation (Policy Code)**: `scripts/behavior_code`
+- **Diverse Teammate Generation (Policy Code)**: `scripts/behavior_policy`
+- **Diverse Teammate Generation (Reward Function)**: `scripts/reward_generation`

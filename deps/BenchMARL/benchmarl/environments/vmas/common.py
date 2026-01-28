@@ -97,6 +97,7 @@ class VmasTask(Task):
     GIVE_WAY = None
     WIND_FLOCKING = None
     PASSAGE = None
+    POINT_MASS_RENDEZVOUS = None
     JOINT_PASSAGE = None
     JOINT_PASSAGE_SIZE = None
     BALL_PASSAGE = None

@@ -12,3 +12,12 @@ class Behavior(BaseModel):
 
     def __str__(self):
         return f"Behavior(name={self.name}, description={self.description})"
+
+
+class CodeSnippet(BaseModel):
+    """
+    A code snippet representing a piece of code, such as a policy function.
+    """
+
+    code: str
+    reasoning: str | None = None

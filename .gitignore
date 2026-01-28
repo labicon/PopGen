@@ -1,5 +1,6 @@
 # Project specific
 experiments/
+scripts/reward_generation/results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

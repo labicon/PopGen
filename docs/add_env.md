@@ -10,7 +10,8 @@ Each environment lives in `popgen/envs/<env_name>/` with the following structure
 popgen/envs/<env_name>/
 ├── __init__.py
 ├── prompts.py
-└── rollout.py
+├── utils.py
+└── rl_cfg/ (optional, for VMAS/BenchMARL training configs)
 ```
 
 ## Step 1: Create the Environment Folder
@@ -21,12 +22,17 @@ mkdir -p popgen/envs/<env_name>
 
 ## Step 2: Create `prompts.py`
 
-This file contains the LLM prompts that describe the environment. Define three constants:
+This file contains the LLM prompts that describe the environment. Define the constants below:
 
 ```python
 ENVIRONMENT_DESCRIPTION = """
 <Describe the environment, task objectives, agents, and their roles.>
 <List accessible variables for behavior code generation.>
+"""
+
+ACTION_FORMAT = """
+<Describe the action format expected by the policy generator.>
+<Include tensor shapes and an example.>
 """
 
 OBSERVATION_FORMAT = """
@@ -35,6 +41,11 @@ OBSERVATION_FORMAT = """
 """
 
 EGO_VISUAL_DESCRIPTION = "<Short description of how the ego agent appears visually.>"
+
+REWARD_FORMAT = """
+<Provide a template or description for compute_reward(self, agent).>
+<Include available attributes and tensor shapes.>
+"""
 ```
 
 **Example** (from `point_mass_rendezvous`):
@@ -59,11 +70,18 @@ def observation(self, agent: Agent):
 """
 
 EGO_VISUAL_DESCRIPTION = "The ego agent is represented as the red point mass."
+
+REWARD_FORMAT = """
+def reward_fn(self, agent: Agent):
+    reward = torch.zeros(self.world.batch_dim, device=self.world.device)
+    ...
+    return reward
+"""
 ```
 
-## Step 3: Create `rollout.py`
+## Step 3: Create `utils.py`
 
-This file contains the rollout logic. You need to implement two functions:
+This file contains the rollout and training helpers. You need to implement:
 
 ### 3.1 State Extraction Function
 
@@ -81,66 +99,68 @@ def get_state_<env_name>(env):
 ### 3.2 Rollout Function
 
 ```python
-def rollout_fn(agent0_policy: callable, agent1_policy: callable):
+def rollout_fn(policy: callable, env=None, **kwargs):
     """
     Execute a rollout with the given policies.
 
     Args:
-        agent0_policy: Policy function for agent 0. Takes observation, returns action.
-        agent1_policy: Policy function for agent 1. Takes observation, returns action.
+        policy: Policy function for the ego agent. Takes observation, returns action.
+        env: Optional pre-created environment instance.
 
     Returns:
         states: List of state dictionaries from each timestep.
         images: List of rendered frames (numpy arrays).
         error: Error message string if rollout failed, None otherwise.
     """
-    max_steps = 200
-
-    # Create environment
-    env = make_env(scenario="<env_name>", ...)
-
-    states = []
-    images = []
-
-    # Reset
-    obs = env.reset()
-    images.append(env.render(mode="rgb_array"))
-    states.append(get_state_<env_name>(env))
-
-    step = 0
-    while step < max_steps:
-        # Get actions from policies
-        try:
-            action_0 = agent0_policy(obs[0].squeeze(0))
-            action_1 = agent1_policy(obs[1].squeeze(0))
-        except Exception as e:
-            return states, images, str(e)
-
-        # Step environment
-        obs, rews, dones, info = env.step([action_0, action_1])
-
-        # Record state and image
-        states.append(get_state_<env_name>(env))
-        images.append(env.render(mode="rgb_array"))
-
-        step += 1
-        if dones.any():
-            break
-
-    return states, images, None
+    # create env if needed, set defaults, then call shared helper
+    if env is None:
+        env = <create env here>
+    if "max_steps" not in kwargs:
+        kwargs["max_steps"] = 100
+    return rollout_vmas_env(policy=policy, env=env, get_state_fn=get_state_<env_name>, **kwargs)
 ```
 
-**Important**: The `rollout_fn` signature should match the policy functions that the LLM will generate. If your environment has more agents, adjust accordingly.
+### 3.3 Training Function (if you support reward learning)
+
+```python
+def train_fn(reward_fn: callable, output_dir: str, **kwargs):
+    """
+    Trains agents using BenchMARL with a custom reward function.
+
+    Args:
+        reward_fn: Callable taking (agent, world) and returning reward tensor.
+        output_dir: Directory to save results.
+    """
+    return train_vmas_env(
+        reward_fn=reward_fn,
+        output_dir=output_dir,
+        scenario_module=<scenario_module>,
+        scenario_name="<env_name>",
+        vmas_task=<VMAS_TASK>,
+        rl_cfg_dir=RL_CFG_DIR,
+        **kwargs,
+    )
+```
+
+**Important**: The `rollout_fn` signature should match the policy functions that the LLM will generate. If your environment has more agents, you can call the same `policy` for each agent or adapt the function accordingly.
 
 ## Step 4: Create `__init__.py`
 
 Export all required components:
 
 ```python
-from .prompts import ENVIRONMENT_DESCRIPTION, OBSERVATION_FORMAT, EGO_VISUAL_DESCRIPTION
-from .rollout import rollout_fn
+from .prompts import ACTION_FORMAT, EGO_VISUAL_DESCRIPTION, ENVIRONMENT_DESCRIPTION, OBSERVATION_FORMAT, REWARD_FORMAT
+from .utils import rollout_fn, train_fn
 
-__ALL__ = ["ENVIRONMENT_DESCRIPTION", "OBSERVATION_FORMAT", "EGO_VISUAL_DESCRIPTION", "rollout_fn"]
+__ALL__ = [
+    "ENVIRONMENT_DESCRIPTION",
+    "ACTION_FORMAT",
+    "OBSERVATION_FORMAT",
+    "EGO_VISUAL_DESCRIPTION",
+    "REWARD_FORMAT",
+    "rollout_fn",
+    "train_fn",
+]
 ```
 
 ## Step 5: Run with the New Environment
@@ -161,7 +181,7 @@ python scripts/behavior_policy/main.py env=<env_name>
 ## Checklist
 
 - [ ] Created `popgen/envs/<env_name>/` folder
-- [ ] Created `prompts.py` with `ENVIRONMENT_DESCRIPTION`, `OBSERVATION_FORMAT`, `EGO_VISUAL_DESCRIPTION`
-- [ ] Created `rollout.py` with `get_state_<env_name>()` and `rollout_fn()`
+- [ ] Created `prompts.py` with `ENVIRONMENT_DESCRIPTION`, `ACTION_FORMAT`, `OBSERVATION_FORMAT`, `EGO_VISUAL_DESCRIPTION`, `REWARD_FORMAT`
+- [ ] Created `utils.py` with `get_state_<env_name>()`, `rollout_fn()`, and optional `train_fn()`
 - [ ] Created `__init__.py` exporting all components
 - [ ] Tested the environment with `python scripts/behavior_policy/main.py env=<env_name>`

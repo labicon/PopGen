@@ -1,89 +1,82 @@
 import litellm
-from pydantic import BaseModel
 
-from popgen.population.generation.base import BaseGenerator
+from popgen.population.generation.base import GeneratorWithFeedback
+from popgen.population.types import CodeSnippet
 from popgen.utils.parsing import clean_code, parse_llm_response
 
+SYSTEM_PROMPT = """You are an expert AI agent specializing in designing reward functions for reinforcement learning.
 
-class Reward(BaseModel):
-    """Generated reward function code for an agent."""
+Your task is to generate a reward function for an ego agent that incentivizes the given behavior.
 
-    code: str
-    reasoning: str | None = None
+Your task is to generate a reward function that aligns with this behavior.
+The function must be named `compute_reward(self, agent)` and return a reward for the given agent.
+The reward should be a torch tensor of shape (batch_dim,) that compute the reward for each element of the batch.
 
+The `agent` and `world` objects provide access to the simulation state.
+Common attributes:
+- `agent.state.pos`: Position of the agent (2D vector).
+- `agent.state.vel`: Velocity of the agent (2D vector).
+- `world.agents`: List of all agents (0-indexed).
 
-REWARD_GENERATION_PROMPT = """You are an expert AI agent specializing in designing reward functions for reinforcement learning.
+Other attributes will be described in the environment description, observation format, or example reward function.
 
-Your task is to generate a reward function for agent0 that incentivizes the given behavior.
-The behavior will be given to you in JSON format with the following structure:
-{{
-    "name": str,
-    "description": str
-}}
+Please provide the python code for the function `compute_reward`, as well as a reasoning .
+Torch is already imported. Do not include any other imports."""
 
-The reward function should be provided as Python code that can be executed in a simulation environment.
-The reward function should define a function `agent0_reward(obs, action, next_obs, done)` that computes a scalar reward.
+REWARD_GENERATION_PROMPT = """The environment is described as follows:
+{environment_description}
 
-Parameters:
-- obs: The current observation (torch tensor)
-- action: The action taken (torch tensor)
-- next_obs: The next observation after taking the action (torch tensor)
-- done: Whether the episode has ended (bool)
+The observation format is as follows:
+{observation_format}
 
-Returns:
-- reward: A scalar float value
+The reward format is as follows:
+{reward_format}
 
-Codebase context (environment and observation format):
-{codebase}
+Behavior description:
+{behavior}
 
-Provide the python code for the function `agent0_reward` and a concise reasoning on the implementation.
-Only import torch before function definition if necessary. Do not include any other imports."""
+Provide the reward function to train an agent with desired behavior as the `compute_reward(self, agent)` function, and a concise reasoning on the implementation."""
 
 
-class RewardFnGenerator(BaseGenerator):
+class RewardFnGenerator(GeneratorWithFeedback):
     """Generator for agent reward functions based on behavior descriptions."""
 
     def __init__(self, model):
-        self.model = model
+        super().__init__(model, generation_type="RewardFn")
 
     def generate(
         self,
         behavior: str,
-        codebase_context: str,
+        environment_description: str,
+        observation_format: str,
+        reward_format: str,
         feedbacks: list | None = None,
-    ) -> Reward:
+        **kwargs,
+    ) -> CodeSnippet:
         """
         Generate a reward function for agent0 based on behavior description.
 
         Args:
             behavior: The behavior the reward should incentivize.
-            codebase_context: Context about the environment and observation format.
-            previous_reward: Previous reward attempt (for refinement).
-            error_message: Error from previous attempt (for refinement).
-
+            environment_description: Description of the environment.
+            observation_format: Description of the observation format.
+            reward_format: Description of the reward format.
+            feedbacks: Optional feedbacks to refine generation.
         Returns:
             Reward containing the generated code and optional reasoning.
         """
-        system_prompt = REWARD_GENERATION_PROMPT.format(codebase=codebase_context)
+        user_prompt = REWARD_GENERATION_PROMPT.format(environment_description=environment_description, observation_format=observation_format, reward_format=reward_format, behavior=behavior)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": behavior},
-        ]
-
-        if feedbacks is not None and len(feedbacks) > 0:
-            feedback_previous = "\n\n".join(f" - Reward Code: {rew}\n   Feedback: {fdb}" for (rew, fdb) in feedbacks)
-            refinement_message = f"The previous attempts produced the following errors and feedbacks:\n{feedback_previous}\n\nPlease fix the errors and provide the corrected reward function."
-            messages.append({"role": "user", "content": refinement_message})
-
-        response = litellm.completion(
-            model=self.model,
-            messages=messages,
-            response_format=Reward,
+        response = super().generate(
+            user_prompt=user_prompt,
+            system_prompt=SYSTEM_PROMPT,
+            feedbacks=feedbacks,
+            response_format=CodeSnippet,
+            **kwargs,
         )
 
         return parse_llm_response(
             response,
-            Reward,
+            CodeSnippet,
             postprocess_fn=lambda x: {"code": clean_code(x.code)},
         )

@@ -5,10 +5,10 @@ import importlib
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from popgen.population import (
-    FeedbackGenerationPipeline,
+    PolicyCodeAgentGenerationPipeline,
     InContextStrategy,
     StratifiedStrategy,
-    PolicyGenerator,
+    PolicyCodeGenerator,
     BehaviorAdherenceEvaluator,
     Behavior,
 )
@@ -57,6 +57,7 @@ def run_behavior_pipeline(cfg: DictConfig):
     env = importlib.import_module(f"popgen.envs.{cfg.env}")
     env_description = env.ENVIRONMENT_DESCRIPTION
     observation_format = env.OBSERVATION_FORMAT
+    action_format = env.ACTION_FORMAT
     ego_visual_description = env.EGO_VISUAL_DESCRIPTION
     rollout_fn = env.rollout_fn
 
@@ -68,7 +69,10 @@ def run_behavior_pipeline(cfg: DictConfig):
     else:
         raise ValueError(f"Unknown strategy: {cfg.strategy}")
 
-    policy_generator_kwargs = {"observation_format": observation_format}
+    policy_generator_kwargs = {
+        "observation_format": observation_format,
+        "action_format": action_format,
+    }
     evaluation_kwargs = {
         "ego_visual_description": ego_visual_description,
         "ego_name": "agent0",
@@ -90,7 +94,7 @@ def run_behavior_pipeline(cfg: DictConfig):
         logging.info("Generating new behaviors...")
         try:
             behaviors = behavior_generator.generate(
-                environment_description=env_description
+                input_prompt=env_description
             )
 
             # Save as list of dicts for compatibility
@@ -123,9 +127,9 @@ def run_behavior_pipeline(cfg: DictConfig):
     logging.info(f"Processing {len(behaviors)} behaviors with {cfg.n_workers} worker(s)")
     logging.info("-" * 40)
 
-    policy_generator = PolicyGenerator(model=cfg.llm_model)
+    policy_generator = PolicyCodeGenerator(model=cfg.llm_model)
     evaluator = BehaviorAdherenceEvaluator(judge_model=cfg.llm_model)
-    pipeline = FeedbackGenerationPipeline(
+    pipeline = PolicyCodeAgentGenerationPipeline(
         generator=policy_generator,
         evaluator=evaluator,
         rollout_fn=rollout_fn,
@@ -153,7 +157,7 @@ def run_behavior_pipeline(cfg: DictConfig):
     logging.info(f"Results: {summary['n_succeeded']}/{summary['n_behaviors']} behaviors aligned")
 
     for idx, behavior in enumerate(behaviors):
-        steps = summary["behavior_steps_to_success"].get(str(idx))
+        steps = summary["num_attempts_to_success"].get(str(idx))
         status = "PASS" if successes[idx] else "FAIL"
         attempts_str = f"(attempts: {steps})" if steps else ""
         logging.info(f"  [{status}] {behavior.name} {attempts_str}")

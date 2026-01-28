@@ -4,6 +4,7 @@ from .adherence import BehaviorAdherenceEvaluator, BehaviorAdherenceResult
 from .base import BaseEvaluator, EvalResult, EvalResultEncoder
 from .diversity import DiversityEvaluator
 from .quality import BehaviorQualityEvaluator, BehaviorQualityResult, RubricScore
+from .similarity import SimilarityEvaluator
 
 __all__ = [
     "BaseEvaluator",
@@ -15,4 +16,5 @@ __all__ = [
     "BehaviorAdherenceEvaluator",
     "BehaviorAdherenceResult",
     "DiversityEvaluator",
+    "SimilarityEvaluator",
 ]

@@ -7,5 +7,5 @@ def test_diversity_evaluator_single_text_returns_zero():
 
     assert metrics["semantic_diversity"] == 0.0
     assert metrics["lexical_diversity"] == 0.0
-    assert metrics["semantic_similarity"] is None
-    assert metrics["lexical_similarity"] is None
+    assert len(metrics["semantic_similarity_matrix"]) == 0
+    assert len(metrics["lexical_similarity_matrix"]) == 0

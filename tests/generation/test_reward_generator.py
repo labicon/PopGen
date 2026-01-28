@@ -2,41 +2,42 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock
 
-from popgen.population.generation.reward_generator import RewardFnGenerator, Reward
+from popgen.population.generation.reward_generator import RewardFnGenerator
+from popgen.population.types import CodeSnippet
 from popgen.utils.parsing import clean_code
 
 
-class TestRewardModel:
-    def test_reward_creation(self):
-        reward = Reward(code="def agent0_reward(obs, action, next_obs, done): return 0.0")
-        assert reward.code == "def agent0_reward(obs, action, next_obs, done): return 0.0"
-        assert reward.reasoning is None
+class TestCodeSnippetModel:
+    def test_code_snippet_creation(self):
+        snippet = CodeSnippet(code="def compute_reward(self, agent): return 0.0")
+        assert snippet.code == "def compute_reward(self, agent): return 0.0"
+        assert snippet.reasoning is None
 
-    def test_reward_creation_with_reasoning(self):
-        reward = Reward(
-            code="def agent0_reward(obs, action, next_obs, done): return 1.0",
+    def test_code_snippet_creation_with_reasoning(self):
+        snippet = CodeSnippet(
+            code="def compute_reward(self, agent): return 1.0",
             reasoning="Simple constant reward"
         )
-        assert reward.reasoning == "Simple constant reward"
+        assert snippet.reasoning == "Simple constant reward"
 
-    def test_reward_from_dict(self):
-        data = {"code": "def agent0_reward(obs, action, next_obs, done): return obs[0]"}
-        reward = Reward.model_validate(data)
-        assert "agent0_reward" in reward.code
+    def test_code_snippet_from_dict(self):
+        data = {"code": "def compute_reward(self, agent): return 0.0"}
+        snippet = CodeSnippet.model_validate(data)
+        assert "compute_reward" in snippet.code
 
-    def test_reward_to_dict(self):
-        reward = Reward(code="code here", reasoning="some reasoning")
-        data = reward.model_dump()
+    def test_code_snippet_to_dict(self):
+        snippet = CodeSnippet(code="code here", reasoning="some reasoning")
+        data = snippet.model_dump()
         assert data == {"code": "code here", "reasoning": "some reasoning"}
 
-    def test_reward_to_dict_without_reasoning(self):
-        reward = Reward(code="code here")
-        data = reward.model_dump()
+    def test_code_snippet_to_dict_without_reasoning(self):
+        snippet = CodeSnippet(code="code here")
+        data = snippet.model_dump()
         assert data == {"code": "code here", "reasoning": None}
 
-    def test_reward_missing_code_raises(self):
+    def test_code_snippet_missing_code_raises(self):
         with pytest.raises(ValueError):
-            Reward(reasoning="reasoning without code")
+            CodeSnippet(reasoning="reasoning without code")
 
 
 class TestRewardFnGenerator:
@@ -67,7 +68,7 @@ class TestGenerate:
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
-            "code": "def agent0_reward(obs, action, next_obs, done):\n    return 1.0",
+            "code": "def compute_reward(self, agent):\n    return 1.0",
             "reasoning": "Reward for moving toward target"
         })
         mock_completion.return_value = mock_response
@@ -75,17 +76,20 @@ class TestGenerate:
         reward = generator.generate(
             behavior=behavior,
             codebase_context=codebase_context,
+            environment_description="test environment",
+            observation_format="obs format",
+            reward_format="reward is a float",
         )
 
-        assert isinstance(reward, Reward)
-        assert "agent0_reward" in reward.code
+        assert isinstance(reward, CodeSnippet)
+        assert "compute_reward" in reward.code
         mock_completion.assert_called_once()
 
     def test_generate_includes_behavior_in_message(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
-            "code": "def agent0_reward(obs, action, next_obs, done): return 0",
+            "code": "def compute_reward(self, agent): return 0",
             "reasoning": "reasoning"
         })
         mock_completion.return_value = mock_response
@@ -93,6 +97,9 @@ class TestGenerate:
         generator.generate(
             behavior=behavior,
             codebase_context=codebase_context,
+            environment_description="test environment",
+            observation_format="obs format",
+            reward_format="reward is a float",
         )
 
         call_args = mock_completion.call_args
@@ -100,11 +107,11 @@ class TestGenerate:
         user_message = messages[1]["content"]
         assert "Aggressive" in user_message
 
-    def test_generate_includes_codebase_context_in_system_prompt(self, mock_completion, generator, behavior, codebase_context):
+    def test_generate_includes_codebase_context_in_user_prompt(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
-            "code": "def agent0_reward(obs, action, next_obs, done): return 0",
+            "code": "def compute_reward(self, agent): return 0",
             "reasoning": "reasoning"
         })
         mock_completion.return_value = mock_response
@@ -112,29 +119,35 @@ class TestGenerate:
         generator.generate(
             behavior=behavior,
             codebase_context=codebase_context,
+            environment_description="test environment",
+            observation_format="obs format",
+            reward_format="reward is a float",
         )
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
-        system_message = messages[0]["content"]
-        assert "obs is a tensor with shape (4,)" in system_message
+        user_message = messages[1]["content"]
+        assert "test environment" in user_message
 
     def test_generate_with_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
-            "code": "def agent0_reward(obs, action, next_obs, done): return fixed",
+            "code": "def compute_reward(self, agent): return fixed",
             "reasoning": "Fixed the issue"
         })
         mock_completion.return_value = mock_response
 
         feedbacks = [
-            ("def agent0_reward(obs, action, next_obs, done): return broken", "IndexError: tensor index out of range")
+            ("def compute_reward(self, agent): return broken", "IndexError: tensor index out of range")
         ]
 
         generator.generate(
             behavior=behavior,
             codebase_context=codebase_context,
+            environment_description="test environment",
+            observation_format="obs format",
+            reward_format="reward is a float",
             feedbacks=feedbacks,
         )
 
@@ -149,7 +162,7 @@ class TestGenerate:
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
-            "code": "def agent0_reward(obs, action, next_obs, done): return fixed",
+            "code": "def compute_reward(self, agent): return fixed",
             "reasoning": "Fixed the issues"
         })
         mock_completion.return_value = mock_response
@@ -162,6 +175,9 @@ class TestGenerate:
         generator.generate(
             behavior=behavior,
             codebase_context=codebase_context,
+            environment_description="test environment",
+            observation_format="obs format",
+            reward_format="reward is a float",
             feedbacks=feedbacks,
         )
 
@@ -177,7 +193,7 @@ class TestGenerate:
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
-            "code": "def agent0_reward(obs, action, next_obs, done): pass",
+            "code": "def compute_reward(self, agent): pass",
             "reasoning": "reasoning"
         })
         mock_completion.return_value = mock_response
@@ -185,6 +201,9 @@ class TestGenerate:
         generator.generate(
             behavior=behavior,
             codebase_context=codebase_context,
+            environment_description="test environment",
+            observation_format="obs format",
+            reward_format="reward is a float",
             feedbacks=[],
         )
 
@@ -196,7 +215,7 @@ class TestGenerate:
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
-            "code": "def agent0_reward(obs, action, next_obs, done): pass",
+            "code": "def compute_reward(self, agent): pass",
             "reasoning": "reasoning"
         })
         mock_completion.return_value = mock_response
@@ -204,6 +223,9 @@ class TestGenerate:
         generator.generate(
             behavior=behavior,
             codebase_context=codebase_context,
+            environment_description="test environment",
+            observation_format="obs format",
+            reward_format="reward is a float",
             feedbacks=None,
         )
 
@@ -215,7 +237,7 @@ class TestGenerate:
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
-            "code": "def agent0_reward(obs, action, next_obs, done): pass",
+            "code": "def compute_reward(self, agent): pass",
             "reasoning": "reasoning"
         })
         mock_completion.return_value = mock_response
@@ -224,6 +246,9 @@ class TestGenerate:
         generator.generate(
             behavior=behavior,
             codebase_context=codebase_context,
+            environment_description="test environment",
+            observation_format="obs format",
+            reward_format="reward is a float",
         )
 
         call_args = mock_completion.call_args
@@ -232,43 +257,43 @@ class TestGenerate:
 
 class TestCleanCode:
     def test_clean_code_removes_python_markdown(self):
-        code = "```python\ndef agent0_reward(obs, action, next_obs, done): pass\n```"
+        code = "```python\ndef compute_reward(self, agent): pass\n```"
         result = clean_code(code)
-        assert result == "def agent0_reward(obs, action, next_obs, done): pass"
+        assert result == "def compute_reward(self, agent): pass"
 
     def test_clean_code_removes_generic_markdown(self):
-        code = "```\ndef agent0_reward(obs, action, next_obs, done): pass\n```"
+        code = "```\ndef compute_reward(self, agent): pass\n```"
         result = clean_code(code)
-        assert result == "def agent0_reward(obs, action, next_obs, done): pass"
+        assert result == "def compute_reward(self, agent): pass"
 
     def test_clean_code_handles_no_markdown(self):
-        code = "def agent0_reward(obs, action, next_obs, done): pass"
+        code = "def compute_reward(self, agent): pass"
         result = clean_code(code)
-        assert result == "def agent0_reward(obs, action, next_obs, done): pass"
+        assert result == "def compute_reward(self, agent): pass"
 
     def test_clean_code_strips_whitespace(self):
-        code = "  \n def agent0_reward(obs, action, next_obs, done): pass \n  "
+        code = "  \n def compute_reward(self, agent): pass \n  "
         result = clean_code(code)
-        assert result == "def agent0_reward(obs, action, next_obs, done): pass"
+        assert result == "def compute_reward(self, agent): pass"
 
     def test_clean_code_handles_only_trailing_markdown(self):
-        code = "def agent0_reward(obs, action, next_obs, done): pass\n```"
+        code = "def compute_reward(self, agent): pass\n```"
         result = clean_code(code)
-        assert result == "def agent0_reward(obs, action, next_obs, done): pass"
+        assert result == "def compute_reward(self, agent): pass"
 
     def test_clean_code_handles_only_leading_python_markdown(self):
-        code = "```python\ndef agent0_reward(obs, action, next_obs, done): pass"
+        code = "```python\ndef compute_reward(self, agent): pass"
         result = clean_code(code)
-        assert result == "def agent0_reward(obs, action, next_obs, done): pass"
+        assert result == "def compute_reward(self, agent): pass"
 
     def test_clean_code_handles_multiline_code(self):
         code = """```python
-def agent0_reward(obs, action, next_obs, done):
-    distance = obs[0]
+def compute_reward(self, agent):
+    distance = agent.state.pos[0]
     return -distance
 ```"""
         result = clean_code(code)
-        expected = """def agent0_reward(obs, action, next_obs, done):
-    distance = obs[0]
+        expected = """def compute_reward(self, agent):
+    distance = agent.state.pos[0]
     return -distance"""
         assert result == expected

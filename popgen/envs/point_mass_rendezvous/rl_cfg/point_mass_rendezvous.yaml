@@ -1,0 +1,8 @@
+defaults:
+  - vmas_point_mass_rendezvous_config
+  - _self_
+
+max_steps: 100
+n_agents: 2
+n_landmarks: 4
+mode: "PMR-C"

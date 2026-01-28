@@ -1,4 +1,4 @@
-ENVIRONMENT_DESCRIPTION = """
+ENVIRONMENT_DESCRIPTION = """You are playing a 2v2 football (soccer) game in a simulated environment.
 You are in the blue team which consist of two agents. You must coordinate with a teammate to score a ball in football.
 You cannot communicate with your teammate explicitly.
 Opponent red team also consist of 2 agents.
@@ -17,8 +17,10 @@ When you want to describe agent behaviors as code, these are the accessible vari
 - `goal_positions`: A tuple (x, y) representing the goal position for the blue team.
 
 The action should be a torch tensor of shape (1, 2) representing the force applied to the agent.
-Therefore, you can only move the agent, and do not have direct access to kick the ball.
-"""
+Therefore, you can only move the agent, and do not have direct access to kick the ball."""
+
+ACTION_FORMAT = """The action should be a torch tensor of shape (1, 2) representing the force applied to the agent.
+For example, to move the agent to the right with a force of 1.0 and upwards with a force of 0.5, you would return `torch.tensor([[1.0, 0.5]])`"""
 
 OBSERVATION_FORMAT = """
 def observation(
@@ -198,4 +200,34 @@ def observation_base(
     return torch.cat(list(obs.values()), dim=-1)
 """
 
-EGO_VISUAL_DESCRIPTION = "The ego agent is represented as the blue football player with the tag #1."
+EGO_VISUAL_DESCRIPTION = """Ego team is located in the left side of the football field, wearing blue jerseys.
+Opponent team is located in the right side of the football field, wearing red jerseys.
+The ego agent is represented as the blue football player with the tag #1."""
+
+REWARD_FORMAT = """
+def reward_fn(self, agent: Agent):
+
+    reward = torch.zeros(self.world.batch_dim, device=self.world.device)
+
+    # Sparse Reward
+    over_right_line = (
+        self.ball.state.pos[:, X] > self.pitch_length / 2 + self.ball_size / 2
+    )
+    over_left_line = (
+        self.ball.state.pos[:, X] < -self.pitch_length / 2 - self.ball_size / 2
+    )
+    goal_mask = (self.ball.state.pos[:, Y] <= self.goal_size / 2) * (
+        self.ball.state.pos[:, Y] >= -self.goal_size / 2
+    )
+    blue_score = over_right_line * goal_mask
+    red_score = over_left_line * goal_mask
+    self._sparse_reward_blue = (
+        self.scoring_reward * blue_score - self.scoring_reward * red_score
+    )
+
+    self._done = blue_score | red_score
+
+    reward = self._sparse_reward_blue + self._dense_reward_blue
+
+    return reward
+"""

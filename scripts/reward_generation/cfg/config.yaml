@@ -1,0 +1,26 @@
+# Environment selection
+env: point_mass_rendezvous
+
+# Behavior generation strategy
+strategy: stratified  # Options: stratified, in_context
+
+# LLM model selection (litellm format)
+llm_model: openai/gpt-5-mini
+
+# Pipeline settings
+max_behaviors: 5
+max_alignment_retries: 3
+n_eval_rollouts: 5
+adherence_threshold: 0.8
+n_workers: 1  # Number of parallel workers for behavior processing
+align: True # Run policy generation & evaluation (stage 2)
+
+# Output directory (relative to working directory)
+output_dir: ./results/${now:%Y-%m-%d_%H-%M-%S}
+
+hydra:
+  run:
+    dir: ${output_dir}/logs
+  sweep:
+    dir: ${output_dir}/multirun/logs
+    subdir: ${hydra.job.num}

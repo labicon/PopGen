@@ -193,9 +193,10 @@ if __name__ == "__main__":
     env_description = env_module.ENVIRONMENT_DESCRIPTION
 
     embeddings_path = os.path.join(output_path, "embeddings.npy")
+    # Pass save_path=None to avoid directory issues; we'll compute embeddings for plotting below
     diversity_evaluator = DiversityEvaluator(
         embedding_model=args.embedding_model,
-        save_path=embeddings_path,
+        save_path=None, 
         num_workers=1,
     )
     diversity_results = diversity_evaluator.evaluate([{"texts": behaviors_str}], metadata=metadata)
@@ -234,7 +235,7 @@ if __name__ == "__main__":
         strategy=strategy,
     )
 
-    quality_evaluator = BehaviorQualityEvaluator(model=args.judge_model)
+    quality_evaluator = BehaviorQualityEvaluator(judge_model=args.judge_model)
     quality_inputs = [
         {"behavior": behavior_text, "environment_description": env_description}
         for behavior_text in _behaviors_to_texts(behaviors)

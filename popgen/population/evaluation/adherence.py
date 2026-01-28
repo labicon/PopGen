@@ -9,7 +9,7 @@ import numpy as np
 from pqdm.threads import pqdm
 from pydantic import BaseModel
 
-from popgen.utils.logging import encode_images_to_base64, rollout_states_to_str
+from popgen.utils.logging import encode_images_to_base64, rollout_states_to_str, uniform_sample
 
 from .base import BaseEvaluator, EvalResult, calculate_stats
 
@@ -34,7 +34,7 @@ Ego Agent Visual Description: {ego_visual_description}
 
 
 class BehaviorAdherenceResult(BaseModel):
-    """Result of evaluating a trajectory for a specific behavior."""
+    """Result of evaluating a trajectory if it aligns with a specific behavior."""
 
     evaluation: bool
     reasoning: str
@@ -81,7 +81,7 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
 
         def _worker_evaluate_rollout(rollout):
             rollout_states, rollout_images = rollout
-            return self._evaluate_single_rollout(
+            return self.evaluate_single_rollout(
                 behavior=behavior,
                 ego_name=ego_name,
                 ego_visual_description=ego_visual_description,
@@ -108,13 +108,20 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             "reasoning": combine_reasoning([r.model_dump() for r in all_results]),
         }
 
-    def _evaluate_single_rollout(self, behavior: str, ego_name: str, ego_visual_description: str, rollout_states: dict[str, Any], rollout_images: list[np.ndarray] = None, **kwargs) -> dict[str, Any]:
+    def evaluate_single_rollout(self, behavior: str, ego_name: str, ego_visual_description: str, rollout_states: dict[str, Any], rollout_images: list[np.ndarray] = None, **kwargs) -> dict[str, Any]:
         """Evaluate adherence for a single rollout."""
         if isinstance(rollout_states, str) and "[ERROR]" in rollout_states:
             return BehaviorAdherenceResult(evaluation=False, reasoning=rollout_states)
 
         if rollout_images is None:
             rollout_images = []
+
+        # Only use 5 equally spaced images if there are more
+        if len(rollout_images) > 5:
+            rollout_images = uniform_sample(rollout_images, n_samples=5)
+        # Only use 20 equally spaced states if there are more
+        if len(rollout_states) > 20:
+            rollout_states = uniform_sample(rollout_states, n_samples=20)
 
         user_prompt = BEHAVIOR_ADHERENCE_USER_PROMPT.format(
             behavior=behavior,
@@ -191,6 +198,6 @@ def combine_reasoning(instance_metrics: list[dict[str, Any]]) -> str:
     reasonings = []
     for i, m in enumerate(instance_metrics):
         reasoning = m.get("reasoning", "No reasoning provided.")
-        success = m.get("adherence", False)
+        success = m.get("evaluation", False)
         reasonings.append(f"> [{success}] Rollout #{i + 1}:\n{reasoning}\n")
     return "Rollouts reasonings:\n" + "\n".join(reasonings)
