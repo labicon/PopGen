@@ -1,7 +1,6 @@
-import litellm
-
 from popgen.population.generation.base import GeneratorWithFeedback
 from popgen.population.types import CodeSnippet
+from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import clean_code, parse_llm_response
 
 SYSTEM_PROMPT = """You are an expert AI agent specializing in designing reward functions for reinforcement learning.
@@ -41,8 +40,8 @@ Provide the reward function to train an agent with desired behavior as the `comp
 class RewardFnGenerator(GeneratorWithFeedback):
     """Generator for agent reward functions based on behavior descriptions."""
 
-    def __init__(self, model):
-        super().__init__(model, generation_type="RewardFn")
+    def __init__(self, model_config: LitellmConfig):
+        super().__init__(model_config, generation_type="RewardFn")
 
     def generate(
         self,

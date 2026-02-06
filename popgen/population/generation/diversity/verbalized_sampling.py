@@ -5,6 +5,7 @@ from typing import Any, TypeVar
 import litellm
 from pydantic import BaseModel, create_model
 
+from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import parse_llm_response
 
 from .base import GenerationStrategy
@@ -28,14 +29,14 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
 
     def __init__(
         self,
-        model: str,
+        model_config: LitellmConfig,
         output_type: type[T],
         output_dir: str | None = None,
         probability_tuning: float | None = None,
         do_cot: bool = False,
         samples_per_turn: int | None = None,
     ):
-        super().__init__(model, output_type, output_dir)
+        super().__init__(model_config, output_type, output_dir)
         self.probability_tuning = probability_tuning
         self.do_cot = do_cot
         self.samples_per_turn = samples_per_turn
@@ -166,10 +167,11 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
 
         try:
             response = litellm.completion(
-                model=self.model,
+                model=self.model_config.model_name,
                 messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": input_prompt}],
                 response_format=response_type,
                 max_retries=3,
+                **self.model_config.get_completion_kwargs(),
             )
 
             result = parse_llm_response(response, response_type)

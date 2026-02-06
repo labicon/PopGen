@@ -9,6 +9,8 @@ from typing import Any, Literal
 import torch
 from pqdm.processes import pqdm
 
+from popgen.agents import PolicyCodeAgent
+from popgen.utils.config import LitellmConfig
 from popgen.utils.decorators import track_time
 from popgen.utils.imports import import_all_functions_from_file, import_function_from_file
 from popgen.utils.logging import save_rollout, uniform_sample
@@ -16,18 +18,16 @@ from popgen.utils.logging import save_rollout, uniform_sample
 from .evaluation import BehaviorAdherenceEvaluator
 from .generation import BaseGenerator
 from .types import Behavior
-from .wrappers import PolicyCodeAgentWrapper
 
 logging.basicConfig(level=logging.INFO)
 
 
-def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn"], **kwargs) -> dict:
+def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn", "LLMAgent", "Trajectory"], **kwargs) -> dict:
     """Load policy functions and environment."""
     if policy_type == "PolicyCode":
         policies = import_all_functions_from_file(kwargs["file_path"])
-        policies = {name: PolicyCodeAgentWrapper(func) for name, func in policies.items()}
+        policies = {name: PolicyCodeAgent(func) for name, func in policies.items()}
         env = None  # Environment will be created during rollout
-        return {"env": None, "policies": policies}
     elif policy_type == "RewardFn":
         from benchmarl.experiment import Experiment
 
@@ -49,6 +49,31 @@ def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn"], **kwargs
         )
         policies = {"policy": experiment.policy}
         env = experiment.test_env
+    elif policy_type == "LLMAgent":
+        from popgen.agents import LLMAgent
+        from popgen.utils.config import LitellmConfig
+
+        # Load configuration from JSON
+        config_path = kwargs["config_path"]
+        with open(config_path) as f:
+            config = json.load(f)
+
+        # Create LitellmConfig from the saved configuration
+        model_config = LitellmConfig(**config["model_config"])
+
+        # Create LLMAgent with loaded configuration
+        policy = LLMAgent(
+            model_config=model_config,
+            environment_description=config["environment_description"],
+            action_description=config["action_description"],
+            action_type=config["action_type"],
+            behavior=config.get("behavior"),
+            horizon_length=config.get("horizon_length", 1),
+            include_trajectory_history=config.get("include_trajectory_history", False),
+        )
+
+        policies = {"policy": policy}
+        env = None  # Environment will be created during rollout
 
     return {"env": env, "policies": policies}
 
@@ -94,7 +119,7 @@ class AgentGenerationPipeline(ABC):
         self.evaluator: BehaviorAdherenceEvaluator = evaluator
         self.output_dir = output_dir
         self.rollout_fn = rollout_fn
-        self.policy_type = self.generator.generation_type
+        self.policy_type = getattr(self.generator, "generation_type", None)
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -227,7 +252,12 @@ class AgentGenerationPipeline(ABC):
                     else:
                         logging.warning(f"[B={idx}] FAILURE – Adherence: {adherence:.2f}")
                         overall_feedback = instance_metric["reasoning"]
-                        feedbacks[idx].append((generated_items[idx].code, overall_feedback))
+                        # For code-based pipelines, include the generated code in feedback
+                        # For other pipelines (e.g., LLM agents), just use the feedback text
+                        if hasattr(generated_items[idx], "code"):
+                            feedbacks[idx].append((generated_items[idx].code, overall_feedback))
+                        else:
+                            feedbacks[idx].append(("", overall_feedback))
             else:
                 evaluation_latency = 0.0
 
@@ -507,3 +537,68 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
             generated_policies.append(gen_code)
 
         return generated_policies, loading_kwargs
+
+
+class LLMAgentGenerationPipeline(AgentGenerationPipeline):
+    """Pipeline for generating LLM-based agents with behavior specifications."""
+
+    def __init__(
+        self,
+        agent_model_config: LitellmConfig,
+        evaluator: BehaviorAdherenceEvaluator,
+        rollout_fn: callable,
+        output_dir: str,
+    ):
+        super().__init__(
+            generator=None,  # Not used in this pipeline
+            evaluator=evaluator,
+            rollout_fn=rollout_fn,
+            output_dir=output_dir,
+        )
+        self.agent_model_config = agent_model_config
+        self.policy_type = "LLMAgent"
+
+    @track_time("LLM Agent configuration")
+    def _generate_policies(
+        self,
+        behaviors: list[Behavior],
+        output_dirs: list[str],
+        environment_description: str = "",
+        action_description: str = "",
+        action_type: Literal["Discrete", "Continuous"] = None,
+        horizon_length: int = 1,
+        include_trajectory_history: bool = False,
+        **kwargs,
+    ) -> tuple[list[Any], list[dict]]:
+        """Generate LLM agent configurations for each behavior."""
+        loading_kwargs = []
+        generated_configs = []
+
+        logging.info(f"Creating LLM agent configurations for {len(behaviors)} behaviors...")
+
+        for output_dir, behavior in zip(output_dirs, behaviors):
+            # Create configuration for this LLM agent
+            config = {
+                "model_config": {
+                    "model_name": self.agent_model_config.model_name,
+                    "api_base": self.agent_model_config.api_base,
+                    "generation_kwargs": self.agent_model_config.generation_kwargs,
+                },
+                "behavior": behavior.description,
+                "environment_description": environment_description,
+                "action_description": action_description,
+                "action_type": action_type,
+                "horizon_length": horizon_length,
+                "include_trajectory_history": include_trajectory_history,
+            }
+
+            # Save configuration to JSON
+            config_file_path = f"{output_dir}/llm_agent_config.json"
+            with open(config_file_path, "w") as f:
+                json.dump(config, f, indent=2)
+
+            # Add loading kwargs for this agent
+            loading_kwargs.append({"config_path": config_file_path})
+            generated_configs.append(behavior.description)
+
+        return generated_configs, loading_kwargs

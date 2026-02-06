@@ -1,0 +1,32 @@
+# Environment selection
+env: football
+
+# Behavior generation strategy
+behavior_generator:
+  strategy: verbalized_sampling  # Options: stratified, in_context
+  model_config: 
+    model_name: openai/gpt-5-nano
+
+# LLM model configuration
+generator: 
+  model_name: openai/gpt-5-nano
+evaluator: 
+  model_name: openai/gpt-5-nano
+
+# Pipeline settings
+max_behaviors: 5
+max_alignment_retries: 3
+n_eval_rollouts: 5
+adherence_threshold: 1.0  # Minimum adherence score for successful alignment
+n_workers: 8  # Number of parallel workers for behavior processing
+
+# Output directory (relative to working directory)
+output_dir: ./results/${env}
+run_name: ${behavior_generator.strategy}__${basename:${generator.model_name}}__${now:%Y-%m-%d_%H-%M-%S}
+
+hydra:
+  run:
+    dir: ${output_dir}/${run_name}
+  sweep:
+    dir: ${output_dir}/${run_name}
+    subdir: ${hydra.job.num}

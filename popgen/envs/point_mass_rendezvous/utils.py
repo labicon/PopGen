@@ -11,11 +11,19 @@ RL_CFG_DIR = Path(__file__).parent / "rl_cfg"
 
 def get_state_point_mass_rendezvous(env):
     state = {}
-    for i, agent in enumerate(env.world.agents):
+
+    def _get_agent_state(agent):
         pos = agent.state.pos[0].cpu().numpy().tolist()
         vel = agent.state.vel[0].cpu().numpy().tolist()
-        state[f"agent{i}_pos"] = [round(x, 2) for x in pos]
-        state[f"agent{i}_vel"] = [round(x, 2) for x in vel]
+        action = agent.action.u[0].cpu().numpy().tolist()
+        return {
+            "action": [round(x, 2) for x in action],
+            "pos": [round(x, 2) for x in pos],
+            "vel": [round(x, 2) for x in vel],
+        }
+
+    for i, agent in enumerate(env.world.agents):
+        state[agent.name] = _get_agent_state(agent)
 
     for i, landmark in enumerate(env.world.landmarks):
         pos = landmark.state.pos[0].cpu().numpy().tolist()

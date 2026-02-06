@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock
 
 from popgen.population.generation.policy_generator import PolicyCodeGenerator
 from popgen.population.types import CodeSnippet
+from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import clean_code
 
 
@@ -29,19 +30,21 @@ class TestCodeSnippetModel:
 
 class TestPolicyCodeGenerator:
     def test_init_custom_model(self):
-        generator = PolicyCodeGenerator(model="gpt-4-turbo")
-        assert generator.model == "gpt-4-turbo"
+        config = LitellmConfig(model_name="gpt-4-turbo")
+        generator = PolicyCodeGenerator(model_config=config)
+        assert generator.model_name == "gpt-4-turbo"
 
 
 class TestGenerate:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.generation.policy_generator.litellm.completion") as mock:
+        with patch("popgen.population.generation.base.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
     def generator(self):
-        return PolicyCodeGenerator(model="openai/gpt-4")
+        config = LitellmConfig(model_name="openai/gpt-4")
+        return PolicyCodeGenerator(model_config=config)
 
     @pytest.fixture
     def behavior(self):
@@ -71,12 +74,13 @@ class TestGenerate:
 class TestGenerateStandalonePolicy:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.generation.policy_generator.litellm.completion") as mock:
+        with patch("popgen.population.generation.base.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
     def generator(self):
-        return PolicyCodeGenerator(model="openai/gpt-4")
+        config = LitellmConfig(model_name="openai/gpt-4")
+        return PolicyCodeGenerator(model_config=config)
 
     @pytest.fixture
     def behavior(self):

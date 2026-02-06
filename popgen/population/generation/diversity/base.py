@@ -3,6 +3,8 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from popgen.utils.config import LitellmConfig
+
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -13,12 +15,17 @@ class GenerationStrategy(ABC):
     The output type is specified via constructor arguments.
     """
 
-    def __init__(self, model: str, output_type: type[T], output_dir: str | None = None):
+    def __init__(self, model_config: LitellmConfig | dict, output_type: type[T], output_dir: str | None = None):
         super().__init__()
-        self.generated_items: list[T] = []
-        self.model = model
+
+        if not isinstance(model_config, LitellmConfig):
+            model_config = LitellmConfig(**model_config)
+
+        self.model_config = model_config
         self.output_type = output_type
         self.output_dir = output_dir
+
+        self.generated_items: list[T] = []
 
     @abstractmethod
     def generate(self, input_prompt: str, **kwargs: Any) -> list[T]:

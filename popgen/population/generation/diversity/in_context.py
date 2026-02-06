@@ -3,6 +3,7 @@ from typing import Any, TypeVar
 import litellm
 from pydantic import BaseModel
 
+from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import parse_llm_response
 
 from .base import GenerationStrategy
@@ -23,8 +24,8 @@ Focus on creating diversity - the new {item_name} should explore a different asp
 class InContextStrategy(GenerationStrategy):
     """Generate diverse items using in-context learning with previously generated items."""
 
-    def __init__(self, model: str, output_type: type[T], output_dir: str | None = None):
-        super().__init__(model, output_type, output_dir)
+    def __init__(self, model_config: LitellmConfig, output_type: type[T], output_dir: str | None = None):
+        super().__init__(model_config, output_type, output_dir)
 
     def generate(self, input_prompt: str, **kwargs: Any) -> list[T]:
         """
@@ -52,13 +53,14 @@ class InContextStrategy(GenerationStrategy):
 
         try:
             response = litellm.completion(
-                model=self.model,
+                model=self.model_config.model_name,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": generation_prompt},
                 ],
                 response_format=self.output_type,
                 max_retries=3,
+                **self.model_config.get_completion_kwargs(),
             )
 
             item = parse_llm_response(response, self.output_type)

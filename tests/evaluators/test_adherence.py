@@ -3,6 +3,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from popgen.population import BehaviorAdherenceEvaluator, BehaviorAdherenceResult, Behavior
+from popgen.utils.config import LitellmConfig
 
 
 def _mock_evaluation_response(evaluation: bool, reasoning: str) -> MagicMock:
@@ -38,8 +39,9 @@ class TestBehaviorAdherenceResultModel:
 
 class TestBehaviorAdherenceEvaluator:
     def test_init_custom_model(self):
-        evaluator = BehaviorAdherenceEvaluator(judge_model="gpt-4-turbo")
-        assert evaluator.judge_model == "gpt-4-turbo"
+        config = LitellmConfig(model_name="gpt-4-turbo")
+        evaluator = BehaviorAdherenceEvaluator(model_config=config)
+        assert evaluator.model_config.model_name == "gpt-4-turbo"
 
 
 class TestComputeInstanceMetric:
@@ -50,7 +52,8 @@ class TestComputeInstanceMetric:
 
     @pytest.fixture
     def evaluator(self):
-        return BehaviorAdherenceEvaluator(judge_model="gpt-5-nano", num_workers=1)
+        config = LitellmConfig(model_name="gpt-5-nano")
+        return BehaviorAdherenceEvaluator(model_config=config, num_workers=1)
 
     @pytest.fixture
     def sample_rollout_states(self):
@@ -163,7 +166,8 @@ class TestComputeInstanceMetricWithImages:
 
     @pytest.fixture
     def evaluator(self):
-        return BehaviorAdherenceEvaluator(judge_model="gpt-5-nano", num_workers=1)
+        config = LitellmConfig(model_name="gpt-5-nano")
+        return BehaviorAdherenceEvaluator(model_config=config, num_workers=1)
 
     @pytest.fixture
     def sample_rollout_states(self):

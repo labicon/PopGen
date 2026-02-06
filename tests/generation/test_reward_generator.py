@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock
 
 from popgen.population.generation.reward_generator import RewardFnGenerator
 from popgen.population.types import CodeSnippet
+from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import clean_code
 
 
@@ -42,19 +43,21 @@ class TestCodeSnippetModel:
 
 class TestRewardFnGenerator:
     def test_init_custom_model(self):
-        generator = RewardFnGenerator(model="gpt-4-turbo")
-        assert generator.model == "gpt-4-turbo"
+        config = LitellmConfig(model_name="gpt-4-turbo")
+        generator = RewardFnGenerator(model_config=config)
+        assert generator.model_name == "gpt-4-turbo"
 
 
 class TestGenerate:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.generation.reward_generator.litellm.completion") as mock:
+        with patch("popgen.population.generation.base.litellm.completion") as mock:
             yield mock
 
     @pytest.fixture
     def generator(self):
-        return RewardFnGenerator(model="openai/gpt-4")
+        config = LitellmConfig(model_name="openai/gpt-4")
+        return RewardFnGenerator(model_config=config)
 
     @pytest.fixture
     def behavior(self):
@@ -242,7 +245,8 @@ class TestGenerate:
         })
         mock_completion.return_value = mock_response
 
-        generator = RewardFnGenerator(model="custom-model")
+        config = LitellmConfig(model_name="custom-model")
+        generator = RewardFnGenerator(model_config=config)
         generator.generate(
             behavior=behavior,
             codebase_context=codebase_context,

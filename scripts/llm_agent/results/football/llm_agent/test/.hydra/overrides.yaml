@@ -1,0 +1,4 @@
+- agent.horizon_length=50
+- agent.include_trajectory_history=true
+- n_workers=1
+- run_name=test

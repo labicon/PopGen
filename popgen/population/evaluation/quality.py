@@ -7,6 +7,9 @@ from typing import Any
 import litellm
 from pydantic import BaseModel
 
+from popgen.utils.config import LitellmConfig
+from popgen.utils.parsing import parse_llm_response
+
 from .base import BaseEvaluator, EvalResult, calculate_stats
 
 # ---------------------------------- PROMPTS --------------------------------- #
@@ -78,9 +81,9 @@ class BehaviorQualityEvaluator(BaseEvaluator):
     aggregate_plot_metrics = ["relevance", "realism", "specificity"]
     key_plot_metrics = [("total", "Quality Score")]
 
-    def __init__(self, judge_model: str, num_workers: int = 8):
+    def __init__(self, model_config: LitellmConfig, num_workers: int = 8):
         super().__init__(name="BehaviorQuality", num_workers=num_workers)
-        self.judge_model = judge_model
+        self.model_config = model_config
 
     def compute_instance_metric(self, input_data: dict[str, Any]) -> dict[str, Any]:
         """Compute quality metrics for a single behavior.
@@ -101,14 +104,15 @@ class BehaviorQualityEvaluator(BaseEvaluator):
 
         try:
             response = litellm.completion(
-                model=self.judge_model,
+                model=self.model_config.model_name,
                 messages=[
                     {"role": "system", "content": BEHAVIOR_QUALITY_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
                 response_format=BehaviorQualityResult,
+                **self.model_config.get_completion_kwargs(),
             )
-            result = BehaviorQualityResult.model_validate_json(response.choices[0].message.content)
+            result = parse_llm_response(response, BehaviorQualityResult)
             return {
                 "behavior": behavior,
                 "relevance": result.relevance.score,
@@ -154,7 +158,7 @@ class BehaviorQualityEvaluator(BaseEvaluator):
         metadata.update(
             {
                 "evaluation_framework": "Behavior Quality LLM-as-Judge",
-                "judge_model": self.judge_model,
+                "judge_model": self.model_config.model_name,
             }
         )
 

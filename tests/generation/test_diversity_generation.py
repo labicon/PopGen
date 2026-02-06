@@ -7,6 +7,7 @@ from popgen.population.generation.diversity import (
     InContextStrategy,
     StratifiedStrategy,
 )
+from popgen.utils.config import LitellmConfig
 
 
 class SampleItem(BaseModel):
@@ -56,14 +57,16 @@ def _mock_property_list_response(properties: list[str]) -> MagicMock:
 class TestGenerationStrategy:
     def test_cannot_instantiate_abstract_class(self):
         with pytest.raises(TypeError):
-            GenerationStrategy(model="openai/gpt-4", output_type=SampleItem)
+            config = LitellmConfig(model_name="openai/gpt-4")
+            GenerationStrategy(model_config=config, output_type=SampleItem)
 
     def test_list_to_string_empty(self):
         class ConcreteStrategy(GenerationStrategy):
             def generate(self, environment_description, **kwargs):
                 return []
 
-        strategy = ConcreteStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = ConcreteStrategy(model_config=config, output_type=SampleItem)
         result = strategy._list_to_string([])
         assert result == "None"
 
@@ -72,7 +75,8 @@ class TestGenerationStrategy:
             def generate(self, environment_description, **kwargs):
                 return []
 
-        strategy = ConcreteStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = ConcreteStrategy(model_config=config, output_type=SampleItem)
         items = [
             SampleItem(name="Alpha", description="First item"),
             SampleItem(name="Beta", description="Second item"),
@@ -86,15 +90,17 @@ class TestGenerationStrategy:
             def generate(self, environment_description, **kwargs):
                 return []
 
-        strategy = ConcreteStrategy(model="claude-3-opus-20240229", output_type=SampleItem)
-        assert strategy.model == "claude-3-opus-20240229"
+        config = LitellmConfig(model_name="claude-3-opus-20240229")
+        strategy = ConcreteStrategy(model_config=config, output_type=SampleItem)
+        assert strategy.model_config.model_name == "claude-3-opus-20240229"
 
     def test_output_type_stored(self):
         class ConcreteStrategy(GenerationStrategy):
             def generate(self, environment_description, **kwargs):
                 return []
 
-        strategy = ConcreteStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = ConcreteStrategy(model_config=config, output_type=SampleItem)
         assert strategy.output_type == SampleItem
 
     def test_generated_items_initialized_empty(self):
@@ -102,7 +108,8 @@ class TestGenerationStrategy:
             def generate(self, environment_description, **kwargs):
                 return []
 
-        strategy = ConcreteStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = ConcreteStrategy(model_config=config, output_type=SampleItem)
         assert strategy.generated_items == []
 
 
@@ -113,17 +120,20 @@ class TestInContextStrategy:
             yield mock
 
     def test_init_custom_model(self):
-        strategy = InContextStrategy(model="gpt-4-turbo", output_type=SampleItem)
-        assert strategy.model == "gpt-4-turbo"
+        config = LitellmConfig(model_name="gpt-4-turbo")
+        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
+        assert strategy.model_config.model_name == "gpt-4-turbo"
 
     def test_init_output_type(self):
-        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
         assert strategy.output_type == SampleItem
 
     def test_generate_single_success(self, mock_completion):
         mock_completion.return_value = _mock_item_response("Test", "Test description")
 
-        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
         result = strategy._generate_single("Test environment")
 
         assert result.name == "Test"
@@ -138,7 +148,8 @@ class TestInContextStrategy:
             for i in range(3)
         ]
 
-        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
         results = strategy.generate("Test environment", num_items=3)
 
         assert len(results) == 3
@@ -149,7 +160,8 @@ class TestInContextStrategy:
     def test_generate_default_num_items(self, mock_completion):
         mock_completion.return_value = _mock_item_response("Test", "Test")
 
-        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
         results = strategy.generate("Test environment")
 
         assert len(results) == 4
@@ -158,7 +170,8 @@ class TestInContextStrategy:
     def test_previous_items_included_in_prompt(self, mock_completion):
         mock_completion.return_value = _mock_item_response("New", "New item")
 
-        strategy = InContextStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
         existing_items = [SampleItem(name="Existing", description="Already generated")]
 
         strategy._generate_single("Test environment", previous_items=existing_items)
@@ -176,17 +189,20 @@ class TestStratifiedStrategy:
             yield mock
 
     def test_init_custom_model(self):
-        strategy = StratifiedStrategy(model="gpt-4-turbo", output_type=SampleItem)
-        assert strategy.model == "gpt-4-turbo"
+        config = LitellmConfig(model_name="gpt-4-turbo")
+        strategy = StratifiedStrategy(model_config=config, output_type=SampleItem)
+        assert strategy.model_config.model_name == "gpt-4-turbo"
 
     def test_init_output_type(self):
-        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = StratifiedStrategy(model_config=config, output_type=SampleItem)
         assert strategy.output_type == SampleItem
 
     def test_generate_properties(self, mock_completion):
         mock_completion.return_value = _mock_property_list_response(["Property 1", "Property 2"])
 
-        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = StratifiedStrategy(model_config=config, output_type=SampleItem)
         result = strategy.generate_properties("Test environment", num_properties=2, candidate_rate=1.0)
 
         assert result == ["Property 1", "Property 2"]
@@ -195,7 +211,8 @@ class TestStratifiedStrategy:
     def test_generate_properties_prompt_contains_request(self, mock_completion):
         mock_completion.return_value = _mock_property_list_response(["Property 1"])
 
-        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = StratifiedStrategy(model_config=config, output_type=SampleItem)
         strategy.generate_properties("My specific request", num_properties=1, candidate_rate=1.0)
 
         call_args = mock_completion.call_args
@@ -205,7 +222,8 @@ class TestStratifiedStrategy:
     def test_generate_item_from_properties(self, mock_completion):
         mock_completion.return_value = _mock_item_response("TestItem", "Test description")
 
-        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = StratifiedStrategy(model_config=config, output_type=SampleItem)
         result = strategy.generate_item_from_properties(
             "Test environment",
             ["Property 1", "Property 2"]
@@ -228,7 +246,8 @@ class TestStratifiedStrategy:
             _mock_item_response("I3", "Desc 3"),
         ]
 
-        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = StratifiedStrategy(model_config=config, output_type=SampleItem)
         result = strategy.generate("Test environment")
 
         assert len(result) == 4
@@ -250,18 +269,21 @@ class TestStratifiedStrategy:
             _mock_item_response("I5", "Desc 5"),
         ]
 
-        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = StratifiedStrategy(model_config=config, output_type=SampleItem)
         result = strategy.generate("Test environment", num_items=6)
 
         assert len(result) == 6
 
     def test_list_to_string_empty(self):
-        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = StratifiedStrategy(model_config=config, output_type=SampleItem)
         result = strategy._list_to_string([])
         assert result == "None"
 
     def test_list_to_string_with_items(self):
-        strategy = StratifiedStrategy(model="openai/gpt-4", output_type=SampleItem)
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = StratifiedStrategy(model_config=config, output_type=SampleItem)
         result = strategy._list_to_string(["Item 1", "Item 2"])
         assert "- Item 1" in result
         assert "- Item 2" in result

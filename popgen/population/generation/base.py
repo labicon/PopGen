@@ -4,9 +4,14 @@ import litellm
 from pqdm.threads import pqdm
 from pydantic import BaseModel
 
+from popgen.utils.config import LitellmConfig
+
 
 class BaseGenerator(ABC):
     """Abstract base class for behavior-based generation."""
+
+    def __init__(self, generation_type: str):
+        self.generation_type = generation_type
 
     @abstractmethod
     def generate(self, *args, **kwargs) -> dict | BaseModel:
@@ -40,12 +45,29 @@ class BaseGenerator(ABC):
 
 
 class GeneratorWithFeedback(BaseGenerator):
-    """Abstract base class for generators that utilize feedback."""
+    """Abstract base class for generators that utilize feedback.
 
-    def __init__(self, model: str, generation_type: str):
-        super().__init__()
-        self.model = model
-        self.generation_type = generation_type
+    Supports both string-based model names (backward compatible) and
+    LitellmConfig objects for more advanced configuration.
+
+    Example:
+        >>> # Simple usage with model name
+        >>> generator = MyGenerator(model="openai/gpt-4o-mini")
+        >>>
+        >>> # Advanced usage with config
+        >>> from popgen.utils.config import LitellmConfig
+        >>> config = LitellmConfig(
+        ...     model_name="hosted_vllm/Qwen/Qwen3-4B-Instruct",
+        ...     api_base="http://localhost:8000/v1",
+        ...     generation_kwargs={"temperature": 0.7}
+        ... )
+        >>> generator = MyGenerator(model=config)
+    """
+
+    def __init__(self, model_config: LitellmConfig, generation_type: str):
+        super().__init__(generation_type=generation_type)
+        self.model_config = model_config
+        self.model_name = model_config.model_name
 
     def generate(self, user_prompt: str = None, system_prompt: str = None, feedbacks: list = None, **kwargs) -> dict | BaseModel:
         """Generate items based on prompts and feedback.
@@ -54,7 +76,9 @@ class GeneratorWithFeedback(BaseGenerator):
             user_prompt: The user prompt for generation.
             system_prompt: The system prompt for generation.
             feedbacks: Optional feedbacks to refine generation.
-            **kwargs: Additional arguments passed to generation.
+            **kwargs: Additional arguments passed to litellm.completion().
+                These override any generation_kwargs from the config.
+
         Returns:
             Generated items as a dict or pydantic.BaseModel.
         """
@@ -70,9 +94,9 @@ class GeneratorWithFeedback(BaseGenerator):
             messages.append({"role": "user", "content": refinement_message})
 
         response = litellm.completion(
-            model=self.model,
+            model=self.model_config.model_name,
             messages=messages,
-            **kwargs,
+            **self.model_config.get_completion_kwargs(overrides=kwargs),
         )
 
         return response

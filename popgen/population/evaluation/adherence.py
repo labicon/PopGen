@@ -9,7 +9,9 @@ import numpy as np
 from pqdm.threads import pqdm
 from pydantic import BaseModel
 
+from popgen.utils.config import LitellmConfig
 from popgen.utils.logging import encode_images_to_base64, rollout_states_to_str, uniform_sample
+from popgen.utils.parsing import parse_llm_response
 
 from .base import BaseEvaluator, EvalResult, calculate_stats
 
@@ -50,9 +52,9 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
     aggregate_plot_metrics = ["adherence", "adjusted_adherence"]
     key_plot_metrics = [("adherence", "Behavior Adherence")]
 
-    def __init__(self, judge_model: str, num_workers: int = 8):
+    def __init__(self, model_config: LitellmConfig, num_workers: int = 8):
         super().__init__(name="BehaviorAdherence", num_workers=num_workers)
-        self.judge_model = judge_model
+        self.model_config = model_config
 
     def compute_instance_metric(self, input_data: dict[str, Any], **kwargs) -> dict[str, Any]:
         """Compute adherence metric for a behavior rollouts.
@@ -149,15 +151,15 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
 
         try:
             response = litellm.completion(
-                model=self.judge_model,
+                model=self.model_config.model_name,
                 messages=[
                     {"role": "system", "content": BEHAVIOR_ADHERENCE_SYSTEM_PROMPT},
                     {"role": "user", "content": content},
                 ],
                 response_format=BehaviorAdherenceResult,
-                **kwargs,
+                **self.model_config.get_completion_kwargs(overrides=kwargs),
             )
-            result = BehaviorAdherenceResult.model_validate_json(response.choices[0].message.content)
+            result = parse_llm_response(response, BehaviorAdherenceResult)
             return result
         except Exception as e:
             return BehaviorAdherenceResult(evaluation=False, reasoning=f"[ERROR] Evaluation failed: {e}")
@@ -185,7 +187,7 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
         metadata.update(
             {
                 "evaluation_framework": "Behavior Adherence VLM-as-Judge",
-                "judge_model": self.judge_model,
+                "judge_model": self.model_config.model_name,
                 "num_behaviors": len(inputs),
             }
         )

@@ -9,6 +9,7 @@ import numpy as np
 from pqdm.threads import pqdm
 from pydantic import BaseModel, create_model
 
+from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import parse_llm_response
 
 from .base import GenerationStrategy
@@ -91,8 +92,8 @@ class PropertyList(BaseModel):
 class StratifiedStrategy(GenerationStrategy):
     """Generate diverse items by first identifying strategic properties, then sampling from partitions."""
 
-    def __init__(self, model: str, output_type: type[T], output_dir: str | None = None, candidate_upsampling: float = 1.0, num_workers: int = 1):
-        super().__init__(model, output_type, output_dir)
+    def __init__(self, model_config: LitellmConfig, output_type: type[T], output_dir: str | None = None, candidate_upsampling: float = 1.0, num_workers: int = 1):
+        super().__init__(model_config, output_type, output_dir)
         self.candidate_upsampling = candidate_upsampling
         self.num_workers = num_workers
 
@@ -154,9 +155,10 @@ class StratifiedStrategy(GenerationStrategy):
         )
 
         response = litellm.completion(
-            model=self.model,
+            model=self.model_config.model_name,
             messages=[{"role": "system", "content": STRATIFICATION_SYSTEM_PROMPT.format(item_type=self.output_type.__name__)}, {"role": "user", "content": stratification_prompt}],
             response_format=PropertyList,
+            **self.model_config.get_completion_kwargs(),
         )
 
         properties = parse_llm_response(response, PropertyList).properties
@@ -178,9 +180,10 @@ class StratifiedStrategy(GenerationStrategy):
         )
 
         response = litellm.completion(
-            model=self.model,
+            model=self.model_config.model_name,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": generation_prompt}],
             response_format=self.output_type,
+            **self.model_config.get_completion_kwargs(),
         )
 
         item = parse_llm_response(response, self.output_type)

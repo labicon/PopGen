@@ -19,6 +19,8 @@ When you want to describe agent behaviors as code, these are the accessible vari
 The action should be a torch tensor of shape (1, 2) representing the force applied to the agent.
 Therefore, you can only move the agent, and do not have direct access to kick the ball."""
 
+ACTION_TYPE = "Continuous"
+
 ACTION_FORMAT = """The action should be a torch tensor of shape (1, 2) representing the force applied to the agent.
 For example, to move the agent to the right with a force of 1.0 and upwards with a force of 0.5, you would return `torch.tensor([[1.0, 0.5]])`"""
 

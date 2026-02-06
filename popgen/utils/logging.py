@@ -158,28 +158,30 @@ def rollout_states_to_str(rollout_data: list[dict[str, Any]]) -> str:
     # all_lines.append(f"Rollout {rollout_idx + 1} ({len(rollout_data)} total steps, showing {len(state_indices)} sampled states):")
     # all_lines.append("-" * 60)
 
-    for idx, state in enumerate(rollout_data):
-        state_line = f"Step {idx}: "
+    for state in rollout_data:
+        state_idx = state.pop("step", "N/A")
 
-        # Format each key-value pair in the state
         state_parts = []
-        for key, value in state.items():
-            if key == "step":
-                continue  # Skip redundant step key
-            # Convert numpy types to native Python types
-            if isinstance(value, np.ndarray):
-                value = value.tolist()
-            elif isinstance(value, np.generic):
-                value = value.item()
-            # Format floats with limited precision
-            if isinstance(value, float):
-                state_parts.append(f"{key}={value:.4f}")
-            elif isinstance(value, list) and all(isinstance(v, (int, float)) for v in value):
-                formatted_list = [f"{v:.4f}" if isinstance(v, float) else str(v) for v in value]
-                state_parts.append(f"{key}=[{', '.join(formatted_list)}]")
-            else:
-                state_parts.append(f"{key}={value}")
+        for agent_name, agent_state in state.get("agents", {}).items():
+            prefix = f"{agent_name}."
+            for key, value in agent_state.items():
+                if key == "step":
+                    continue  # Skip redundant step key
+                # Convert numpy types to native Python types
+                if isinstance(value, np.ndarray):
+                    value = value.tolist()
+                elif isinstance(value, np.generic):
+                    value = value.item()
+                # Format floats with limited precision
+                if isinstance(value, float):
+                    state_parts.append(f"{prefix}{key}={value:.4f}")
+                elif isinstance(value, list) and all(isinstance(v, (int, float)) for v in value):
+                    formatted_list = [f"{v:.4f}" if isinstance(v, float) else str(v) for v in value]
+                    state_parts.append(f"{prefix}{key}=[{', '.join(formatted_list)}]")
+                else:
+                    state_parts.append(f"{prefix}{key}={value}")
 
+        state_line = f"Step {state_idx}: "
         state_line += ", ".join(state_parts)
         all_lines.append(state_line)
 

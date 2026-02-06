@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 from popgen.population import BehaviorQualityEvaluator, BehaviorQualityResult, RubricScore
+from popgen.utils.config import LitellmConfig
 
 
 def _mock_quality_response(relevance: int, realism: int, specificity: int) -> MagicMock:
@@ -16,7 +17,8 @@ def _mock_quality_response(relevance: int, realism: int, specificity: int) -> Ma
 
 
 def test_quality_evaluator_returns_scores():
-    evaluator = BehaviorQualityEvaluator(judge_model="gpt-5-nano")
+    config = LitellmConfig(model_name="gpt-5-nano")
+    evaluator = BehaviorQualityEvaluator(model_config=config)
     with patch("popgen.population.evaluation.quality.litellm.completion") as mock_completion:
         mock_completion.return_value = _mock_quality_response(4, 3, 2)
 

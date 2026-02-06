@@ -1,0 +1,18 @@
+[
+  {
+    "name": "Aggressive Striker with Goal-First Mindset",
+    "description": "A lone blue agent positions to receive through-balls and finish chances quickly, prioritizing direct shots on goal over elaborate buildup."
+  },
+  {
+    "name": "Smart Playmaker and Ball Conveyor",
+    "description": "Focuses on creating non-obvious passing lanes, drawing defenders, and driving the team toward the goal with well-timed runs and decisive passes."
+  },
+  {
+    "name": "Defensive Anchor and Space Controller",
+    "description": "Stays central to protect the blue goal, intercepts threats, maintains compact shape, and seizes counter-attack opportunities when ball is won."
+  },
+  {
+    "name": "Wing Runner and Cross Specialist",
+    "description": "Drifts along the sideline to stretch the defense, looks for crosses or cutting inside opportunities to create scoring chances."
+  }
+]

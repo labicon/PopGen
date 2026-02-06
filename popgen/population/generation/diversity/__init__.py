@@ -2,6 +2,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from popgen.utils.config import LitellmConfig
+
 from .base import GenerationStrategy
 from .in_context import InContextStrategy
 from .simplestrat import StratifiedStrategy
@@ -15,16 +17,16 @@ STRATEGY_REGISTRY: dict[str, type[GenerationStrategy]] = {
 
 
 def load_strategy(
-    name: str,
-    model: str,
+    strategy: str,
+    model_config: LitellmConfig,
     output_type: type[BaseModel],
     **kwargs: Any,
 ) -> GenerationStrategy:
     """Load a generation strategy by name.
 
     Args:
-        name: The name of the strategy to load.
-        model: The LLM model to use.
+        strategy: The name of the strategy to load.
+        model_config: The LLM model configuration to use.
         output_type: The Pydantic model type for generated items.
         **kwargs: Additional arguments passed to the strategy constructor.
 
@@ -34,12 +36,12 @@ def load_strategy(
     Raises:
         ValueError: If the strategy name is not recognized.
     """
-    if name not in STRATEGY_REGISTRY:
+    if strategy not in STRATEGY_REGISTRY:
         available = ", ".join(STRATEGY_REGISTRY.keys())
-        raise ValueError(f"Unknown strategy: {name}. Available: {available}")
+        raise ValueError(f"Unknown strategy: {strategy}. Available: {available}")
 
-    strategy_cls = STRATEGY_REGISTRY[name]
-    return strategy_cls(model=model, output_type=output_type, **kwargs)
+    strategy_cls = STRATEGY_REGISTRY[strategy]
+    return strategy_cls(model_config=model_config, output_type=output_type, **kwargs)
 
 
 __all__ = [

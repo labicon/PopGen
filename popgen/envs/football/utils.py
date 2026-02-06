@@ -15,28 +15,35 @@ def get_state_football(env):
     blue_team, red_team = env.scenario.blue_agents, env.scenario.red_agents
     goal_pos = env.scenario.right_goal_pos
 
-    # Ego team agents
-    for i, agent in enumerate(blue_team):
+    def _get_agent_state(agent):
         pos = agent.state.pos[0].cpu().numpy().tolist()
         vel = agent.state.vel[0].cpu().numpy().tolist()
-        state[f"blue_agent{i}_pos"] = [round(x, 2) for x in pos]
-        state[f"blue_agent{i}_vel"] = [round(x, 2) for x in vel]
+        action = agent.action.u[0].cpu().numpy().tolist()
+        return {
+            "action": [round(x, 2) for x in action],
+            "pos": [round(x, 2) for x in pos],
+            "vel": [round(x, 2) for x in vel],
+        }
+
+    # Ego team agents
+    for agent in blue_team:
+        state[agent.name] = _get_agent_state(agent)
 
     # Adversary team agents
-    for i, agent in enumerate(red_team):
-        pos = agent.state.pos[0].cpu().numpy().tolist()
-        vel = agent.state.vel[0].cpu().numpy().tolist()
-        state[f"red_agent{i}_pos"] = [round(x, 2) for x in pos]
-        state[f"red_agent{i}_vel"] = [round(x, 2) for x in vel]
+    for agent in red_team:
+        state[agent.name] = _get_agent_state(agent)
 
     # Goal position
-    state["goal_pos"] = [round(x, 2) for x in goal_pos.cpu().numpy().tolist()]
+    env_state = {}
+    env_state["goal_pos"] = [round(x, 2) for x in goal_pos.cpu().numpy().tolist()]
 
     # Ball state
     ball_pos = env.scenario.ball.state.pos[0].cpu().numpy().tolist()
     ball_vel = env.scenario.ball.state.vel[0].cpu().numpy().tolist()
-    state["ball_pos"] = [round(x, 2) for x in ball_pos]
-    state["ball_vel"] = [round(x, 2) for x in ball_vel]
+    env_state["ball_pos"] = [round(x, 2) for x in ball_pos]
+    env_state["ball_vel"] = [round(x, 2) for x in ball_vel]
+
+    state["env"] = env_state
 
     return state
 

@@ -13,6 +13,7 @@ import numpy as np
 from sklearn.manifold import TSNE
 
 from popgen.population.evaluation import BehaviorQualityEvaluator, DiversityEvaluator
+from popgen.utils.config import LitellmConfig
 
 
 def _behaviors_to_texts(behaviors: list[dict[str, Any]]) -> list[str]:
@@ -235,7 +236,8 @@ if __name__ == "__main__":
         strategy=strategy,
     )
 
-    quality_evaluator = BehaviorQualityEvaluator(judge_model=args.judge_model)
+    judge_config = LitellmConfig(model_name=args.judge_model)
+    quality_evaluator = BehaviorQualityEvaluator(model_config=judge_config)
     quality_inputs = [
         {"behavior": behavior_text, "environment_description": env_description}
         for behavior_text in _behaviors_to_texts(behaviors)

@@ -1,7 +1,6 @@
-import litellm
-
 from popgen.population.generation.base import GeneratorWithFeedback
 from popgen.population.types import CodeSnippet
+from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import clean_code, parse_llm_response
 
 SYSTEM_PROMPT = """You are an expert AI agent specializing in generating effective policies scripts for multi-agent coordination tasks.
@@ -32,8 +31,8 @@ Provide the python code that describes the behavior as the `policy(obs)` functio
 class PolicyCodeGenerator(GeneratorWithFeedback):
     """Generator for agent policies based on behavior descriptions."""
 
-    def __init__(self, model: str):
-        super().__init__(model, generation_type="PolicyCode")
+    def __init__(self, model_config: LitellmConfig):
+        super().__init__(model_config, generation_type="PolicyCode")
 
     def generate(
         self,

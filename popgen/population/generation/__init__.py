@@ -8,6 +8,7 @@ from .diversity import (
 from .policy_generator import PolicyCodeGenerator
 from .reward_generator import RewardFnGenerator
 from .rollout_synthetizer import RolloutSynthetizer, RolloutSynthetizerResult
+from .trajectory_generator import Trajectory, TrajectoryGenerator
 
 __all__ = [
     "BaseGenerator",
@@ -19,4 +20,6 @@ __all__ = [
     "RewardFnGenerator",
     "RolloutSynthetizer",
     "RolloutSynthetizerResult",
+    "Trajectory",
+    "TrajectoryGenerator",
 ]

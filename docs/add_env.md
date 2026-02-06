@@ -1,187 +1,126 @@
 # Adding a New Environment
 
-This guide explains how to add a new environment to the repository.
+Each environment lives in `popgen/envs/<env_name>/` with three files: `__init__.py`, `prompts.py`, and `utils.py`.
 
-## Directory Structure
+## 1. Create `prompts.py`
 
-Each environment lives in `popgen/envs/<env_name>/` with the following structure:
-
-```
-popgen/envs/<env_name>/
-├── __init__.py
-├── prompts.py
-├── utils.py
-└── rl_cfg/ (optional, for VMAS/BenchMARL training configs)
-```
-
-## Step 1: Create the Environment Folder
-
-```bash
-mkdir -p popgen/envs/<env_name>
-```
-
-## Step 2: Create `prompts.py`
-
-This file contains the LLM prompts that describe the environment. Define the constants below:
+Define LLM prompts that describe the environment:
 
 ```python
-ENVIRONMENT_DESCRIPTION = """
-<Describe the environment, task objectives, agents, and their roles.>
-<List accessible variables for behavior code generation.>
-"""
+# popgen/envs/football/prompts.py
 
-ACTION_FORMAT = """
-<Describe the action format expected by the policy generator.>
-<Include tensor shapes and an example.>
-"""
-
-OBSERVATION_FORMAT = """
-<Provide the observation function code or description.>
-<This helps the LLM understand how observations are structured.>
-"""
-
-EGO_VISUAL_DESCRIPTION = "<Short description of how the ego agent appears visually.>"
-
-REWARD_FORMAT = """
-<Provide a template or description for compute_reward(self, agent).>
-<Include available attributes and tensor shapes.>
-"""
-```
-
-**Example** (from `point_mass_rendezvous`):
-
-```python
-ENVIRONMENT_DESCRIPTION = """
-Two agents must coordinate to navigate to the same landmark simultaneously.
-There are 4 landmarks available, representing different potential solutions.
-...
+ENVIRONMENT_DESCRIPTION = """You are playing a 2v2 football game.
+You are in the blue team. You must coordinate with a teammate to score.
 
 When you want to describe agent behaviors as code, these are the accessible variables:
 - `ego_agent_position`: A tuple (x, y) representing the position of ego agent.
-- `other_agent_position`: A tuple (x, y) representing the position of other agent.
-...
-"""
+- `teammate_position`: A tuple (x, y) representing the position of teammate.
+- `adversary_positions`: A list of tuples [(x, y), ...] for adversary positions.
+- `ball_position`: A tuple (x, y) representing the ball position.
+- `goal_positions`: A tuple (x, y) representing the goal position."""
+
+ACTION_TYPE = "Continuous"
+
+ACTION_FORMAT = """The action should be a torch tensor of shape (1, 2) representing force.
+Example: `torch.tensor([[1.0, 0.5]])` moves right with force 1.0, up with force 0.5."""
 
 OBSERVATION_FORMAT = """
 def observation(self, agent: Agent):
-    obs = [agent.state.pos, agent.state.vel]
-    ...
-    return torch.cat(obs, dim=-1)
+    obs = {
+        "obs": [agent_force, agent_pos - ball_pos, agent_vel - ball_vel, ...],
+        "pos": [agent_pos - goal_pos],
+        "vel": [agent_vel],
+        "adversaries": [...],
+        "teammates": [...],
+    }
+    return torch.cat(list(obs.values()), dim=-1)
 """
 
-EGO_VISUAL_DESCRIPTION = "The ego agent is represented as the red point mass."
+EGO_VISUAL_DESCRIPTION = """Ego team wears blue jerseys on the left side.
+The ego agent is the blue player with tag #1."""
 
 REWARD_FORMAT = """
 def reward_fn(self, agent: Agent):
     reward = torch.zeros(self.world.batch_dim, device=self.world.device)
-    ...
-    return reward
+    blue_score = over_right_line * goal_mask
+    red_score = over_left_line * goal_mask
+    return self.scoring_reward * blue_score - self.scoring_reward * red_score
 """
 ```
 
-## Step 3: Create `utils.py`
+## 2. Create `utils.py`
 
-This file contains the rollout and training helpers. You need to implement:
-
-### 3.1 State Extraction Function
+Implement state extraction, rollout, and training functions:
 
 ```python
-def get_state_<env_name>(env):
-    """Extract state information from the environment for logging."""
+# popgen/envs/football/utils.py
+
+from pathlib import Path
+from benchmarl.environments import VmasTask
+from vmas.scenarios import football as football_scenario
+from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
+
+RL_CFG_DIR = Path(__file__).parent / "rl_cfg"
+
+
+def get_state_football(env):
+    """Extract state for logging."""
     state = {}
-    # Extract relevant state information (positions, velocities, etc.)
-    # Round values for readability
-    state["agent0_pos"] = [round(x, 2) for x in pos]
-    ...
+    for agent in env.scenario.blue_agents:
+        state[agent.name] = {
+            "pos": [round(x, 2) for x in agent.state.pos[0].cpu().numpy().tolist()],
+            "vel": [round(x, 2) for x in agent.state.vel[0].cpu().numpy().tolist()],
+        }
+    state["env"] = {
+        "ball_pos": [round(x, 2) for x in env.scenario.ball.state.pos[0].cpu().numpy().tolist()],
+    }
     return state
-```
 
-### 3.2 Rollout Function
 
-```python
-def rollout_fn(policy: callable, env=None, **kwargs):
-    """
-    Execute a rollout with the given policies.
-
-    Args:
-        policy: Policy function for the ego agent. Takes observation, returns action.
-        env: Optional pre-created environment instance.
-
-    Returns:
-        states: List of state dictionaries from each timestep.
-        images: List of rendered frames (numpy arrays).
-        error: Error message string if rollout failed, None otherwise.
-    """
-    # create env if needed, set defaults, then call shared helper
+def rollout_fn(policy, env=None, **kwargs):
     if env is None:
-        env = <create env here>
+        env = VmasTask.FOOTBALL.get_from_yaml(path=str(RL_CFG_DIR / "football.yaml")).get_env_fun(
+            num_envs=1, continuous_actions=True, seed=0, device="cpu"
+        )()
     if "max_steps" not in kwargs:
-        kwargs["max_steps"] = 100
-    return rollout_vmas_env(policy=policy, env=env, get_state_fn=get_state_<env_name>, **kwargs)
-```
+        kwargs["max_steps"] = 200
+    return rollout_vmas_env(policy=policy, env=env, get_state_fn=get_state_football, **kwargs)
 
-### 3.3 Training Function (if you support reward learning)
 
-```python
 def train_fn(reward_fn: callable, output_dir: str, **kwargs):
-    """
-    Trains agents using BenchMARL with a custom reward function.
-
-    Args:
-        reward_fn: Callable taking (agent, world) and returning reward tensor.
-        output_dir: Directory to save results.
-    """
     return train_vmas_env(
         reward_fn=reward_fn,
         output_dir=output_dir,
-        scenario_module=<scenario_module>,
-        scenario_name="<env_name>",
-        vmas_task=<VMAS_TASK>,
+        scenario_module=football_scenario,
+        scenario_name="football",
+        vmas_task=VmasTask.FOOTBALL,
         rl_cfg_dir=RL_CFG_DIR,
         **kwargs,
     )
 ```
 
-**Important**: The `rollout_fn` signature should match the policy functions that the LLM will generate. If your environment has more agents, you can call the same `policy` for each agent or adapt the function accordingly.
+## 3. Create `__init__.py`
 
-## Step 4: Create `__init__.py`
-
-Export all required components:
+Export all components:
 
 ```python
-from .prompts import ACTION_FORMAT, EGO_VISUAL_DESCRIPTION, ENVIRONMENT_DESCRIPTION, OBSERVATION_FORMAT, REWARD_FORMAT
+# popgen/envs/football/__init__.py
+
+from .prompts import (
+    ACTION_FORMAT, ACTION_TYPE, EGO_VISUAL_DESCRIPTION,
+    ENVIRONMENT_DESCRIPTION, OBSERVATION_FORMAT, REWARD_FORMAT
+)
 from .utils import rollout_fn, train_fn
 
 __ALL__ = [
-    "ENVIRONMENT_DESCRIPTION",
-    "ACTION_FORMAT",
-    "OBSERVATION_FORMAT",
-    "EGO_VISUAL_DESCRIPTION",
-    "REWARD_FORMAT",
-    "rollout_fn",
-    "train_fn",
+    "ENVIRONMENT_DESCRIPTION", "ACTION_FORMAT", "OBSERVATION_FORMAT",
+    "EGO_VISUAL_DESCRIPTION", "REWARD_FORMAT", "ACTION_TYPE",
+    "rollout_fn", "train_fn",
 ]
 ```
 
-## Step 5: Run with the New Environment
-
-Update the config or pass it as a command-line argument:
-
-```yaml
-# scripts/behavior_policy/cfg/config.yaml
-env: <env_name>
-```
-
-Or run directly:
+## 4. Run
 
 ```bash
-python scripts/behavior_policy/main.py env=<env_name>
+python scripts/behavior_policy/main.py env=football
 ```
-
-## Checklist
-
-- [ ] Created `popgen/envs/<env_name>/` folder
-- [ ] Created `prompts.py` with `ENVIRONMENT_DESCRIPTION`, `ACTION_FORMAT`, `OBSERVATION_FORMAT`, `EGO_VISUAL_DESCRIPTION`, `REWARD_FORMAT`
-- [ ] Created `utils.py` with `get_state_<env_name>()`, `rollout_fn()`, and optional `train_fn()`
-- [ ] Created `__init__.py` exporting all components
-- [ ] Tested the environment with `python scripts/behavior_policy/main.py env=<env_name>`
