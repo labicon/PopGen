@@ -70,8 +70,7 @@ class TestComputeInstanceMetric:
         result = evaluator.compute_instance_metric(
             {
                 "behavior": behavior,
-                "ego_name": "Agent1",
-                "ego_visual_description": "A red circle",
+                "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
             }
         )
@@ -87,8 +86,7 @@ class TestComputeInstanceMetric:
         result = evaluator.compute_instance_metric(
             {
                 "behavior": behavior,
-                "ego_name": "Agent1",
-                "ego_visual_description": "A red circle",
+                "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
             }
         )
@@ -103,8 +101,7 @@ class TestComputeInstanceMetric:
         evaluator.compute_instance_metric(
             {
                 "behavior": behavior,
-                "ego_name": "Attacker",
-                "ego_visual_description": "A red triangle",
+                "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
             }
         )
@@ -126,8 +123,7 @@ class TestComputeInstanceMetric:
         evaluator.compute_instance_metric(
             {
                 "behavior": behavior,
-                "ego_name": "Agent1",
-                "ego_visual_description": "A circle",
+                "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
             }
         )
@@ -142,8 +138,7 @@ class TestComputeInstanceMetric:
         result = evaluator.compute_instance_metric(
             {
                 "behavior": behavior,
-                "ego_name": "Agent1",
-                "ego_visual_description": "A circle",
+                "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
             }
         )
@@ -184,8 +179,7 @@ class TestComputeInstanceMetricWithImages:
         result = evaluator.compute_instance_metric(
             {
                 "behavior": behavior,
-                "ego_name": "Agent1",
-                "ego_visual_description": "A red circle",
+                "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
                 "rollout_images": sample_rollout_images,
             }
@@ -203,8 +197,7 @@ class TestComputeInstanceMetricWithImages:
         evaluator.compute_instance_metric(
             {
                 "behavior": behavior,
-                "ego_name": "Agent1",
-                "ego_visual_description": "A circle",
+                "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
                 "rollout_images": sample_rollout_images,
             }

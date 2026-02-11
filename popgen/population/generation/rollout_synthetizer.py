@@ -23,9 +23,6 @@ Provide concise reasoning for your analysis."""
 BEHAVIOR_ANALYSIS_USER_PROMPT = """Environment Description:
 {env_description}
 
-Ego Agent Name: {ego_name}
-Ego Agent Visual Description: {ego_visual_description}
-
 Please analyze the behavior shown in the following rollout #{rollout_index}.
 """
 
@@ -64,8 +61,6 @@ class RolloutSynthetizer:
 
     def analyze_rollouts(
         self,
-        ego_name: str,
-        ego_visual_description: str,
         env_description: str,
         rollouts_states: list[dict[str, Any]],
         rollouts_images: list[list[np.ndarray]] = None,
@@ -74,8 +69,6 @@ class RolloutSynthetizer:
         """Synthesize behavior based on multiple rollouts.
 
         Args:
-            ego_name: Name of the ego agent.
-            ego_visual_description: Visual description of the ego agent.
             env_description: Description of the environment.
             rollouts_states: List of dictionary of rollout states.
             rollouts_images: List of list of rollout images.
@@ -87,8 +80,6 @@ class RolloutSynthetizer:
         individual_results = []
         for i, (states, images) in enumerate(zip(rollouts_states, rollouts_images)):
             result = self._analyze_single_rollout(
-                ego_name=ego_name,
-                ego_visual_description=ego_visual_description,
                 env_description=env_description,
                 rollout_states=states,
                 rollout_images=images,
@@ -102,8 +93,6 @@ class RolloutSynthetizer:
 
     def _analyze_single_rollout(
         self,
-        ego_name: str,
-        ego_visual_description: str,
         env_description: str,
         rollout_states: dict[str, Any],
         rollout_images: list[np.ndarray],
@@ -113,8 +102,6 @@ class RolloutSynthetizer:
         """Analyze behavior for a single rollout.
 
         Args:
-            ego_name: Name of the ego agent.
-            ego_visual_description: Visual description of the ego agent.
             env_description: Description of the environment.
             rollout_states: Dictionary of rollout states.
             rollout_images: List of rollout images (numpy arrays).
@@ -124,8 +111,6 @@ class RolloutSynthetizer:
             RolloutSynthetizerResult with name, description, and reasoning.
         """
         user_prompt = BEHAVIOR_ANALYSIS_USER_PROMPT.format(
-            ego_name=ego_name,
-            ego_visual_description=ego_visual_description,
             env_description=env_description,
             rollout_index=rollout_index + 1,
         )

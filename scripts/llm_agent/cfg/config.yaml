@@ -8,7 +8,7 @@ env: football
 agent:
   # LLM model settings
   model_config:
-    model_name: openai/gpt-5-nano
+    model_name: openrouter/deepseek/deepseek-v3.2
   # Runtime action generation parameters
   horizon_length: 25  # Number of steps to plan ahead (1 = single-step, >1 = multi-step trajectory)
   include_trajectory_history: false  # Whether to include previous trajectory in context
@@ -16,12 +16,12 @@ agent:
 
 # Evaluator model configuration
 evaluator:
-  model_name: openai/gpt-5-nano
+  model_name: openrouter/openai/gpt-5-nano
 
 # Pipeline settings
 max_behaviors: 5
 max_evaluation_attempts: 1
-n_eval_rollouts: 10
+n_eval_rollouts: 5
 adherence_threshold: 1.0
 n_workers: 4
 evaluate: true

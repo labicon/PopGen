@@ -1,7 +1,7 @@
 """LLM-based agent wrapper for generating actions using language models."""
 
 import copy
-from typing import Literal, Optional
+from typing import Literal
 
 import litellm
 import torch
@@ -14,19 +14,34 @@ from popgen.utils.parsing import parse_llm_response
 # ---------------------------------- PROMPTS --------------------------------- #
 
 SYSTEM_PROMPT = """You are an intelligent agent playing in a multi-agent environment.
+Your goal is to observe the current state and decide on the best action to take given a style of play (behavior).
 
+# Environment
 {environment_description}
 
-Your goal is to observe the current state and decide on the best action to take.{behavioral_guideline}
+# Inputs
+You will be provided with:
+- Your behavioral guideline, which describes the style of play you should adopt.
+- Your current observation of the environment, which may include your own state and the state of other agents and entities.
+- Optional: Your previous trajectory of actions (if trajectory history is enabled).
 
-ACTION SPACE:
+# Outputs
+The actions return type is defined as follows:
 {action_description}
-{trajectory_history_section}
-RESPONSE FORMAT:
 You must respond with a structured JSON object containing:
-- actions: A list of {horizon_length} action(s) for the planning horizon.
+- actions: A list of these action(s) for the planning horizon. You will be provided with the horizon length, which indicates how many steps you should plan for.
 
-{example}"""
+Each action should be appropriate for the current observation and consistent with your behavioral guideline."""
+
+USER_TEMPLATE = """# Behavioral Guideline:
+{behavioral_guideline}
+
+# Current Observation:
+{agent_observation}
+
+{trajectory_history_section}
+
+You must plan for {horizon_length} step(s) ahead. Provide your actions as a list matching the description of the action space."""
 
 # ---------------------------------------------------------------------------- #
 
@@ -130,11 +145,10 @@ class LLMAgent(nn.Module):
 
     def __init__(
         self,
+        behavior: str,
         model_config: LitellmConfig,
         environment_description: str,
-        action_description: str,
-        action_type: Literal["Discrete", "Continuous"],
-        behavior: str | None = None,
+        action_type: type[BaseModel],
         horizon_length: int = 1,
         include_trajectory_history: bool = False,
     ):
@@ -142,25 +156,28 @@ class LLMAgent(nn.Module):
         Initialize the LLM agent wrapper.
 
         Args:
+            behavior: Optional behavior description to guide the agent's playing style.
             model_config: LiteLLM configuration for the LLM model.
             environment_description: Description of the environment, task, and observation format.
             action_description: Description of what the action output represents and how it affects the environment.
-            action_type: Type of action space - "Discrete" or "Continuous".
-            behavior: Optional behavior description to guide the agent's playing style.
+            action_type: Pydantic BaseModel class defining the schema for a single action.
+                The horizon model (actions: list[action_type]) is built automatically.
             horizon_length: Number of steps to plan ahead. The LLM generates actions for this many steps at once. Default is 1 (single-step planning).
             include_trajectory_history: Whether to include the previous trajectory in the context when generating new ones. Default is False.
         """
         super().__init__()
-        self.environment_description = environment_description
         self.behavior = behavior
         self.model_config = model_config
-        self.action_description = action_description
+        self.environment_description = environment_description
         self.horizon_length = horizon_length
         self.include_trajectory_history = include_trajectory_history
         self.action_type = action_type
 
-        # Create the horizon action output model dynamically
-        self.horizon_action_model = create_horizon_action_output(action_type=action_type, horizon_length=horizon_length, action_description=action_description)
+        # Build horizon action model: actions is a list of single-action models
+        self.horizon_action_model = create_model(
+            "HorizonActionOutput",
+            actions=(list[action_type], Field(description=f"A list of {horizon_length} actions over the planning horizon.")),
+        )
 
         # Trajectory caching for multi-step planning
         self._cached_trajectories = []
@@ -168,50 +185,9 @@ class LLMAgent(nn.Module):
         self._step_counter = 0
 
         # Build the system prompt once during initialization
-        self.system_prompt = self._build_system_prompt()
-
-    def _build_system_prompt(self) -> str:
-        """Build the system prompt that describes the task and environment."""
-        # Build conditional sections
-        behavioral_guideline = ""
-        if self.behavior:
-            behavioral_guideline = f"""
-
-BEHAVIORAL GUIDELINE:
-You should play according to the following behavioral style:
-{self.behavior}
-
-This guideline describes how you should approach the task, but you must adapt your actions
-based on the current observations to be effective."""
-
-        trajectory_history_section = ""
-        if self.include_trajectory_history:
-            trajectory_history_section = """
-TRAJECTORY HISTORY:
-You will be provided with your previous trajectory to help you plan consistently.
-Use this history to learn from past actions and maintain strategic coherence.
-
-"""
-
-        # Generate examples based on action type and horizon length
-        if self.action_type == "Continuous":
-            if self.horizon_length == 1:
-                example = """Example: {"actions": [[1.0, 0.5]]}"""
-            else:
-                example = f"""Example for {self.horizon_length} step(s): {{"actions": [[1.0, 0.5], [0.8, 0.3], [0.5, 0.0]]}}"""
-        else:  # Discrete
-            if self.horizon_length == 1:
-                example = """Example: {"actions": [2]}"""
-            else:
-                example = f"""Example for {self.horizon_length} step(s): {{"actions": [2, 1, 3]}}"""
-
-        return SYSTEM_PROMPT.format(
+        self.system_prompt = SYSTEM_PROMPT.format(
             environment_description=self.environment_description,
-            behavioral_guideline=behavioral_guideline,
-            action_description=self.action_description,
-            trajectory_history_section=trajectory_history_section,
-            horizon_length=self.horizon_length,
-            example=example,
+            action_description=self.action_type.__doc__,
         )
 
     def _build_trajectory_history_text(self, agent_idx: int) -> str:
@@ -229,40 +205,11 @@ Use this history to learn from past actions and maintain strategic coherence.
 
         if agent_idx < len(self._previous_trajectories):
             agent_trajectory = self._previous_trajectories[agent_idx]
-            return f"\nPREVIOUS TRAJECTORY:\n{agent_trajectory}\n"
+            return f"# Previous Trajectory:\n{agent_trajectory}"
 
         return ""
 
-    def _build_user_prompt(self, obs_dict: dict, agent_idx: int = 0) -> str:
-        """
-        Build the user prompt with the current observation and optional trajectory history.
-
-        Args:
-            obs_dict: Dictionary containing parsed observation information.
-            agent_idx: Index of the agent (used for trajectory history).
-
-        Returns:
-            The formatted user prompt.
-        """
-        # Add trajectory history if enabled
-        prompt = self._build_trajectory_history_text(agent_idx)
-
-        # Add current observation
-        prompt += "CURRENT OBSERVATION:\n"
-
-        for key, value in obs_dict.items():
-            if isinstance(value, (list, tuple)):
-                prompt += f"- {key}: {value}\n"
-            elif isinstance(value, torch.Tensor):
-                prompt += f"- {key}: {value.tolist()}\n"
-            else:
-                prompt += f"- {key}: {value}\n"
-
-        prompt += f"\nBased on this observation, what actions for the next {self.horizon_length} step{'s' if self.horizon_length > 1 else ''} should you take?"
-        prompt += "\nProvide your action as a list of force vector [[fx, fy]]."
-
-        return prompt
-
+    # TODO: why?
     def _parse_observation(self, obs: torch.Tensor) -> dict:
         """
         Parse the raw observation tensor into a human-readable dictionary.
@@ -283,6 +230,58 @@ Use this history to learn from past actions and maintain strategic coherence.
             "observation_shape": list(obs.shape),
         }
 
+    def _pad_trajectory(self, trajectory: list) -> list:
+        """Pad or truncate the trajectory to match the horizon length."""
+        if len(trajectory) < self.horizon_length:
+            trajectory += [self.action_type.default_action().to_tensor()] * (self.horizon_length - len(trajectory))
+        return trajectory[: self.horizon_length]
+
+    def _act(self, obs, agent_idx: int):
+        """Forward act on a single environment and agent observation without trajectory caching."""
+        # Parse observation into readable format
+        obs_dict = self._parse_observation(obs)
+        obs_dict["agent_id"] = agent_idx
+
+        # Build user prompt with current observation and trajectory history
+        agent_observation = "\n".join([f"{key}: {value}" for key, value in obs_dict.items()])
+        trajectory_history_section = self._build_trajectory_history_text(agent_idx)
+        user_prompt = USER_TEMPLATE.format(
+            behavioral_guideline=self.behavior,
+            agent_observation=agent_observation,
+            trajectory_history_section=trajectory_history_section,
+            horizon_length=self.horizon_length,
+        )
+
+        # Prepare messages for LLM
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        # Call LLM with structured output
+        try:
+            response = litellm.completion(
+                model=self.model_config.model_name,
+                messages=messages,
+                response_format=self.horizon_action_model,
+                **self.model_config.get_completion_kwargs(),
+            )
+
+            # Parse the structured response and convert action models to raw values
+            trajectory = [a.to_tensor() for a in parse_llm_response(response, self.horizon_action_model).actions]
+
+            # Validate trajectory length and convert to tensor
+            trajectory = self._pad_trajectory(trajectory)
+
+        except Exception as e:
+            # Fallback to zero trajectory if LLM fails
+            print(f"LLM trajectory generation failed: {e}. Using zero trajectory.")
+            trajectory = [self.action_type.default_action().to_tensor() for _ in range(self.horizon_length)]
+
+        trajectory = torch.stack(trajectory)  # Shape: (horizon_length, action_dim)
+
+        return trajectory
+
     def forward(self, obs):
         """
         Forward pass that generates actions using the LLM.
@@ -299,82 +298,23 @@ Use this history to learn from past actions and maintain strategic coherence.
         """
         # Extract observation for single env, all agents
         # Assuming obs has structure: {"observation": tensor}
-        import time
-
-        obs_tensor = obs[0] if obs.dim() > 1 else obs  # Extract single env
-        if "observation" in obs_tensor:
-            obs_tensor = obs_tensor["observation"]
-        num_agents = len(obs_tensor)
+        obs_tensor = obs["observation"] if "observation" in obs else obs
+        obs_tensor = obs_tensor.squeeze(0) if obs_tensor.dim() > 2 else obs_tensor  # Remove batch dimension if present
 
         # Check if we need to generate new trajectories
-        need_regenerate = self._step_counter == 0 or self._step_counter >= self.horizon_length
-
-        if need_regenerate:
+        if self._step_counter == 0 or self._step_counter >= self.horizon_length:
             # Generate new trajectories for all agents
+            self._step_counter = 0
             self._cached_trajectories = []
 
+            # TODO: CAN'T WE SCRIPT THE OTHER AGENT??
             for agent_idx, agent_obs in enumerate(obs_tensor):
-                # Parse observation into readable format
-                obs_dict = self._parse_observation(agent_obs)
-                obs_dict["agent_id"] = agent_idx
-
-                # Build user prompt with current observation and trajectory history
-                user_prompt = self._build_user_prompt(obs_dict, agent_idx)
-
-                # Prepare messages for LLM
-                messages = [
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ]
-
-                # Call LLM with structured output
-                try:
-                    response = litellm.completion(
-                        model=self.model_config.model_name,
-                        messages=messages,
-                        response_format=self.horizon_action_model,
-                        **self.model_config.get_completion_kwargs(),
-                    )
-
-                    # Parse the structured response
-                    horizon_output = parse_llm_response(response, self.horizon_action_model)
-
-                    # Extract actions from horizon output
-                    trajectory = horizon_output.actions
-
-                    # Validate trajectory length
-                    if len(trajectory) != self.horizon_length:
-                        print(f"Warning: Expected {self.horizon_length} actions, got {len(trajectory)}. Padding/truncating.")
-                        # Pad with appropriate zeros based on action type
-                        if self.action_type == "Continuous":
-                            zero_action = [0.0, 0.0]
-                        else:
-                            zero_action = 0
-
-                        while len(trajectory) < self.horizon_length:
-                            trajectory.append(zero_action)
-                        # Truncate if too long
-                        trajectory = trajectory[: self.horizon_length]
-
-                    self._cached_trajectories.append(trajectory)
-
-                except Exception as e:
-                    # Fallback to zero trajectory if LLM fails
-                    print(f"LLM trajectory generation failed: {e}. Using zero trajectory.")
-                    if self.action_type == "Continuous":
-                        zero_trajectory = [[0.0, 0.0] for _ in range(self.horizon_length)]
-                    else:
-                        zero_trajectory = [0 for _ in range(self.horizon_length)]
-                    self._cached_trajectories.append(zero_trajectory)
-
-            # Reset step counter
-            self._step_counter = 0
+                trajectory = self._act(agent_obs, agent_idx)
+                self._cached_trajectories.append(trajectory)
 
         # Extract current step's action from cached trajectories
-        acts = []
-        for agent_idx in range(num_agents):
-            action = torch.tensor(self._cached_trajectories[agent_idx][self._step_counter], dtype=torch.float32)
-            acts.append(action)
+        action_tensor = torch.stack(self._cached_trajectories)[:, self._step_counter]  # (num_agents, [action_dim])
+        action_tensor = action_tensor.unsqueeze(0)  # (1, num_agents, [action_dim])
 
         # Increment step counter
         self._step_counter += 1
@@ -383,9 +323,91 @@ Use this history to learn from past actions and maintain strategic coherence.
         if self.include_trajectory_history and self._step_counter >= self.horizon_length:
             self._previous_trajectories = copy.deepcopy(self._cached_trajectories)
 
-        # Stack actions and add batch dimension
-        action_tensor = torch.stack(acts, dim=0)  # (?, num_agents, action_dim)
-        if obs.dim() > 1:
-            action_tensor = action_tensor.unsqueeze(0)  # (1, num_agents, action_dim)
-
         return action_tensor
+
+
+class LbfLLMAgent(LLMAgent):
+    """
+    LLM-based agent tailored for the Level-Based Foraging (LBF) environment.
+
+    This agent parses the flat LBF observation vector into a semantic description
+    of the grid, including agent positions/levels and food positions/levels.
+    """
+
+    def __init__(
+        self,
+        model_config: LitellmConfig,
+        environment_description: str,
+        action_description: str,
+        action_type: type[BaseModel],
+        behavior: str | None = None,
+        horizon_length: int = 1,
+        include_trajectory_history: bool = False,
+    ):
+        super().__init__(
+            model_config=model_config,
+            environment_description=environment_description,
+            action_description=action_description,
+            action_type=action_type,
+            behavior=behavior,
+            horizon_length=horizon_length,
+            include_trajectory_history=include_trajectory_history,
+        )
+        self.num_agents = 2
+        self.num_food = 2
+
+    def _parse_observation(self, obs: torch.Tensor) -> dict:
+        """
+        Parse LBF flat observation tensor into a semantic dictionary.
+
+        Obs Format:
+        [Food1_row, Food1_col, Food1_lvl, ..., FoodN_row, FoodN_col, FoodN_lvl,
+         Agent1_row, Agent1_col, Agent1_lvl, ..., AgentM_row, AgentM_col, AgentM_lvl]
+
+        Where Agent1 is always the 'ego' agent (yourself).
+        If an entity is hidden/missing, values are typically -1.
+        """
+        if isinstance(obs, torch.Tensor):
+            obs = obs.detach().cpu().numpy()
+
+        parsed = {}
+
+        # --- Parse Food ---
+        food_items = []
+        for i in range(self.num_food):
+            idx = i * 3
+            if idx + 3 <= len(obs):
+                r, c, lvl = obs[idx : idx + 3]
+                if r != -1:  # Visible/Existing
+                    food_items.append(f"Food {i}: Pos({int(r)}, {int(c)}), Lvl({int(lvl)})")
+
+        if food_items:
+            parsed["Food Items"] = food_items
+        else:
+            parsed["Food Items"] = "None visible"
+
+        # --- Parse Agents ---
+        # Last 3 * num_agents obs is row, column, level of each agent
+        agent_start_idx = len(obs) - (3 * self.num_agents)
+        agents_data = obs[agent_start_idx:]
+
+        # Ego Agent (Index 0 in the agent list)
+        if len(agents_data) >= 3:
+            ego_r, ego_c, ego_lvl = agents_data[0:3]
+            parsed["My State"] = f"Position: ({int(ego_r)}, {int(ego_c)}), Level: {int(ego_lvl)}"
+
+        # Teammates
+        teammates = []
+        for i in range(1, self.num_agents):
+            idx = i * 3
+            if idx + 3 <= len(agents_data):
+                r, c, lvl = agents_data[idx : idx + 3]
+                if r != -1:  # Visible
+                    teammates.append(f"Agent {i}: Pos({int(r)}, {int(c)}), Lvl({int(lvl)})")
+
+        if teammates:
+            parsed["Teammates"] = teammates
+        else:
+            parsed["Teammates"] = "None visible"
+
+        return parsed

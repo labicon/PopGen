@@ -7,12 +7,11 @@ from omegaconf import DictConfig, OmegaConf
 
 from popgen.population import (
     RLAgentGenerationPipeline,
-    InContextStrategy,
-    StratifiedStrategy,
     RewardFnGenerator,
     BehaviorAdherenceEvaluator,
     Behavior,
 )
+from popgen.population.generation.diversity import load_strategy
 from popgen.utils.config import LitellmConfig
 
 OmegaConf.register_new_resolver(
@@ -57,31 +56,21 @@ def run_behavior_pipeline(cfg: DictConfig):
     # Load env
     env = importlib.import_module(f"popgen.envs.{cfg.env}")
     env_description = env.ENVIRONMENT_DESCRIPTION
-    ego_visual_description = env.EGO_VISUAL_DESCRIPTION
-    observation_format = env.OBSERVATION_FORMAT
-    reward_format = env.REWARD_FORMAT
-    ego_visual_description = env.EGO_VISUAL_DESCRIPTION
+    reward_example = env.REWARD_EXAMPLE
     rollout_fn = env.rollout_fn
     train_fn = env.train_fn
 
     # Initialize generators
     llm_config = LitellmConfig(model_name=cfg.llm_model)
-    if cfg.strategy == "in_context":
-        behavior_generator = InContextStrategy(model_config=llm_config, output_type=Behavior)
-    elif cfg.strategy == "stratified":
-        behavior_generator = StratifiedStrategy(model_config=llm_config, output_type=Behavior)
-    else:
-        raise ValueError(f"Unknown strategy: {cfg.strategy}")
+    behavior_generator = load_strategy(cfg.strategy, model_config=llm_config, output_type=Behavior)
 
     generation_kwargs = {
         "environment_description": env_description,
-        "observation_format": observation_format,
-        "reward_format": reward_format,
+        "examples": [reward_example],
     }
     evaluator = BehaviorAdherenceEvaluator(model_config=llm_config)
     evaluation_kwargs = {
-        "ego_visual_description": ego_visual_description,
-        "ego_name": "agent0",
+        "environment_description": env_description,
     }
 
     # ------------------ Generate Behavior ------------- #

@@ -112,14 +112,15 @@ hydra:
     hydra:
     - hydra.mode=RUN
     task:
-    - agent.horizon_length=50
+    - agent.horizon_length=5
     - agent.include_trajectory_history=true
     - n_workers=1
     - run_name=test
+    - env=football
   job:
     name: main
     chdir: null
-    override_dirname: agent.horizon_length=50,agent.include_trajectory_history=true,n_workers=1,run_name=test
+    override_dirname: agent.horizon_length=5,agent.include_trajectory_history=true,env=football,n_workers=1,run_name=test
     id: ???
     num: ???
     config_name: config

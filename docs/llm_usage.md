@@ -241,8 +241,7 @@ result = evaluator.evaluate(
     inputs=[
         {
             "behavior": "Stay in defensive position",
-            "ego_name": "agent0",
-            "ego_visual_description": "Blue circle",
+            "environment_description": "...",  # ENVIRONMENT_DESCRIPTION from env module
             "rollout_states": [...],  # List of state dicts
             "rollout_images": [...]   # Optional: list of image arrays
         }

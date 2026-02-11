@@ -17,20 +17,24 @@ from .base import BaseEvaluator, EvalResult, calculate_stats
 
 # ---------------------------------- PROMPTS --------------------------------- #
 
-BEHAVIOR_ADHERENCE_SYSTEM_PROMPT = """You are an expert in evaluating agent behavior.
+BEHAVIOR_ADHERENCE_SYSTEM_PROMPT = """You are an expert in evaluating whether agent actions align with a given behavior description.
+
 You will be provided with a behavior description and rollouts from the agent (trajectory states and possibly images sequences).
 Your task is to evaluate how well the ego agent followed the behavior description based on these input rollouts.
-Focus on the ego agent only, forget everything else including its teammates and opponents!
 Evaluate whether its actions align with the described behavior, do not consider other goals.
+Focus on the ego agent only, forget everything else including its teammates and opponents!
 You can use the rollout states to illustrate points.
+
+The visual description of the ego agent will be provided in the environment description.
+In the trajectories, the ego agent is named agent0.
+
+# Environment Description
+{environment_description}
 
 Provide a concise reasoning and feedback in your evaluation."""
 
-BEHAVIOR_ADHERENCE_USER_PROMPT = """Behavior: {behavior}
-Ego Agent Name: {ego_name}
-Ego Agent Visual Description: {ego_visual_description}
-
-"""
+BEHAVIOR_ADHERENCE_USER_PROMPT = """Behavior:
+{behavior}"""
 
 # ---------------------------------------------------------------------------- #
 
@@ -62,8 +66,7 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
         Args:
             input_data: Dict with keys:
                 - behavior: str
-                - ego_name: str
-                - ego_visual_description: str
+                - environment_description: str
                 - rollout_states: List[Dict[str, Any]]
                 - rollout_images: Optional[List[List[np.ndarray]]]
 
@@ -71,8 +74,7 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             Dict with adherence evaluation and reasoning
         """
         behavior = input_data["behavior"]
-        ego_name = input_data["ego_name"]
-        ego_visual_description = input_data["ego_visual_description"]
+        environment_description = input_data["environment_description"]
 
         rollouts = list(
             zip(
@@ -85,8 +87,7 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             rollout_states, rollout_images = rollout
             return self.evaluate_single_rollout(
                 behavior=behavior,
-                ego_name=ego_name,
-                ego_visual_description=ego_visual_description,
+                environment_description=environment_description,
                 rollout_states=rollout_states,
                 rollout_images=rollout_images,
                 **kwargs,
@@ -110,7 +111,7 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             "reasoning": combine_reasoning([r.model_dump() for r in all_results]),
         }
 
-    def evaluate_single_rollout(self, behavior: str, ego_name: str, ego_visual_description: str, rollout_states: dict[str, Any], rollout_images: list[np.ndarray] = None, **kwargs) -> dict[str, Any]:
+    def evaluate_single_rollout(self, behavior: str, environment_description: str, rollout_states: dict[str, Any], rollout_images: list[np.ndarray] = None, **kwargs) -> dict[str, Any]:
         """Evaluate adherence for a single rollout."""
         if isinstance(rollout_states, str) and "[ERROR]" in rollout_states:
             return BehaviorAdherenceResult(evaluation=False, reasoning=rollout_states)
@@ -125,10 +126,11 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
         if len(rollout_states) > 20:
             rollout_states = uniform_sample(rollout_states, n_samples=20)
 
+        system_prompt = BEHAVIOR_ADHERENCE_SYSTEM_PROMPT.format(
+            environment_description=environment_description,
+        )
         user_prompt = BEHAVIOR_ADHERENCE_USER_PROMPT.format(
             behavior=behavior,
-            ego_name=ego_name,
-            ego_visual_description=ego_visual_description,
         )
         content = [{"type": "text", "text": user_prompt}]
 
@@ -153,7 +155,7 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             response = litellm.completion(
                 model=self.model_config.model_name,
                 messages=[
-                    {"role": "system", "content": BEHAVIOR_ADHERENCE_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": content},
                 ],
                 response_format=BehaviorAdherenceResult,

@@ -7,8 +7,8 @@ behavior:
 env: football
 agent:
   model_config:
-    model_name: openai/gpt-5-nano
-  horizon_length: 50
+    model_name: openrouter/deepseek/deepseek-v3.2
+  horizon_length: 5
   include_trajectory_history: true
 evaluator:
   model_name: openai/gpt-5-nano

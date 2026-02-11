@@ -202,10 +202,7 @@ class TextAnalysisExperiment(BaseAnalysisExperiment):
                 return {}
 
             # 3. Analyze
-            ego_name = "agent0"
-            ego_visual = self.env_module.EGO_VISUAL_DESCRIPTION
-
-            analysis_result = self.analyzer.analyze_rollouts(ego_name=ego_name, ego_visual_description=ego_visual, env_description=self.env_description, rollouts_states=states, rollouts_images=images)
+            analysis_result = self.analyzer.analyze_rollouts(env_description=self.env_description, rollouts_states=states, rollouts_images=images)
 
             result = analysis_result.model_dump()
             logger.info(f"Analyzed: {result.get('name', 'Unknown')}")

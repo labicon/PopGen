@@ -1,0 +1,12 @@
+{
+  "behavior": "Estimates which landmark other_agent_position is targeting by looking at which landmark is closest to the other agent. If that landmark is also plausible for ego (e.g., among ego's nearest landmarks), move toward that same landmark; otherwise pick the landmark that minimizes the combined distance to both agents to maximize rendezvous probability.",
+  "model_config": {
+    "model_name": "openrouter/deepseek/deepseek-v3.2",
+    "api_base": null,
+    "generation_kwargs": {}
+  },
+  "environment_description": "The game is called \"Point Mass Rendezvous\".\nThe objective of the game is for two agents to coordinate and navigate to the same landmark simultaneously in a 2D space.\n\nThere are 4 landmarks available, representing different potential solutions and two agents: Agent 0 (Red) and Agent 1 (Blue).\nEach landmark is represented by its (x, y) coordinates.\nThe ego agent is represented as the red point mass. The other blue point mass is the teammate agent.\nThe agents must agree on which landmark to go to without explicit communication.\n\n> **Observation Space**:\nThe observation space for each agent is a vector that includes the following:\n- Index 0-1: `ego_agent_position` - A tuple (x, y) representing the position of ego agent.\n- Index 2-3: `ego_agent_velocity` - A tuple (vx, vy) representing the velocity of ego agent.\n- Index 4-11: `landmark_positions` - A list of tuples [(x, y), ...] representing the positions of the 4 landmarks.\n- Index 12-13: `other_agent_relative_position` - A tuple (x, y) representing the position of the other agent relative to the ego agent (other_agent_position - ego_agent_position).\n\n> **Action Space**:\nThe agents can apply a force in the horizontal and vertical directions to move around the space.\nThe action is represented as a tuple (fx, fy) where:\n- `fx`: Horizontal force component, where -1 means full force to the left and 1 means full force to the right.\n- `fy`: Vertical force component, where -1 means full force downwards and 1 means full force upwards.",
+  "action_type_module": "popgen.envs.point_mass_rendezvous.utils:ActionType",
+  "horizon_length": 3,
+  "include_trajectory_history": true
+}

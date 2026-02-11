@@ -101,8 +101,6 @@ class TestAnalyzeSingleRollout:
         mock_completion.return_value = mock_response
 
         result = analyzer._analyze_single_rollout(
-            ego_name="Agent0",
-            ego_visual_description="A red circle",
             env_description="A 2D grid world",
             rollout_states=[{"x": 0, "y": 0}, {"x": 1, "y": 1}],
             rollout_images=[],
@@ -124,8 +122,6 @@ class TestAnalyzeSingleRollout:
         mock_completion.return_value = mock_response
 
         analyzer._analyze_single_rollout(
-            ego_name="Agent0",
-            ego_visual_description="A red circle",
             env_description="A 2D grid world",
             rollout_states=[{"x": 0}],
             rollout_images=[],
@@ -137,7 +133,7 @@ class TestAnalyzeSingleRollout:
         assert messages[0]["role"] == "system"
         assert messages[0]["content"] == BEHAVIOR_ANALYSIS_SYSTEM_PROMPT
 
-    def test_analyze_single_rollout_includes_ego_info(self, mock_completion, analyzer):
+    def test_analyze_single_rollout_includes_env_description(self, mock_completion, analyzer):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
@@ -148,8 +144,6 @@ class TestAnalyzeSingleRollout:
         mock_completion.return_value = mock_response
 
         analyzer._analyze_single_rollout(
-            ego_name="MyAgent",
-            ego_visual_description="A blue square",
             env_description="Grid environment",
             rollout_states=[{"x": 0}],
             rollout_images=[],
@@ -161,8 +155,7 @@ class TestAnalyzeSingleRollout:
         user_content = messages[1]["content"]
         # User content is a list of dicts for multimodal
         first_text = user_content[0]["text"]
-        assert "MyAgent" in first_text
-        assert "A blue square" in first_text
+        assert "Grid environment" in first_text
 
     def test_analyze_single_rollout_with_images(self, mock_completion, analyzer):
         mock_response = MagicMock()
@@ -178,8 +171,6 @@ class TestAnalyzeSingleRollout:
         test_image = np.array([[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [255, 255, 0]]], dtype=np.uint8)
 
         analyzer._analyze_single_rollout(
-            ego_name="Agent0",
-            ego_visual_description="Red circle",
             env_description="Grid world",
             rollout_states=[{"x": 0}],
             rollout_images=[test_image],
@@ -198,8 +189,6 @@ class TestAnalyzeSingleRollout:
         mock_completion.side_effect = Exception("API Error")
 
         result = analyzer._analyze_single_rollout(
-            ego_name="Agent0",
-            ego_visual_description="Red circle",
             env_description="Grid world",
             rollout_states=[{"x": 0}],
             rollout_images=[],
@@ -222,8 +211,6 @@ class TestAnalyzeSingleRollout:
 
         analyzer = RolloutSynthetizer(model="custom-model")
         analyzer._analyze_single_rollout(
-            ego_name="Agent0",
-            ego_visual_description="Red circle",
             env_description="Grid world",
             rollout_states=[{"x": 0}],
             rollout_images=[],
@@ -244,8 +231,6 @@ class TestAnalyzeSingleRollout:
         mock_completion.return_value = mock_response
 
         analyzer._analyze_single_rollout(
-            ego_name="Agent0",
-            ego_visual_description="Red circle",
             env_description="Grid world",
             rollout_states=[{"x": 0}],
             rollout_images=[],
@@ -381,8 +366,6 @@ class TestAnalyzeRollouts:
 
         # rollouts_states is a list of rollouts, where each rollout is a list of state dicts
         result = analyzer.analyze_rollouts(
-            ego_name="Agent0",
-            ego_visual_description="Red circle",
             env_description="Grid world",
             rollouts_states=[[{"x": 0}], [{"x": 1}]],
             rollouts_images=None,
@@ -408,8 +391,6 @@ class TestAnalyzeRollouts:
         test_image = np.zeros((2, 2, 3), dtype=np.uint8)
 
         result = analyzer.analyze_rollouts(
-            ego_name="Agent0",
-            ego_visual_description="Red circle",
             env_description="Grid world",
             rollouts_states=[[{"x": 0}], [{"x": 1}]],
             rollouts_images=[[test_image], [test_image]],
@@ -433,8 +414,6 @@ class TestAnalyzeRollouts:
 
         # Single rollout test - rollout is a list of state dicts
         analyzer.analyze_rollouts(
-            ego_name="Agent0",
-            ego_visual_description="Red circle",
             env_description="Grid world",
             rollouts_states=[[{"x": 0}]],
             rollouts_images=None,
@@ -457,8 +436,6 @@ class TestAnalyzeRollouts:
         mock_completion.side_effect = mock_responses
 
         analyzer.analyze_rollouts(
-            ego_name="Agent0",
-            ego_visual_description="Red circle",
             env_description="Grid world",
             rollouts_states=[[{"x": 0}]],
             temperature=0.5,
@@ -484,8 +461,6 @@ class TestAnalyzeRollouts:
         mock_completion.side_effect = mock_responses
 
         result = analyzer.analyze_rollouts(
-            ego_name="Agent0",
-            ego_visual_description="Red circle",
             env_description="Grid world",
             rollouts_states=[[{"x": 0, "y": 1}]],
         )

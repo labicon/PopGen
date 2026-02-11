@@ -8,6 +8,7 @@ from popgen.population import (
     PolicyCodeAgentGenerationPipeline,
     InContextStrategy,
     StratifiedStrategy,
+    VerbalizedSamplingStrategy,
     PolicyCodeGenerator,
     BehaviorAdherenceEvaluator,
     Behavior,
@@ -57,18 +58,13 @@ def run_behavior_pipeline(cfg: DictConfig):
     # Load env
     env = importlib.import_module(f"popgen.envs.{cfg.env}")
     env_description = env.ENVIRONMENT_DESCRIPTION
-    observation_format = env.OBSERVATION_FORMAT
-    action_format = env.ACTION_FORMAT
-    ego_visual_description = env.EGO_VISUAL_DESCRIPTION
     rollout_fn = env.rollout_fn
 
     policy_generator_kwargs = {
-        "observation_format": observation_format,
-        "action_format": action_format,
+        "environment_description": env_description,
     }
     evaluation_kwargs = {
-        "ego_visual_description": ego_visual_description,
-        "ego_name": "agent0",
+        "environment_description": env_description,
     }
 
     # ------------------ Generate Behavior ------------- #

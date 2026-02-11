@@ -62,8 +62,8 @@ class TestGenerate:
 
         policy_code = generator.generate(
             behavior=behavior,
-            observation_format="obs is a tensor",
-            action_format="action is a tensor",
+            environment_description="obs is a tensor",
+
         )
 
         assert isinstance(policy_code, CodeSnippet)
@@ -97,8 +97,8 @@ class TestGenerateStandalonePolicy:
 
         policy = generator.generate(
             behavior=behavior,
-            observation_format="obs is a tensor",
-            action_format="action is a tensor",
+            environment_description="obs is a tensor",
+
         )
 
         assert isinstance(policy, CodeSnippet)
@@ -116,8 +116,8 @@ class TestGenerateStandalonePolicy:
 
         generator.generate(
             behavior=behavior,
-            observation_format="tensor format",
-            action_format="action format",
+            environment_description="tensor format",
+
         )
 
         call_args = mock_completion.call_args
@@ -125,7 +125,7 @@ class TestGenerateStandalonePolicy:
         user_message = messages[1]["content"]
         assert "Aggressive" in user_message
 
-    def test_generate_standalone_policy_includes_observation_format(self, mock_completion, generator, behavior):
+    def test_generate_standalone_policy_includes_environment_description(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
@@ -136,14 +136,13 @@ class TestGenerateStandalonePolicy:
 
         generator.generate(
             behavior=behavior,
-            observation_format="custom observation format here",
-            action_format="action format",
+            environment_description="custom environment description here",
         )
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
-        user_message = messages[1]["content"]
-        assert "custom observation format here" in user_message
+        system_message = messages[0]["content"]
+        assert "custom environment description here" in system_message
 
     def test_generate_standalone_policy_with_feedbacks(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
@@ -160,17 +159,16 @@ class TestGenerateStandalonePolicy:
 
         generator.generate(
             behavior=behavior,
-            observation_format="obs format",
-            action_format="action format",
+            environment_description="obs format",
             feedbacks=feedbacks,
         )
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
-        assert len(messages) == 3
-        refinement_message = messages[2]["content"]
-        assert "broken" in refinement_message
-        assert "wrong direction" in refinement_message
+        assert len(messages) == 2
+        user_message = messages[1]["content"]
+        assert "broken" in user_message
+        assert "wrong direction" in user_message
 
     def test_generate_standalone_policy_no_refinement_with_empty_feedbacks(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
@@ -183,8 +181,8 @@ class TestGenerateStandalonePolicy:
 
         generator.generate(
             behavior=behavior,
-            observation_format="obs format",
-            action_format="action format",
+            environment_description="obs format",
+
             feedbacks=[],
         )
 
@@ -203,8 +201,8 @@ class TestGenerateStandalonePolicy:
 
         generator.generate(
             behavior=behavior,
-            observation_format="obs format",
-            action_format="action format",
+            environment_description="obs format",
+
             feedbacks=None,
         )
 

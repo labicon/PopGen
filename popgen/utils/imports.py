@@ -1,6 +1,15 @@
 import importlib.util
 
 
+def load_entrypoint(path):
+    module_name, attr = path.split(":")
+    module = importlib.import_module(module_name)
+    obj = module
+    for part in attr.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
 def import_function_from_file(file_path: str, function_name: str):
     """Dynamically import a function from a given file."""
     spec = importlib.util.spec_from_file_location("module.name", file_path)

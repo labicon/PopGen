@@ -78,10 +78,8 @@ class TestGenerate:
 
         reward = generator.generate(
             behavior=behavior,
-            codebase_context=codebase_context,
+
             environment_description="test environment",
-            observation_format="obs format",
-            reward_format="reward is a float",
         )
 
         assert isinstance(reward, CodeSnippet)
@@ -99,10 +97,8 @@ class TestGenerate:
 
         generator.generate(
             behavior=behavior,
-            codebase_context=codebase_context,
+
             environment_description="test environment",
-            observation_format="obs format",
-            reward_format="reward is a float",
         )
 
         call_args = mock_completion.call_args
@@ -110,7 +106,7 @@ class TestGenerate:
         user_message = messages[1]["content"]
         assert "Aggressive" in user_message
 
-    def test_generate_includes_codebase_context_in_user_prompt(self, mock_completion, generator, behavior, codebase_context):
+    def test_generate_includes_environment_description_in_system_prompt(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = json.dumps({
@@ -121,16 +117,13 @@ class TestGenerate:
 
         generator.generate(
             behavior=behavior,
-            codebase_context=codebase_context,
             environment_description="test environment",
-            observation_format="obs format",
-            reward_format="reward is a float",
         )
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
-        user_message = messages[1]["content"]
-        assert "test environment" in user_message
+        system_message = messages[0]["content"]
+        assert "test environment" in system_message
 
     def test_generate_with_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
@@ -147,19 +140,16 @@ class TestGenerate:
 
         generator.generate(
             behavior=behavior,
-            codebase_context=codebase_context,
             environment_description="test environment",
-            observation_format="obs format",
-            reward_format="reward is a float",
             feedbacks=feedbacks,
         )
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
-        assert len(messages) == 3
-        refinement_message = messages[2]["content"]
-        assert "broken" in refinement_message
-        assert "IndexError" in refinement_message
+        assert len(messages) == 2
+        user_message = messages[1]["content"]
+        assert "broken" in user_message
+        assert "IndexError" in user_message
 
     def test_generate_with_multiple_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
@@ -177,20 +167,17 @@ class TestGenerate:
 
         generator.generate(
             behavior=behavior,
-            codebase_context=codebase_context,
             environment_description="test environment",
-            observation_format="obs format",
-            reward_format="reward is a float",
             feedbacks=feedbacks,
         )
 
         call_args = mock_completion.call_args
         messages = call_args.kwargs["messages"]
-        refinement_message = messages[2]["content"]
-        assert "code1" in refinement_message
-        assert "error1" in refinement_message
-        assert "code2" in refinement_message
-        assert "error2" in refinement_message
+        user_message = messages[1]["content"]
+        assert "code1" in user_message
+        assert "error1" in user_message
+        assert "code2" in user_message
+        assert "error2" in user_message
 
     def test_generate_no_refinement_with_empty_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
@@ -203,10 +190,8 @@ class TestGenerate:
 
         generator.generate(
             behavior=behavior,
-            codebase_context=codebase_context,
+
             environment_description="test environment",
-            observation_format="obs format",
-            reward_format="reward is a float",
             feedbacks=[],
         )
 
@@ -225,10 +210,8 @@ class TestGenerate:
 
         generator.generate(
             behavior=behavior,
-            codebase_context=codebase_context,
+
             environment_description="test environment",
-            observation_format="obs format",
-            reward_format="reward is a float",
             feedbacks=None,
         )
 
@@ -249,10 +232,8 @@ class TestGenerate:
         generator = RewardFnGenerator(model_config=config)
         generator.generate(
             behavior=behavior,
-            codebase_context=codebase_context,
+
             environment_description="test environment",
-            observation_format="obs format",
-            reward_format="reward is a float",
         )
 
         call_args = mock_completion.call_args

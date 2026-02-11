@@ -57,9 +57,7 @@ def run_llm_agent_pipeline(cfg: DictConfig):
     # Load env
     env = importlib.import_module(f"popgen.envs.{cfg.env}")
     env_description = env.ENVIRONMENT_DESCRIPTION
-    action_format = env.ACTION_FORMAT
-    action_type = env.ACTION_TYPE
-    ego_visual_description = env.EGO_VISUAL_DESCRIPTION
+    action_type = env.ActionType
     rollout_fn = env.rollout_fn
 
     agent_config = LitellmConfig(**cfg.agent.model_config)
@@ -70,13 +68,11 @@ def run_llm_agent_pipeline(cfg: DictConfig):
 
     generation_kwargs = {
         "environment_description": env_description,
-        "action_description": action_format,
         "action_type": action_type,
         **agent_kwargs,
     }
     evaluation_kwargs = {
-        "ego_visual_description": ego_visual_description,
-        "ego_name": "agent0",
+        "environment_description": env_description,
     }
 
     # ------------------ Generate Behavior ------------- #

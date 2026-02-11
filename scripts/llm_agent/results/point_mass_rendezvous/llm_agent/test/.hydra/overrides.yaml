@@ -1,0 +1,5 @@
+- agent.horizon_length=3
+- agent.include_trajectory_history=true
+- n_workers=10
+- run_name=test
+- env=point_mass_rendezvous

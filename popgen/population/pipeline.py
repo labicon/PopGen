@@ -1,3 +1,4 @@
+import importlib
 import json
 import logging
 import os
@@ -12,7 +13,7 @@ from pqdm.processes import pqdm
 from popgen.agents import PolicyCodeAgent
 from popgen.utils.config import LitellmConfig
 from popgen.utils.decorators import track_time
-from popgen.utils.imports import import_all_functions_from_file, import_function_from_file
+from popgen.utils.imports import import_all_functions_from_file, import_function_from_file, load_entrypoint
 from popgen.utils.logging import save_rollout, uniform_sample
 
 from .evaluation import BehaviorAdherenceEvaluator
@@ -61,13 +62,15 @@ def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn", "LLMAgent
         # Create LitellmConfig from the saved configuration
         model_config = LitellmConfig(**config["model_config"])
 
+        # Load action type module
+        action_type = load_entrypoint(config["action_type_module"])
+
         # Create LLMAgent with loaded configuration
         policy = LLMAgent(
+            behavior=config["behavior"],
             model_config=model_config,
             environment_description=config["environment_description"],
-            action_description=config["action_description"],
-            action_type=config["action_type"],
-            behavior=config.get("behavior"),
+            action_type=action_type,
             horizon_length=config.get("horizon_length", 1),
             include_trajectory_history=config.get("include_trajectory_history", False),
         )
@@ -80,19 +83,18 @@ def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn", "LLMAgent
 
 def _worker_rollout(args: dict) -> dict:
     """Worker function for parallel rollout execution."""
+    # Import environment module
     rollout_fn = args["rollout_fn"]
-    rollout_subfolder = args["rollout_subfolder"]
     artifacts_dict = load_policy_and_env(policy_type=args["policy_type"], **args.get("loading_kwargs", {}))
-    kwargs = args["rollout_kwargs"]
 
     # Perform rollout
-    rollout_data, images, error = rollout_fn(**artifacts_dict["policies"], env=artifacts_dict["env"], **kwargs)
+    rollout_data, images, error = rollout_fn(**artifacts_dict["policies"], env=artifacts_dict["env"], **args["rollout_kwargs"])
 
     # Save rollout trajectory and images
     save_rollout(
         rollout_data=rollout_data,
         images=images,
-        save_path=rollout_subfolder,
+        save_path=args["rollout_subfolder"],
     )
 
     if error is not None:
@@ -112,14 +114,13 @@ class AgentGenerationPipeline(ABC):
         self,
         generator: BaseGenerator,
         evaluator: BehaviorAdherenceEvaluator,
-        output_dir: str,
         rollout_fn: callable,
+        output_dir: str,
     ):
         self.generator: BaseGenerator = generator
         self.evaluator: BehaviorAdherenceEvaluator = evaluator
-        self.output_dir = output_dir
         self.rollout_fn = rollout_fn
-        self.policy_type = getattr(self.generator, "generation_type", None)
+        self.output_dir = output_dir
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -127,6 +128,7 @@ class AgentGenerationPipeline(ABC):
     def _generate_policies(
         self,
         behaviors: list[Behavior],
+        env_module: Any,
         feedbacks: list[list[tuple[str, str]]],
         output_dirs: list[str],
         num_workers: int = 1,
@@ -322,9 +324,9 @@ class AgentGenerationPipeline(ABC):
                 rollout_args.append(
                     {
                         "rollout_fn": self.rollout_fn,
-                        "rollout_subfolder": f"{output_path}/rollout_{rollout_idx}",
                         "policy_type": self.policy_type,
                         "loading_kwargs": loading_kwargs,
+                        "rollout_subfolder": f"{output_path}/rollout_{rollout_idx}",
                         "rollout_kwargs": rollout_kwargs,
                         "_behavior_idx": behavior_idx,
                         "_rollout_idx": rollout_idx,
@@ -354,8 +356,7 @@ class AgentGenerationPipeline(ABC):
         behaviors: list[Behavior],
         behaviors_rollouts: list[list[dict]],
         behavior_dirs: list[str],
-        ego_name: str,
-        ego_visual_description: str,
+        environment_description: str,
         **kwargs,
     ) -> Any:
         """Evaluate policies for a batch of behaviors using parallel rollouts.
@@ -384,8 +385,7 @@ class AgentGenerationPipeline(ABC):
             eval_inputs.append(
                 {
                     "behavior": str(behavior),
-                    "ego_name": ego_name,
-                    "ego_visual_description": ego_visual_description,
+                    "environment_description": environment_description,
                     "rollout_states": rollout_states,
                     "rollout_images": rollout_images,
                 }
@@ -411,29 +411,16 @@ class AgentGenerationPipeline(ABC):
 class PolicyCodeAgentGenerationPipeline(AgentGenerationPipeline):
     """Pipeline for generating policies with LLM feedback."""
 
-    def __init__(
-        self,
-        generator: BaseGenerator,
-        evaluator: BehaviorAdherenceEvaluator,
-        rollout_fn: callable,
-        output_dir: str,
-    ):
-        super().__init__(
-            generator=generator,
-            evaluator=evaluator,
-            rollout_fn=rollout_fn,
-            output_dir=output_dir,
-        )
+    policy_type = "PolicyCode"
 
     @track_time("Policy generation")
     def _generate_policies(
         self,
         behaviors: list[Behavior],
+        environment_description: str,
         feedbacks: list[list[tuple[str, str]]],
         output_dirs: list[str],
         num_workers: int = 1,
-        observation_format: str = "",
-        action_format: str = "",
         **kwargs,
     ) -> tuple[list[Any], list[dict]]:
         """Generate policies using LLM with feedback."""
@@ -441,7 +428,15 @@ class PolicyCodeAgentGenerationPipeline(AgentGenerationPipeline):
         generated_code_policies = []
 
         logging.info(f"Generating {len(behaviors)} policies with {num_workers} workers...")
-        inputs = [{"behavior": str(b), "feedbacks": fb, "observation_format": observation_format, "action_format": action_format} for b, fb in zip(behaviors, feedbacks)]
+        inputs = [
+            {
+                "behavior": str(b),
+                "feedbacks": fb,
+                "environment_description": environment_description,
+                "examples": None,  # TODO: add examples to generation kwargs if needed
+            }
+            for b, fb in zip(behaviors, feedbacks)
+        ]
         generated_codes = self.generator.batch_generate(
             inputs=inputs,
             num_workers=num_workers,
@@ -463,6 +458,8 @@ class PolicyCodeAgentGenerationPipeline(AgentGenerationPipeline):
 
 class RLAgentGenerationPipeline(AgentGenerationPipeline):
     """Pipeline for generating reward functions and training RL policies."""
+
+    policy_type = "RewardFn"
 
     def __init__(
         self,
@@ -486,19 +483,23 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
     def _generate_policies(
         self,
         behaviors: list[Behavior],
+        environment_description: str,
+        examples: list[str],
         feedbacks: list[list[tuple[str, str]]],
         output_dirs: list[str],
         num_workers: int = 1,
-        environment_description: str = "",
-        observation_format: str = "",
-        reward_format: str = "",
         **kwargs,
     ) -> tuple[list[Any], list[dict]]:
         """Generate reward functions and train RL policies."""
         # Batch generate reward functions
         logging.info(f"Generating {len(behaviors)} reward functions with {num_workers} workers...")
         inputs = [
-            {"behavior": str(b), "feedbacks": fb, "environment_description": environment_description, "observation_format": observation_format, "reward_format": reward_format}
+            {
+                "behavior": str(b),
+                "feedbacks": fb,
+                "environment_description": environment_description,
+                "examples": examples,
+            }
             for b, fb in zip(behaviors, feedbacks)
         ]
         generated_codes = self.generator.batch_generate(
@@ -542,6 +543,8 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
 class LLMAgentGenerationPipeline(AgentGenerationPipeline):
     """Pipeline for generating LLM-based agents with behavior specifications."""
 
+    policy_type = "LLMAgent"
+
     def __init__(
         self,
         agent_model_config: LitellmConfig,
@@ -556,7 +559,6 @@ class LLMAgentGenerationPipeline(AgentGenerationPipeline):
             output_dir=output_dir,
         )
         self.agent_model_config = agent_model_config
-        self.policy_type = "LLMAgent"
 
     @track_time("LLM Agent configuration")
     def _generate_policies(
@@ -564,7 +566,6 @@ class LLMAgentGenerationPipeline(AgentGenerationPipeline):
         behaviors: list[Behavior],
         output_dirs: list[str],
         environment_description: str = "",
-        action_description: str = "",
         action_type: Literal["Discrete", "Continuous"] = None,
         horizon_length: int = 1,
         include_trajectory_history: bool = False,
@@ -579,15 +580,14 @@ class LLMAgentGenerationPipeline(AgentGenerationPipeline):
         for output_dir, behavior in zip(output_dirs, behaviors):
             # Create configuration for this LLM agent
             config = {
+                "behavior": behavior.description,
                 "model_config": {
                     "model_name": self.agent_model_config.model_name,
                     "api_base": self.agent_model_config.api_base,
                     "generation_kwargs": self.agent_model_config.generation_kwargs,
                 },
-                "behavior": behavior.description,
                 "environment_description": environment_description,
-                "action_description": action_description,
-                "action_type": action_type,
+                "action_type_module": f"{action_type.__module__}:{action_type.__qualname__}",
                 "horizon_length": horizon_length,
                 "include_trajectory_history": include_trajectory_history,
             }

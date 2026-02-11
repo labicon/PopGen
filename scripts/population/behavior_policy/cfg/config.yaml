@@ -1,5 +1,5 @@
 # Environment selection
-env: football
+env: lbf
 
 # Behavior generation strategy
 behavior_generator:

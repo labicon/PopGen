@@ -79,7 +79,6 @@ Each environment module in `popgen/envs/<env_name>/` must provide:
 |--------|-------------|
 | `ENVIRONMENT_DESCRIPTION` | Text description of the environment and accessible variables |
 | `OBSERVATION_FORMAT` | Format specification for agent observations |
-| `EGO_VISUAL_DESCRIPTION` | Visual description of the ego agent for evaluation |
 | `rollout_fn` | Function that executes policies and returns `(states, images, error)` |
 
 See [Adding a New Environment](../../docs/add_env.md) for detailed instructions.

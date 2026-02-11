@@ -69,7 +69,7 @@ class GeneratorWithFeedback(BaseGenerator):
         self.model_config = model_config
         self.model_name = model_config.model_name
 
-    def generate(self, user_prompt: str = None, system_prompt: str = None, feedbacks: list = None, **kwargs) -> dict | BaseModel:
+    def generate(self, user_prompt: str, system_prompt: str = None, examples: list | None = None, feedbacks: list = None, **kwargs) -> dict | BaseModel:
         """Generate items based on prompts and feedback.
 
         Args:
@@ -86,12 +86,26 @@ class GeneratorWithFeedback(BaseGenerator):
 
         if system_prompt is not None:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_prompt})
 
+        formatted_prompt = ""
+
+        # Incorporate example into the prompt to provide a clear reference for the model, especially if the generation task is complex or has specific formatting requirements.
+        if examples is not None:
+            examples_str = "\n\n".join(f"Example {i}:\n{e}" for (i, e) in enumerate(examples))
+            formatted_prompt += f"# Examples\n{examples_str}\n\n"
+
+        # Incorporate feedback into the prompt to guide refinement. This is especially useful for iterative generation where the model can learn from previous attempts.
         if feedbacks is not None and len(feedbacks) > 0:
             feedback_previous = "\n\n".join(f" - {self.generation_type} #({i}):\n{e}\nFeedback: {fdb}" for (i, (e, fdb)) in enumerate(feedbacks))
-            refinement_message = f"The previous attempts produced the following errors and feedbacks:\n{feedback_previous}\n\nPlease fix the errors and provide the corrected {self.generation_type}."
-            messages.append({"role": "user", "content": refinement_message})
+            refinement_message = (
+                f"The previous attempts produced the following errors and feedbacks:\n{feedback_previous}\n\nPlease fix the errors and provide the corrected {self.generation_type}.\n\n"
+            )
+            formatted_prompt += refinement_message
+
+        # Append the user prompt at the end to ensure it is the main focus of the generation, especially after providing examples and feedback.
+        formatted_prompt += user_prompt
+
+        messages.append({"role": "user", "content": formatted_prompt})
 
         response = litellm.completion(
             model=self.model_config.model_name,
