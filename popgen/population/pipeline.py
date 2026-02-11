@@ -224,7 +224,7 @@ class AgentGenerationPipeline(ABC):
             # Step 2 & 3: Run rollouts and evaluate only for valid generations
             if valid_indices:
                 valid_behavior_dirs = [os.path.join(self.output_dir, f"behavior_{idx}", f"attempt_{attempt}") for idx in valid_indices]
-                behaviors_rollouts = self._run_rollouts(
+                behaviors_rollouts, rollout_latency = self._run_rollouts(
                     n_rollouts=n_rollouts,
                     attempt=attempt,
                     num_workers=num_workers,
@@ -261,6 +261,7 @@ class AgentGenerationPipeline(ABC):
                         else:
                             feedbacks[idx].append(("", overall_feedback))
             else:
+                rollout_latency = 0.0
                 evaluation_latency = 0.0
 
             # Log per-attempt summary
@@ -271,12 +272,15 @@ class AgentGenerationPipeline(ABC):
                 "n_failed": len(pending_indices) - sum(successes),
                 "latencies": {
                     "generation": gen_latency,
+                    "rollout": rollout_latency,
                     "evaluation": evaluation_latency,
                 },
                 "results": dict(enumerate(successes)),
             }
             attempt_summaries.append(attempt_summary)
-            logging.info(f"[Attempt {attempt + 1}] Gen: {gen_latency:.1f}s, Eval: {evaluation_latency:.1f}s, Success: {attempt_summary['n_succeeded']}/{len(pending_indices)}")
+            logging.info(
+                f"[Attempt {attempt + 1}] Gen: {gen_latency:.1f}s, Rollout: {rollout_latency:.1f}s, Eval: {evaluation_latency:.1f}s, Success: {attempt_summary['n_succeeded']}/{len(pending_indices)}"
+            )
 
         # Compute overall summary
         n_attempts = len(attempt_summaries)
@@ -284,12 +288,14 @@ class AgentGenerationPipeline(ABC):
 
         overall_summary = {
             "n_behaviors": n_behaviors,
+            "num_workers": num_workers,
             "adherence_threshold": adherence_threshold,
             "n_succeeded": sum(successes),
             "n_failed": n_behaviors - sum(successes),
             "n_attempts": n_attempts,
             "avg_latencies": {
                 "generation": sum(a["latencies"]["generation"] for a in attempt_summaries) / n_attempts if n_attempts else 0,
+                "rollout": sum(a["latencies"]["rollout"] for a in attempt_summaries) / n_attempts if n_attempts else 0,
                 "evaluation": sum(a["latencies"]["evaluation"] for a in attempt_summaries) / n_attempts if n_attempts else 0,
             },
             "total_time": total_time,
@@ -306,6 +312,7 @@ class AgentGenerationPipeline(ABC):
 
         return successes, overall_summary
 
+    @track_time("Rollouts")
     def _run_rollouts(
         self,
         behavior_dirs: list[str],
