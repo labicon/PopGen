@@ -95,6 +95,7 @@ class Viewer(object):
 
         self.img_apple = pyglet.resource.image("apple.png")
         self.img_agent = pyglet.resource.image("agent.png")
+        self.img_agent_ego = pyglet.resource.image("agent_blue.png")
 
     def close(self):
         self.window.close()
@@ -195,11 +196,12 @@ class Viewer(object):
         players = []
         batch = pyglet.graphics.Batch()
 
-        for player in env.players:
+        for i, player in enumerate(env.players):
             row, col = player.position
+            img = self.img_agent_ego if i == 0 else self.img_agent
             players.append(
                 pyglet.sprite.Sprite(
-                    self.img_agent,
+                    img,
                     (self.grid_size + 1) * col,
                     self.height - (self.grid_size + 1) * (row + 1),
                     batch=batch,

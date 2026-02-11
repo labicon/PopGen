@@ -29,6 +29,10 @@ If the food level is higher than the agent level, multiple agents must load the 
 The sum of levels of valid agents loading the food must be greater than or equal to the food level.
 If multiple agents are loading the same food, they must load at the same time step.
 
+Some visual aspects:
+- Ego agent is the blue agent. The white one is its teammate.
+- The number associated top each agent and food represent its level.
+
 Any food or agent cannot be on the same cell as another food or agent.
 They can load the food only when they are on the neighboring (up, down, left, or right) cell of the food (not on the food cell).
 
