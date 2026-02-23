@@ -1,165 +1,242 @@
 import inspect
 import os
-import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Optional
 
 import gymnasium
 import numpy as np
 import torch
+import torch.nn as nn
 from benchmarl.algorithms import IppoConfig, MappoConfig
 from benchmarl.environments.lbf.common import LbfGymWrapper, LbfTask
 from benchmarl.experiment import Experiment, ExperimentConfig
 from benchmarl.models.mlp import MlpConfig
-from tensordict import TensorDict
+from popgen.envs.util import apply_rollout_seed, compose_rollout_policy, parse_single_scripted_policy
+from tensordict import TensorDictBase
+from torchrl.envs import EnvBase, TransformedEnv
 
 
-class BenchMARLLbfWrapper(gymnasium.Wrapper):
+def _infer_num_agents(env: gymnasium.Env) -> int:
+    base_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    if hasattr(base_env, "n_agents"):
+        return int(base_env.n_agents)
+    if hasattr(base_env, "players"):
+        return len(base_env.players)
+    if isinstance(env.observation_space, gymnasium.spaces.Tuple):
+        return len(env.observation_space.spaces)
+    raise ValueError(f"Could not infer number of agents from env type {type(env).__name__}.")
+
+
+def _build_lbf_train_group_map(
+    task_config: dict,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Build LBF training group map separating scripted teammate from learning agents.
+
+    The first agent is placed in the trainable ``"ego"`` group; the remaining
+    agents form the scripted ``"teammate"`` group.
+
+    Returns:
+        A ``(group_map, trainable_group)`` tuple where:
+        - *group_map* – ``{"ego": [first_agent], "teammate": rest}``
+        - *trainable_group* – ``{"ego": [first_agent]}``
     """
-    Wrapper for LBF environment to receive action and return observation in
-    similar format with BenchMARL.
-    """
-
-    def __init__(self, env):
-        super().__init__(env)
-
-    def reset(self, *args, **kwargs):
-        obs, info = self.env.reset(*args, **kwargs)
-        obs = torch.tensor(np.stack(obs), dtype=torch.float32).unsqueeze(0)
-        return obs, info
-
-    def step(self, action):
-        if isinstance(action, torch.Tensor):
-            action = action.cpu().numpy()
-
-        # Handle (1, n_agents, 1)
-        if action.ndim == 3 and action.shape[0] == 1 and action.shape[2] == 1:
-            action = action.squeeze(0).squeeze(-1)
-        # Handle (1, n_agents) just in case
-        elif action.ndim == 2 and action.shape[0] == 1:
-            action = action.squeeze(0)
-
-        # Ensure it is integer for LBF
-        action = action.astype(int)
-
-        obs, reward, done, truncated, info = self.env.step(tuple(action))
-        obs = torch.tensor(np.stack(obs), dtype=torch.float32).unsqueeze(0)
-        reward = torch.tensor(reward, dtype=torch.float32).unsqueeze(0)
-
-        return obs, reward, done, truncated, info
+    n_agents = task_config.get("players")
+    if n_agents is None:
+        raise ValueError("Could not infer number of agents from LBF task config (expected 'players' key).")
+    if n_agents < 2:
+        raise ValueError(f"Need at least 2 agents to form ego/teammate split; got {n_agents}.")
+    agent_names = [f"agent_{i}" for i in range(n_agents)]
+    agents_group = [agent_names[0]]
+    teammate_group = agent_names[1:]
+    group_map = {"ego": agents_group, "teammate": teammate_group}
+    trainable_group = {"ego": agents_group}
+    return group_map, trainable_group
 
 
-def rollout_lbf_env(policy, env, get_state_fn: Callable | None = None, max_steps: int = 50, **kwargs):
-    """
-    Rollout the policy in the LBF environment.
+def _to_rollout_env(env, device: str = "cpu") -> EnvBase:
+    if isinstance(env, TransformedEnv):
+        return env
+    if isinstance(env, EnvBase):
+        return env
+    if isinstance(env, gymnasium.Env):
+        num_agents = _infer_num_agents(env)
+        return LbfGymWrapper(env=env, num_agents=num_agents, device=device)
+    raise TypeError(f"Unsupported env type for rollout_lbf_env: {type(env).__name__}")
 
-    Args:
-        policy: The policy to evaluate. It receives a list of parsed observations (dicts)
-                and should return a TensorDict with "agents" -> "action".
-        env: The LBF environment (gymnasium.Env).
-        get_state_fn: Function to extract state from env.
-        max_steps: Maximum steps to run.
-        **kwargs: Extra args.
-    """
-    if not isinstance(env, BenchMARLLbfWrapper):
-        env = BenchMARLLbfWrapper(env)
 
+def _resolve_state_env(env):
+    current = env
+    visited = set()
+    while True:
+        if isinstance(current, gymnasium.Env):
+            return current
+        next_env = getattr(current, "env", None)
+        if next_env is None:
+            next_env = getattr(current, "base_env", None)
+        if next_env is None or id(next_env) in visited:
+            return env
+        visited.add(id(next_env))
+        current = next_env
+
+
+def rollout_lbf_env(
+    policy,
+    env,
+    get_state_fn: Callable | None = None,
+    max_steps: int = 50,
+    **kwargs,
+):
+    """Rollout a policy input that may be a single policy or a list of policies."""
+    policy = compose_rollout_policy(policy)
+    rollout_env = _to_rollout_env(env)
+    state_env = _resolve_state_env(rollout_env)
     policy.eval()
 
-    # Seed
-    seed = (int(time.time() * 1000) + os.getpid()) % 100000
-    obs, _ = env.reset(seed=seed)
+    def rollout_policy(tensordict):
+        out = policy(tensordict)
+        if not isinstance(out, TensorDictBase):
+            raise TypeError(
+                f"Policy output must be TensorDictBase, got {type(out).__name__}."
+            )
+        return out
+
+    apply_rollout_seed(rollout_env)
 
     states = []
     images = []
 
     # Enable headless rendering for pyglet (used by lbforaging)
     os.environ.setdefault("PYGLET_HEADLESS", "true")
-    # Ensure the base env uses rgb_array mode regardless of how it was created
-    env.unwrapped.render_mode = "rgb_array"
+    if hasattr(state_env, "render_mode"):
+        try:
+            state_env.render_mode = "rgb_array"
+        except AttributeError:
+            if hasattr(state_env, "unwrapped") and hasattr(state_env.unwrapped, "render_mode"):
+                state_env.unwrapped.render_mode = "rgb_array"
 
-    for step in range(max_steps):
-        frame = env.render()
+    def render_callback(env, td):
+        try:
+            frame = env.render(mode="rgb_array")
+        except TypeError:
+            frame = env.render()
         if isinstance(frame, np.ndarray):
             images.append(frame)
-
-        # State
         if get_state_fn is not None:
-            s = get_state_fn(env)
-            s["step"] = step
-            states.append(s)
-        else:
-            # Fallback: store raw observations
+            states.append(get_state_fn(state_env))
+
+    # Filter kwargs to only pass supported arguments to env.rollout
+    rollout_sig = inspect.signature(rollout_env.rollout)
+    supported_args = set(rollout_sig.parameters.keys())
+    rollout_kwargs = {k: v for k, v in kwargs.items() if k in supported_args}
+    if "max_steps" in supported_args and "max_steps" not in rollout_kwargs:
+        rollout_kwargs["max_steps"] = max_steps
+
+    with torch.no_grad():
+        rollout_td = rollout_env.rollout(
+            policy=rollout_policy,
+            callback=render_callback,
+            auto_cast_to_device=True,
+            break_when_any_done=True,
+            **rollout_kwargs,
+        )
+
+    # Extract states (obs) if custom state function is not provided
+    if get_state_fn is None:
+        for step_idx in range(rollout_td.batch_size[0]):
+            step_td = rollout_td[step_idx]
             state = {}
-            # obs is (1, n_agents, obs_dim) tensor
-            state["observation"] = obs.squeeze(0).tolist()
-            state["step"] = step
+            if ("agents", "observation") in step_td.keys(include_nested=True):
+                obs = step_td["agents", "observation"]
+                state["observation"] = obs.cpu().numpy().tolist()
             states.append(state)
-
-        # Prepare Policy Input
-        policy_input = TensorDict({"observation": obs}, batch_size=[1])
-
-        # Policy Inference
-        with torch.no_grad():
-            out = policy(policy_input)
-
-        # Extract Actions
-        if isinstance(out, torch.Tensor):
-            actions_tensor = out
-        else:
-            actions_tensor = out["agents", "action"]
-
-        # Step Env
-        obs, rewards, done, truncated, info = env.step(actions_tensor)
-
-        if done or truncated:
-            break
 
     return states, images, None
 
-
-def train_lbf_env(reward_fn, output_dir, rl_cfg_dir, task_yaml_name="lbf.yaml", mappo_yaml_name="mappo.yaml", experiment_yaml_name="base_experiment.yaml", mlp_yaml_name="mlp.yaml", seed=0):
+def train_lbf_env(
+    reward_fn,
+    output_dir,
+    rl_cfg_dir,
+    task_yaml_name="lbf.yaml",
+    mappo_yaml_name="mappo.yaml",
+    experiment_yaml_name="base_experiment.yaml",
+    mlp_yaml_name="mlp.yaml",
+    seed=0,
+    callbacks=None,
+    teammate_policy: list[nn.Module] | None = None,
+):
     # Ensure reward_fn has access to torch
     if hasattr(reward_fn, "__globals__"):
         reward_fn.__globals__["torch"] = torch
 
-    # Monkey Patch LbfGymWrapper._step to inject custom rewards
+    # Enable headless rendering for pyglet (used by lbforaging)
+    os.environ.setdefault("PYGLET_HEADLESS", "true")
+
+    callbacks = list(callbacks or [])
+
     original_step = LbfGymWrapper._step
-
-    def custom_step(self, tensordict):
-        # 1. Run the original step (physics step + original reward calculation)
-        out_td = original_step(self, tensordict)
-
-        # 2. Calculate custom rewards
-        # LbfGymWrapper has self.env which is the Gymnasium environment
-        base_env = self.env.unwrapped
-
-        new_rewards = []
-        # Access players from the base env
-        for i, player in enumerate(base_env.players):
-            try:
-                # Provide player and env to reward_fn
-                r = reward_fn(player, base_env)
-                if isinstance(r, torch.Tensor):
-                    r = r.item()
-                new_rewards.append(r)
-            except Exception as e:
-                # Re-raise for debugging purposes
-                raise e
-
-        # 3. Overwrite rewards in the output TensorDict
-        # new_rewards is list of floats. Convert to tensor (n_agents, 1)
-        reward_tensor = torch.tensor(new_rewards, device=self.device, dtype=torch.float32).unsqueeze(-1)
-
-        out_td["agents", "reward"] = reward_tensor
-        return out_td
-
-    LbfGymWrapper._step = custom_step
 
     try:
         # Load Configs
-        task = LbfTask.get_from_yaml(path=str(rl_cfg_dir / task_yaml_name))
+        task = LbfTask.LBF.get_from_yaml(path=str(rl_cfg_dir / task_yaml_name))
+
+        if teammate_policy is not None:
+            group_map, trainable_group = _build_lbf_train_group_map(task_config=task.config)
+            task.config["group_map"] = group_map
+            from popgen.agents.scripted_partner import TeammatePolicyCallback
+
+            callbacks.append(
+                TeammatePolicyCallback(
+                    teammate_policies=teammate_policy,
+                    trainable_group=trainable_group,
+                )
+            )
+
+        desired_group_map = task.config.get("group_map")
+
+        if desired_group_map:
+            name_to_group = {
+                aname: (gname, local_i)
+                for gname, names in desired_group_map.items()
+                for local_i, aname in enumerate(names)
+            }
+
+        def custom_step(self, tensordict):
+            out_td = original_step(self, tensordict)
+            base_env = self.env.unwrapped
+
+            new_rewards = []
+            for i, player in enumerate(base_env.players):
+                if desired_group_map:
+                    gname, local_i = name_to_group[f"agent_{i}"]
+                    player.obs = out_td[gname, "observation"][local_i].cpu().numpy()
+                else:
+                    player.obs = out_td["agents", "observation"][i].cpu().numpy()
+                try:
+                    r = reward_fn(base_env, player)
+                    if isinstance(r, torch.Tensor):
+                        r = r.item()
+                    new_rewards.append(r)
+                except Exception as e:
+                    raise e
+
+            if desired_group_map:
+                for gname, names in desired_group_map.items():
+                    idxs = [int(n.split("_")[1]) for n in names]
+                    rt = torch.tensor(
+                        [new_rewards[idx] for idx in idxs],
+                        device=self.device,
+                        dtype=torch.float32,
+                    ).unsqueeze(-1)
+                    out_td[gname, "reward"] = rt
+            else:
+                reward_tensor = torch.tensor(
+                    new_rewards, device=self.device, dtype=torch.float32
+                ).unsqueeze(-1)
+                out_td["agents", "reward"] = reward_tensor
+
+            return out_td
+
+        LbfGymWrapper._step = custom_step
 
         mappo_path = rl_cfg_dir / mappo_yaml_name
         if mappo_path.exists():
@@ -187,6 +264,7 @@ def train_lbf_env(reward_fn, output_dir, rl_cfg_dir, task_yaml_name="lbf.yaml", 
             critic_model_config=critic_model_config,
             seed=seed,
             config=experiment_config,
+            callbacks=callbacks,
         )
 
         experiment.run()

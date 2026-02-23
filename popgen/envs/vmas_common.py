@@ -1,7 +1,6 @@
 import inspect
-import os
-import time
 from pathlib import Path
+from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -9,6 +8,92 @@ import vmas
 from benchmarl.algorithms import IppoConfig, MappoConfig
 from benchmarl.experiment import Experiment, ExperimentConfig
 from benchmarl.models.mlp import MlpConfig
+
+from popgen.envs.util import apply_rollout_seed, compose_rollout_policy, parse_single_scripted_policy
+
+
+def _build_vmas_train_group_map(
+    task_config: dict,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Split the agents in ``task_config["group_map"]`` into ego and teammate groups.
+
+    Two layouts are supported:
+
+    **Football layout** – ``group_map`` contains both ``"agent_blue"`` (our
+    team) and ``"agent_red"`` (opponent).  ``"agent_red"`` is left untouched;
+    ``"agent_blue"`` is split so the first blue agent becomes ``"ego"`` and
+    the remaining blue agents become ``"teammate"``.
+
+    **General layout** – all agents are flattened across groups in insertion
+    order; the first agent becomes ``"ego"`` and the rest become
+    ``"teammate"``.
+
+    Args:
+        task_config: BenchMARL task configuration dict.  Must contain a
+            non-empty ``"group_map"`` with at least two agents in the
+            trainable group.
+
+    Returns:
+        A ``(group_map, trainable_group)`` tuple where:
+
+        - *group_map* – new group map with ``"ego"``, ``"teammate"``, and
+          (football only) ``"agent_red"`` entries.
+        - *trainable_group* – ``{"ego": [first_agent]}``, the subset whose
+          parameters are updated during training.
+
+    Raises:
+        ValueError: If ``"group_map"`` is absent/empty or the trainable team
+            contains fewer than two agents.
+    """
+    original_group_map = task_config.get("group_map")
+
+    # Football layout: "agent_blue" (our team) vs "agent_red" (opponent, unchanged).
+    if original_group_map and "agent_blue" in original_group_map and "agent_red" in original_group_map:
+        blue_agents = list(original_group_map["agent_blue"])
+        if len(blue_agents) < 2:
+            raise ValueError(
+                f"Need at least 2 blue agents to form ego/teammate split; got {blue_agents}."
+            )
+        group_map = {
+            "ego": [blue_agents[0]],
+            "teammate": blue_agents[1:],
+            "agent_red": list(original_group_map["agent_red"]),
+        }
+        trainable_group = {"ego": [blue_agents[0]]}
+        return group_map, trainable_group
+
+    # General layout:
+    # 1) if group_map exists, flatten all agents across groups, first → ego, rest → teammate.
+    # 2) otherwise infer agent names from count fields.
+    if original_group_map:
+        seen: set[str] = set()
+        agent_names: list[str] = []
+        for grouped_agents in original_group_map.values():
+            for name in grouped_agents:
+                if name not in seen:
+                    seen.add(name)
+                    agent_names.append(name)
+    else:
+        n_agents = task_config.get("n_agents")
+        if n_agents is not None:
+            agent_names = [f"agent_{i}" for i in range(n_agents)]
+        elif n_agents is None and {"n_blue_agents", "n_red_agents"} <= set(task_config.keys()):
+            n_agents = task_config["n_blue_agents"]
+            agent_names = [f"agent_blue_{i}" for i in range(n_agents)]
+        else:
+            raise ValueError("Could not infer number of agents to build VMAS group_map.")
+
+    if len(agent_names) < 2:
+        raise ValueError(
+            f"Need at least 2 agents to form ego/teammate split; got {agent_names}."
+        )
+
+    ego_group = [agent_names[0]]
+    teammate_group = agent_names[1:]
+
+    group_map = {"ego": ego_group, "teammate": teammate_group}
+    trainable_group = {"ego": ego_group}
+    return group_map, trainable_group
 
 
 def train_vmas_env(
@@ -18,10 +103,12 @@ def train_vmas_env(
     scenario_name,
     vmas_task,
     rl_cfg_dir,
+    teammate_policy: list[nn.Module | Callable] | None = None,
     task_yaml_name=None,
-    mappo_yaml_name="mappo.yaml",
+    ippo_yaml_name="ippo.yaml",
     experiment_yaml_name="base_experiment.yaml",
     mlp_yaml_name="mlp.yaml",
+    callbacks=None,
 ):
     if task_yaml_name is None:
         task_yaml_name = f"{scenario_name}.yaml"
@@ -69,10 +156,25 @@ def train_vmas_env(
         # 4. Configure BenchMARL Task
         task = vmas_task.get_from_yaml(path=str(rl_cfg_dir / task_yaml_name))
 
+        group_map, trainable_group = _build_vmas_train_group_map(task_config=task.config)
+        task.config["group_map"] = group_map
+
+        callbacks = list(callbacks or [])
+
+        if teammate_policy:
+            from popgen.agents.scripted_partner import TeammatePolicyCallback
+
+            callbacks.append(
+                TeammatePolicyCallback(
+                    teammate_policies=teammate_policy,
+                    trainable_group=trainable_group,
+                )
+            )
+
         # 5. Configure Algorithm & Experiment
-        mappo_path = rl_cfg_dir / mappo_yaml_name
-        if mappo_path.exists():
-            algorithm_config = MappoConfig.get_from_yaml(path=str(mappo_path))
+        ippo_path = rl_cfg_dir / ippo_yaml_name
+        if ippo_path.exists():
+            algorithm_config = IppoConfig.get_from_yaml(path=str(ippo_path))
         elif (rl_cfg_dir / "ippo.yaml").exists():
             algorithm_config = IppoConfig.get_from_yaml(path=str(rl_cfg_dir / "ippo.yaml"))
         else:
@@ -114,6 +216,7 @@ def train_vmas_env(
             critic_model_config=critic_model_config,
             seed=0,
             config=experiment_config,
+            callbacks=callbacks,
         )
 
         # 6. Run Training
@@ -127,12 +230,11 @@ def train_vmas_env(
 
 
 def rollout_vmas_env(policy, env, get_state_fn=None, **kwargs):
+    """Rollout a policy input that may be a single policy or a list of policies."""
+    policy = compose_rollout_policy(policy)
     policy.eval()
 
-    # Use time and pid to ensure different seeds regardless of global torch seed
-    seed = (int(time.time() * 1000) + os.getpid()) % 100000
-    torch.manual_seed(seed)
-    env.set_seed(seed)
+    apply_rollout_seed(env)
 
     states = []
     images = []
@@ -155,6 +257,7 @@ def rollout_vmas_env(policy, env, get_state_fn=None, **kwargs):
             callback=render_callback,
             auto_cast_to_device=True,
             break_when_any_done=True,
+            trust_policy=True,
             **rollout_kwargs,
         )
 

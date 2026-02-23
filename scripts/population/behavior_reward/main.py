@@ -1,6 +1,10 @@
 import os
 import json
 import importlib
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+os.environ["RL_WARNINGS"] = "False"
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -57,8 +61,6 @@ def run_behavior_pipeline(cfg: DictConfig):
     env = importlib.import_module(f"popgen.envs.{cfg.env}")
     env_description = env.ENVIRONMENT_DESCRIPTION
     reward_example = env.REWARD_EXAMPLE
-    rollout_fn = env.rollout_fn
-    train_fn = env.train_fn
 
     # Initialize generators
     llm_config = LitellmConfig(model_name=cfg.llm_model)
@@ -127,9 +129,8 @@ def run_behavior_pipeline(cfg: DictConfig):
     pipeline = RLAgentGenerationPipeline(
         generator=reward_generator,
         evaluator=evaluator,
-        rollout_fn=rollout_fn,
+        env_module=env,
         output_dir=extended_output_dir,
-        train_fn=train_fn,
         training_attempts=cfg.get("training_attempts", 1),
     )
 

@@ -1,10 +1,13 @@
 from pathlib import Path
+import yaml
 
 import torch
 from benchmarl.environments import VmasTask
 from pydantic import BaseModel, Field
 from vmas.scenarios import point_mass_rendezvous as point_mass_rendezvous_scenario
+from vmas import make_env
 
+from popgen.agents.utils import extract_observation_and_action_key, format_action_output
 from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
 
 # ---------------------------------------------------------------------------- #
@@ -26,7 +29,7 @@ The agents must agree on which landmark to go to without explicit communication.
 The observation space for each agent is a vector that includes the following:
 - Index 0-1: `ego_agent_position` - A tuple (x, y) representing the position of ego agent.
 - Index 2-3: `ego_agent_velocity` - A tuple (vx, vy) representing the velocity of ego agent.
-- Index 4-11: `landmark_positions` - A list of tuples [(x, y), ...] representing the positions of the 4 landmarks.
+- Index 4-11: `landmark_relative_positions` - A list of tuples [(x, y), ...] representing the relative positions of the 4 landmarks to the ego agent (landmark_position - ego_agent_position).
 - Index 12-13: `other_agent_relative_position` - A tuple (x, y) representing the position of the other agent relative to the ego agent (other_agent_position - ego_agent_position).
 
 > **Action Space**:
@@ -139,6 +142,21 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
         reward_fn: Callable taking (agent, world) and returning reward tensor.
         output_dir: Directory to save results.
     """
+    scripted_policy = kwargs.pop("scripted_policy", None)
+    if scripted_policy is None:
+        # Use the training num_envs so ScriptedPolicy captures the right metadata.
+        with open(RL_CFG_DIR / "base_experiment.yaml") as f:
+            experiment_cfg = yaml.safe_load(f)
+        num_envs = experiment_cfg.get("on_policy_n_envs_per_worker", 1)
+
+        temp_env = create_env(num_envs=num_envs, seed=0, device="cpu")
+        try:
+            scripted_policy = ScriptedPolicy(temp_env)
+        finally:
+            temp_env.close()
+        # env info captured in __init__; clear reference for pickling.
+        scripted_policy.env = None
+
     return train_vmas_env(
         reward_fn=reward_fn,
         output_dir=output_dir,
@@ -146,6 +164,7 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
         scenario_name="point_mass_rendezvous",
         vmas_task=VmasTask.POINT_MASS_RENDEZVOUS,
         rl_cfg_dir=RL_CFG_DIR,
+        teammate_policy=[scripted_policy],
         **kwargs,
     )
 
@@ -157,14 +176,89 @@ def rollout_fn(policy, env=None, **kwargs):
     """
     # if env is not defined, load default pm_rdv environment
     if env is None:
-        env = VmasTask.POINT_MASS_RENDEZVOUS.get_from_yaml(path=str(RL_CFG_DIR / "point_mass_rendezvous.yaml")).get_env_fun(
-            num_envs=1,
-            continuous_actions=True,
-            seed=0,
-            device="cpu",
-        )()
+        env = create_env(**kwargs)
 
     if "max_steps" not in kwargs:
         kwargs["max_steps"] = 100  # Default max steps for point_mass_rendezvous
 
-    return rollout_vmas_env(policy=policy, env=env, get_state_fn=get_state_point_mass_rendezvous, **kwargs)
+    # If policy is a list of policies, wrap it into a MultiPolicyWrapper with ego and teammate roles
+    if isinstance(policy, list) and len(policy) > 1:
+        from popgen.agents.scripted_partner import MultiPolicyWrapper
+
+        policy = MultiPolicyWrapper(policies=policy)
+
+    return rollout_vmas_env(
+        policy=policy,
+        env=env,
+        get_state_fn=get_state_point_mass_rendezvous,
+        **kwargs,
+    )
+
+# ---------------------------------------------------------------------------- #
+#                              Make env function                               #
+# ---------------------------------------------------------------------------- #
+
+
+def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **kwargs):
+    """
+    Creates the point mass rendezvous environment using VMAS.
+
+    Args:
+        kwargs: Keyword arguments to pass to the environment creation function. Can include:
+            num_envs, device, continuous_actions, max_steps, seed, dict_spaces, multidiscrete_actions, clamp_actions, grad_enabled, terminated_truncated, wrapper_kwargs, etc.
+
+    Returns:
+        An instance of the point mass rendezvous environment.
+    """
+    return VmasTask.POINT_MASS_RENDEZVOUS.get_from_yaml(path=str(RL_CFG_DIR / "point_mass_rendezvous.yaml")).get_env_fun(
+        num_envs=num_envs,
+        continuous_actions=continuous_actions,
+        seed=seed,
+        device=device,
+    )()
+
+# ---------------------------------------------------------------------------- #
+#                              Scripted Policy                                 #
+# ---------------------------------------------------------------------------- #
+
+
+class ScriptedPolicy(torch.nn.Module):
+    """Heuristic policy that moves toward a random landmark.
+
+    Parses the flattened point mass rendezvous observation vector to extract landmark positions,
+    and moves toward a random landmark in the environment.
+
+    Args:
+        num_landmarks: Number of landmark slots in the observation.
+        num_agents: Number of agent slots in the observation.
+    """
+    def __init__(self, env=None, num_landmarks=4, num_agents=2):
+        super().__init__()
+        self.env = env
+        self.num_envs = env.num_envs if env is not None else 1
+        self.num_landmarks = len(env.world.landmarks) if env is not None else num_landmarks
+        self.num_agents = len(env.world.agents) if env is not None else num_agents
+        self.target_landmark_idx = torch.randint(0, self.num_landmarks, (self.num_envs,))  # Per-env landmark target, shape (num_envs,)
+        self.dummy_param = torch.nn.Parameter(torch.zeros(1))  # Dummy parameter to make this a valid nn.Module
+
+    def forward(self, obs):
+        obs_tensor, action_key = extract_observation_and_action_key(obs)
+
+        # Squeeze agent dim if present: [batch, 1, obs_dim] → [batch, obs_dim]
+        had_agent_dim = obs_tensor.ndim == 3 and obs_tensor.shape[-2] == 1
+        if had_agent_dim:
+            obs_tensor = obs_tensor.squeeze(-2)
+
+        batch_size = obs_tensor.shape[0]
+        landmark_relative_positions = obs_tensor[:, 4:4 + self.num_landmarks * 2].view(batch_size, self.num_landmarks, 2)
+        if self.target_landmark_idx is None:
+            self.target_landmark_idx = torch.randint(0, self.num_landmarks, (batch_size,))
+        target_idx = self.target_landmark_idx[:batch_size].to(obs_tensor.device)
+        direction_to_landmark = landmark_relative_positions[torch.arange(batch_size, device=obs_tensor.device), target_idx]
+        action = direction_to_landmark / (torch.linalg.norm(direction_to_landmark, dim=-1, keepdim=True) + 1e-8)
+        action = action.clamp(-1, 1)
+
+        if had_agent_dim:
+            action = action.unsqueeze(-2)  # [batch, 1, action_dim]
+
+        return format_action_output(obs, action_key, action)

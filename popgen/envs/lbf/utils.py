@@ -3,13 +3,16 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
+import yaml
 
 # Ensure lbforaging is registered
 import lbforaging  # noqa: F401
 import numpy as np
 import torch
+from benchmarl.environments.lbf.common import LbfTask
 from pydantic import BaseModel, Field
 
+from popgen.agents.utils import extract_observation_and_action_key, flatten_obs, format_action_output
 from popgen.envs.lbf_common import rollout_lbf_env, train_lbf_env
 
 # ---------------------------------------------------------------------------- #
@@ -59,21 +62,21 @@ For example to move NORTH, you would return 1."""
 REWARD_EXAMPLE = """
 Behavior: agent stays close to food
 ```python
-def reward_fn(self, agent: Player):
+def reward_fn(env, agent):
     # You are designing reward for 'agent' in the environment.
-    # self is the environment instance (ForagingEnv).
-    # self.players gives list of all players.
-    # self.field gives grid status.
+    # env is the environment instance (ForagingEnv).
+    # env.players gives list of all players.
+    # env.field gives grid status.
 
     # Calculate custom reward
     reward = 0.0
 
     y, x = agent.position
     min_dist = float('inf')
-    rows, cols = self.field.shape
+    rows, cols = env.field.shape
     for r in range(rows):
         for c in range(cols):
-            if self.field[r, c] > 0: # If there is food
+            if env.field[r, c] > 0: # If there is food
                 dist = abs(r - y) + abs(c - x)
                 if dist < min_dist:
                     min_dist = dist
@@ -114,8 +117,8 @@ class ActionType(BaseModel):
         return cls(action=0)
 
     def to_tensor(self):
-        """Convert action to a torch tensor of shape (1,)."""
-        return torch.tensor([self.action], dtype=torch.int64)
+        """Convert action to a scalar torch tensor."""
+        return torch.tensor(self.action, dtype=torch.int64)
 
 
 # ---------------------------------------------------------------------------- #
@@ -171,6 +174,17 @@ def get_state_lbf(env) -> dict[str, Any]:
 # ---------------------------------------------------------------------------- #
 
 
+def _extract_env_metadata(env) -> tuple[int, int]:
+    num_agents = int(env.num_agents)
+    # Obs dim can be from "agents" "observation" or "ego" "observation" depending on the env wrapper, but they should have the same shape
+    try:
+        obs_dim = env.observation_spec["ego", "observation"].shape[-1]
+    except KeyError:
+        obs_dim = env.observation_spec["agents", "observation"].shape[-1]
+    num_foods = int((obs_dim - 3 * num_agents) // 3)
+    return num_agents, num_foods
+
+
 def rollout_fn(policy, env=None, **kwargs):
     """
     Rollout the policy.
@@ -178,12 +192,23 @@ def rollout_fn(policy, env=None, **kwargs):
     # if env is not defined, load default lbf environment
     if env is None:
         # Foraging-8x8-2p-2f-v3
-        env = gym.make("Foraging-8x8-2p-2f-v3", render_mode="rgb_array")
+        env = create_env(**kwargs)
 
     if "max_steps" not in kwargs:
         kwargs["max_steps"] = 50
 
-    return rollout_lbf_env(policy=policy, env=env, get_state_fn=get_state_lbf, **kwargs)
+    # If policy is a list of policies, wrap it into a MultiPolicyWrapper with ego and teammate roles
+    if isinstance(policy, list) and len(policy) > 1:
+        from popgen.agents.scripted_partner import MultiPolicyWrapper
+
+        policy = MultiPolicyWrapper(policies=policy)
+
+    return rollout_lbf_env(
+        policy=policy,
+        env=env,
+        get_state_fn=get_state_lbf,
+        **kwargs,
+    )
 
 
 def train_fn(reward_fn: Callable, output_dir: str, **kwargs):
@@ -194,64 +219,134 @@ def train_fn(reward_fn: Callable, output_dir: str, **kwargs):
         reward_fn: Callable taking (agent, world) and returning reward (float or tensor).
         output_dir: Directory to save results.
     """
-    return train_lbf_env(reward_fn=reward_fn, output_dir=output_dir, rl_cfg_dir=RL_CFG_DIR, **kwargs)
+    scripted_policy = kwargs.pop("scripted_policy", None)
+    if scripted_policy is None:
+        temp_env = create_env(num_envs=1, seed=0, device="cpu")
+        try:
+            scripted_policy = [ScriptedPolicy(temp_env)]
+        finally:
+            temp_env.close()
+
+    return train_lbf_env(
+        reward_fn=reward_fn,
+        output_dir=output_dir,
+        rl_cfg_dir=RL_CFG_DIR,
+        teammate_policy=scripted_policy,
+        **kwargs,
+    )
+
+# ---------------------------------------------------------------------------- #
+#                              Scripted Policy                                 #
+# ---------------------------------------------------------------------------- #
+
+
+class ScriptedPolicy(torch.nn.Module):
+    """Heuristic policy that moves toward the closest food and loads when adjacent.
+
+    Parses the flattened LBF observation vector to extract food/agent positions,
+    finds the nearest food by Manhattan distance, moves toward it, and issues
+    LOAD when adjacent (distance == 1).
+
+    Args:
+        env: BenchMARL LBF environment created by create_env.
+    """
+
+    # Action constants
+    NONE = 0
+    NORTH = 1  # row - 1
+    SOUTH = 2  # row + 1
+    WEST = 3   # col - 1
+    EAST = 4   # col + 1
+    LOAD = 5
+
+    def __init__(self, env):
+        super().__init__()
+        self.num_agents, self.num_foods = _extract_env_metadata(env)
+        # nn.Module requires at least one parameter for some codepaths
+        self.dummy_param = torch.nn.Parameter(torch.empty(0))
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        """Select action for each observation in the batch.
+
+        Args:
+            obs: Observation tensor, shape ``(..., obs_dim)``.
+
+        Returns:
+            Action tensor, shape ``(...)`` with integer action indices.
+        """
+        obs_tensor, action_key = extract_observation_and_action_key(obs)
+        flat_obs, leading_shape = flatten_obs(obs_tensor)
+        batch_size = flat_obs.shape[0]
+
+        actions = torch.zeros(batch_size, dtype=torch.long, device=obs_tensor.device)
+
+        for b in range(batch_size):
+            o = flat_obs[b]
+
+            # Self position (first agent entry, after all food entries)
+            agent_offset = self.num_foods * 3
+            self_row = o[agent_offset].item()
+            self_col = o[agent_offset + 1].item()
+
+            # Find closest visible food
+            min_dist = float("inf")
+            closest_food_row, closest_food_col = -1.0, -1.0
+            for i in range(self.num_foods):
+                food_row = o[3 * i].item()
+                food_col = o[3 * i + 1].item()
+                food_level = o[3 * i + 2].item()
+                if food_row < 0 or food_level <= 0:
+                    continue
+                dist = abs(food_row - self_row) + abs(food_col - self_col)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_food_row, closest_food_col = food_row, food_col
+
+            if min_dist == float("inf"):
+                actions[b] = self.NONE
+                continue
+
+            # Adjacent to food -> LOAD
+            if min_dist <= 1:
+                actions[b] = self.LOAD
+                continue
+
+            # Move toward the closest food (prefer larger axis difference)
+            row_diff = closest_food_row - self_row
+            col_diff = closest_food_col - self_col
+
+            if abs(row_diff) >= abs(col_diff):
+                actions[b] = self.NORTH if row_diff < 0 else self.SOUTH
+            else:
+                actions[b] = self.WEST if col_diff < 0 else self.EAST
+
+        if len(leading_shape) == 0:
+            actions = actions.squeeze(0)
+        else:
+            actions = actions.reshape(*leading_shape)
+        return format_action_output(obs, action_key, actions)
 
 
 # ---------------------------------------------------------------------------- #
-#                              Debug / Testing                                 #
+#                              Make env function                               #
 # ---------------------------------------------------------------------------- #
 
-if __name__ == "__main__":
-    import torch
-    from lbforaging.agents.heuristic_agent import H1
-    from tensordict import TensorDict
 
-    from popgen.utils.logging import save_rollout
+def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **kwargs):
+    """
+    Creates the LBF environment using BenchMARL's LbfTask.
 
-    class H1Policy(torch.nn.Module):
-        def __init__(self, env):
-            super().__init__()
-            self.env = env
-            self.agents = [H1(p) for p in env.unwrapped.players]
-            self.dummy_param = torch.nn.Parameter(torch.empty(0))
+    Args:
+        kwargs: Keyword arguments to pass to the environment creation function.
+            Can include num_envs, device, continuous_actions, seed, etc.
 
-        def forward(self, batch):
-            # We ignore batch observations and use internal env state
-            # This is strictly for evaluation of heuristic agents in this harness
-            actions = []
-            for agent in self.agents:
-                obs = self.env.unwrapped._make_obs(agent.player)
-                action = agent._step(obs)
-                actions.append(action.value)
+    Returns:
+        An instance of the LBF environment.
+    """
+    return LbfTask.LBF.get_from_yaml(path=str(RL_CFG_DIR / "lbf.yaml")).get_env_fun(
+        num_envs=num_envs,
+        continuous_actions=continuous_actions,
+        seed=seed,
+        device=device,
+    )()
 
-            return TensorDict(
-                {
-                    "agents": TensorDict(
-                        {
-                            "action": torch.tensor(actions).unsqueeze(0)  # (1, n_agents)
-                        },
-                        batch_size=[1, len(self.agents)],
-                    )
-                },
-                batch_size=[1],
-            )
-
-    # Create simplified env
-    # Foraging-8x8-2p-2f-coop-v3
-    env_id = "Foraging-8x8-2p-2f-coop-v3"
-    env = gym.make(env_id, render_mode="rgb_array")
-
-    print(f"Created env: {env_id}")
-
-    policy = H1Policy(env)
-
-    print("Starting rollout...")
-    states, images, _ = rollout_lbf_env(policy=policy, env=env, get_state_fn=get_state_lbf, max_steps=50)
-
-    print(f"Rollout finished. Steps: {len(states)}")
-    print("Example state:", states[0])
-
-    save_path = Path("./lbf_rollout_output")
-    print(f"Saving rollout to {save_path}...")
-    save_rollout(states, images, save_path)
-    print("Rollout saved.")
