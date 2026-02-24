@@ -116,13 +116,17 @@ def get_state_point_mass_rendezvous(env):
             "vel": [round(x, 2) for x in vel],
         }
 
+    # Use nested 'agents' dict so rollout_states_to_str can print all entries
+    agents_data = {}
+
     for i, agent in enumerate(env.world.agents):
-        state[agent.name] = _get_agent_state(agent)
+        agents_data[agent.name] = _get_agent_state(agent)
 
     for i, landmark in enumerate(env.world.landmarks):
         pos = landmark.state.pos[0].cpu().numpy().tolist()
-        state[f"landmark{i}_pos"] = [round(x, 2) for x in pos]
+        agents_data[f"landmark{i}"] = {"pos": [round(x, 2) for x in pos]}
 
+    state["agents"] = agents_data
     return state
 
 

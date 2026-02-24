@@ -126,26 +126,27 @@ def get_state_football(env):
             "vel": [round(x, 2) for x in vel],
         }
 
+    # Use nested 'agents' dict so rollout_states_to_str can print all entries
+    agents_data = {}
+
     # Ego team agents
     for agent in blue_team:
-        state[agent.name] = _get_agent_state(agent)
+        agents_data[agent.name] = _get_agent_state(agent)
 
     # Adversary team agents
     for agent in red_team:
-        state[agent.name] = _get_agent_state(agent)
+        agents_data[agent.name] = _get_agent_state(agent)
 
-    # Goal position
-    env_state = {}
-    env_state["goal_pos"] = [round(x, 2) for x in goal_pos.cpu().numpy().tolist()]
-
-    # Ball state
+    # Ball and goal state (included here so they appear in logged output)
     ball_pos = env.scenario.ball.state.pos[0].cpu().numpy().tolist()
     ball_vel = env.scenario.ball.state.vel[0].cpu().numpy().tolist()
-    env_state["ball_pos"] = [round(x, 2) for x in ball_pos]
-    env_state["ball_vel"] = [round(x, 2) for x in ball_vel]
+    agents_data["ball"] = {
+        "pos": [round(x, 2) for x in ball_pos],
+        "vel": [round(x, 2) for x in ball_vel],
+    }
+    agents_data["goal"] = {"pos": [round(x, 2) for x in goal_pos.cpu().numpy().tolist()]}
 
-    state["env"] = env_state
-
+    state["agents"] = agents_data
     return state
 
 
