@@ -2,11 +2,12 @@
 
 from .llm_agent import LbfLLMAgent, LLMAgent
 from .policy_code_agent import PolicyCodeAgent
-from .trajectory_agent import ReplayAgent
+from .scripted_partner import MultiPolicyWrapper, TeammatePolicyCallback
 
 __all__ = [
     "LLMAgent",
     "LbfLLMAgent",
     "PolicyCodeAgent",
-    "ReplayAgent",
+    "TeammatePolicyCallback",
+    "MultiPolicyWrapper",
 ]

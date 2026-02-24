@@ -1,10 +1,12 @@
 from pathlib import Path
 
+import yaml
 import torch
 from benchmarl.environments import VmasTask
 from pydantic import BaseModel, Field
 from vmas.scenarios import football as football_scenario
 
+from popgen.agents.utils import extract_observation_and_action_key, format_action_output
 from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
 
 # ---------------------------------------------------------------------------- #
@@ -55,7 +57,23 @@ def reward_fn(self, agent: Agent):
 
     reward = torch.zeros(self.world.batch_dim, device=self.world.device)
 
-    # Sparse Reward
+    # You are designing reward for 'agent' in 'world'
+    # You can access to list of blue team agents and red team agents via self.world.blue_agents and self.world.red_agents
+    # You can also access the ball state via self.world.ball.
+    
+    blue_team = self.world.blue_agents # List of blue team agents
+    red_team = self.world.red_agents # List of red team agents
+    ball = self.world.ball
+
+    # You can access to agent or ball's state via agent.state
+    # agent.state.pos gives you the position of the agent in torch tensor shape (batch_dim, 2)
+    # agent.state.vel gives you the velocity of the agent in torch tensor shape (batch_dim, 2)
+    # ball.state.pos gives you the position of the ball in torch tensor shape (batch_dim, 2)
+    # ball.state.vel gives you the velocity of the ball in torch tensor shape (batch_dim
+
+    # This computes the sparse reward for scoring or conceding a goal. You can design your own reward function based on the game state.
+    # If the ball crosses the right goal line within the goal area, the blue team scores and gets a positive reward.
+    # If the ball crosses the left goal line within the goal area, the red team scores and the blue team gets a negative reward.
     over_right_line = (
         self.ball.state.pos[:, X] > self.pitch_length / 2 + self.ball_size / 2
     )
@@ -73,7 +91,7 @@ def reward_fn(self, agent: Agent):
 
     self._done = blue_score | red_score
 
-    reward = self._sparse_reward_blue + self._dense_reward_blue
+    reward = self._sparse_reward_blue
 
     return reward
 ```"""
@@ -163,7 +181,27 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
         reward_fn: Callable taking (agent, world) and returning reward tensor.
         output_dir: Directory to save results.
     """
-    return train_vmas_env(reward_fn=reward_fn, output_dir=output_dir, scenario_module=football_scenario, scenario_name="football", vmas_task=VmasTask.FOOTBALL, rl_cfg_dir=RL_CFG_DIR, **kwargs)
+    scripted_policy = kwargs.pop("scripted_policy", None)
+    if scripted_policy is None:
+        temp_env = create_env(num_envs=1, seed=0, device="cpu")
+        try:
+            scripted_policy = ScriptedPolicy(temp_env)
+        finally:
+            temp_env.close()
+        # env info is captured in __init__; clear the reference so the module
+        # remains picklable when BenchMARL sends it to data-collector workers.
+        scripted_policy.env = None
+
+    return train_vmas_env(
+        reward_fn=reward_fn,
+        output_dir=output_dir,
+        scenario_module=football_scenario,
+        scenario_name="football",
+        vmas_task=VmasTask.FOOTBALL,
+        rl_cfg_dir=RL_CFG_DIR,
+        teammate_policy=[scripted_policy],
+        **kwargs,
+    )
 
 
 def rollout_fn(policy, env=None, **kwargs):
@@ -173,14 +211,68 @@ def rollout_fn(policy, env=None, **kwargs):
     """
     # if env is not defined, load default football environment
     if env is None:
-        env = VmasTask.FOOTBALL.get_from_yaml(path=str(RL_CFG_DIR / "football.yaml")).get_env_fun(
-            num_envs=1,
-            continuous_actions=True,
-            seed=0,
-            device="cpu",
-        )()
+        env = create_env(**kwargs)
 
     if "max_steps" not in kwargs:
         kwargs["max_steps"] = 200  # Default max steps for football
 
-    return rollout_vmas_env(policy=policy, env=env, get_state_fn=get_state_football, **kwargs)
+    # If the policy is list of policies, wrap them with MultiPolicyWrapper to create a single policy that can be used for rollout.
+    if isinstance(policy, list) and len(policy) > 1:
+        from popgen.agents.scripted_partner import MultiPolicyWrapper
+
+        policy = MultiPolicyWrapper(policies=policy)
+
+    return rollout_vmas_env(
+        policy=policy,
+        env=env,
+        get_state_fn=get_state_football,
+        **kwargs,
+    )
+
+# ---------------------------------------------------------------------------- #
+#                              Make env function                               #
+# ---------------------------------------------------------------------------- #
+
+def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **kwargs):
+    """
+    Creates the football environment using VMAS.
+
+    Args:
+        kwargs: Keyword arguments to pass to the environment creation function. Can include:
+            num_envs, device, continuous_actions, max_steps, seed, dict_spaces, multidiscrete_actions, clamp_actions, grad_enabled, terminated_truncated, wrapper_kwargs, etc.
+
+    Returns:
+        An instance of the football environment.
+    """
+    return VmasTask.FOOTBALL.get_from_yaml(path=str(RL_CFG_DIR / "football.yaml")).get_env_fun(
+        num_envs=num_envs,
+        continuous_actions=continuous_actions,
+        seed=seed,
+        device=device,
+    )()
+
+# ---------------------------------------------------------------------------- #
+#                              Scripted Policy                                 #
+# ---------------------------------------------------------------------------- #
+
+
+class ScriptedPolicy(torch.nn.Module):
+    """Simple scripted football partner policy.
+
+    Moves toward the ball direction inferred from the observation:
+    obs[2:4] = ego_to_ball_relative_position.
+    """
+
+    def __init__(self, env=None):
+        super().__init__()
+        self.env = env
+        self.dummy_param = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, obs) -> torch.Tensor:
+        obs_tensor, action_key = extract_observation_and_action_key(obs)
+        # Use `...` to index the last (obs feature) dimension regardless of
+        # whether obs_tensor is [batch, obs_dim] or [batch, 1, obs_dim].
+        direction_to_ball = -obs_tensor[..., 2:4]
+        norm = torch.linalg.norm(direction_to_ball, dim=-1, keepdim=True) + 1e-8
+        action = (direction_to_ball / norm).clamp(-1, 1)
+        return format_action_output(obs, action_key, action)

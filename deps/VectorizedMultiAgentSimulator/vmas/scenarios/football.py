@@ -1120,37 +1120,37 @@ class Scenario(BaseScenario):
 
     def reward(self, agent: Agent):
         # Called with agent=None when only AIs are playing to compute the _done
-        if agent is None or agent == self.world.agents[0]:
-            # Sparse Reward
-            over_right_line = (
-                self.ball.state.pos[:, X] > self.pitch_length / 2 + self.ball_size / 2
-            )
-            over_left_line = (
-                self.ball.state.pos[:, X] < -self.pitch_length / 2 - self.ball_size / 2
-            )
-            goal_mask = (self.ball.state.pos[:, Y] <= self.goal_size / 2) * (
-                self.ball.state.pos[:, Y] >= -self.goal_size / 2
-            )
-            blue_score = over_right_line * goal_mask
-            red_score = over_left_line * goal_mask
-            self._sparse_reward_blue = (
-                self.scoring_reward * blue_score - self.scoring_reward * red_score
-            )
-            self._sparse_reward_red = -self._sparse_reward_blue
+        # if agent is None or agent == self.world.agents[0]:
+        # Sparse Reward
+        over_right_line = (
+            self.ball.state.pos[:, X] > self.pitch_length / 2 + self.ball_size / 2
+        )
+        over_left_line = (
+            self.ball.state.pos[:, X] < -self.pitch_length / 2 - self.ball_size / 2
+        )
+        goal_mask = (self.ball.state.pos[:, Y] <= self.goal_size / 2) * (
+            self.ball.state.pos[:, Y] >= -self.goal_size / 2
+        )
+        blue_score = over_right_line * goal_mask
+        red_score = over_left_line * goal_mask
+        self._sparse_reward_blue = (
+            self.scoring_reward * blue_score - self.scoring_reward * red_score
+        )
+        self._sparse_reward_red = -self._sparse_reward_blue
 
-            self._done = blue_score | red_score
-            # Dense Reward
-            self._dense_reward_blue = 0
-            self._dense_reward_red = 0
-            if self.dense_reward and agent is not None:
-                if not self.ai_blue_agents:
-                    self._dense_reward_blue = self.reward_ball_to_goal(
-                        blue=True
-                    ) + self.reward_all_agent_to_ball(blue=True)
-                if not self.ai_red_agents:
-                    self._dense_reward_red = self.reward_ball_to_goal(
-                        blue=False
-                    ) + self.reward_all_agent_to_ball(blue=False)
+        self._done = blue_score | red_score
+        # Dense Reward
+        self._dense_reward_blue = 0
+        self._dense_reward_red = 0
+        if self.dense_reward and agent is not None:
+            if not self.ai_blue_agents:
+                self._dense_reward_blue = self.reward_ball_to_goal(
+                    blue=True
+                ) + self.reward_all_agent_to_ball(blue=True)
+            if not self.ai_red_agents:
+                self._dense_reward_red = self.reward_ball_to_goal(
+                    blue=False
+                ) + self.reward_all_agent_to_ball(blue=False)
 
         blue = agent in self.blue_agents
         if blue:
@@ -1299,6 +1299,7 @@ class Scenario(BaseScenario):
             else teammate_vels,
             blue=blue,
         )
+        agent.obs = obs
         return obs
 
     def observation_base(

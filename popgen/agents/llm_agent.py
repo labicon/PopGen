@@ -1,6 +1,7 @@
 """LLM-based agent wrapper for generating actions using language models."""
 
 import copy
+import logging
 from typing import Literal
 
 import litellm
@@ -10,6 +11,10 @@ from pydantic import BaseModel, Field, create_model
 
 from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import parse_llm_response
+
+from .utils import extract_observation_and_action_key, flatten_obs, format_action_output
+
+LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------- PROMPTS --------------------------------- #
 
@@ -275,14 +280,14 @@ class LLMAgent(nn.Module):
 
         except Exception as e:
             # Fallback to zero trajectory if LLM fails
-            print(f"LLM trajectory generation failed: {e}. Using zero trajectory.")
+            LOGGER.warning(f"LLM trajectory generation failed: {e}. Using zero trajectory.")
             trajectory = [self.action_type.default_action().to_tensor() for _ in range(self.horizon_length)]
 
         trajectory = torch.stack(trajectory)  # Shape: (horizon_length, action_dim)
 
         return trajectory
 
-    def forward(self, obs):
+    def forward(self, input_td):
         """
         Forward pass that generates actions using the LLM.
 
@@ -291,30 +296,38 @@ class LLMAgent(nn.Module):
         the number of LLM API calls.
 
         Args:
-            obs: Observation dictionary with shape (num_envs, num_agents, obs_dim).
+            input_td: Input observation container (TensorDict preferred).
 
         Returns:
-            Action tensor of shape (num_envs, num_agents, action_dim).
+            TensorDict with action when input is TensorDict, otherwise action tensor.
         """
-        # Extract observation for single env, all agents
-        # Assuming obs has structure: {"observation": tensor}
-        obs_tensor = obs["observation"] if "observation" in obs else obs
-        obs_tensor = obs_tensor.squeeze(0) if obs_tensor.dim() > 2 else obs_tensor  # Remove batch dimension if present
+        obs_tensor, action_key = extract_observation_and_action_key(input_td)
+        if not isinstance(obs_tensor, torch.Tensor):
+            raise TypeError(f"LLMAgent expected a torch.Tensor observation, got {type(obs_tensor).__name__}.")
+
+        if obs_tensor.dim() == 0:
+            raise ValueError("LLMAgent expects observation tensor with at least 1 dimension.")
+
+        flat_obs, leading_shape = flatten_obs(obs_tensor)
+
+        n_obs_slots = flat_obs.shape[0]
 
         # Check if we need to generate new trajectories
-        if self._step_counter == 0 or self._step_counter >= self.horizon_length:
+        if self._step_counter == 0 or self._step_counter >= self.horizon_length or len(self._cached_trajectories) != n_obs_slots:
             # Generate new trajectories for all agents
             self._step_counter = 0
             self._cached_trajectories = []
 
-            # TODO: CAN'T WE SCRIPT THE OTHER AGENT??
-            for agent_idx, agent_obs in enumerate(obs_tensor):
+            for agent_idx, agent_obs in enumerate(flat_obs):
                 trajectory = self._act(agent_obs, agent_idx)
                 self._cached_trajectories.append(trajectory)
 
         # Extract current step's action from cached trajectories
-        action_tensor = torch.stack(self._cached_trajectories)[:, self._step_counter]  # (num_agents, [action_dim])
-        action_tensor = action_tensor.unsqueeze(0)  # (1, num_agents, [action_dim])
+        action_flat = torch.stack(self._cached_trajectories)[:, self._step_counter]
+        if len(leading_shape) == 0:
+            action_tensor = action_flat[0]
+        else:
+            action_tensor = action_flat.reshape(*leading_shape, *action_flat.shape[1:])
 
         # Increment step counter
         self._step_counter += 1
@@ -323,7 +336,7 @@ class LLMAgent(nn.Module):
         if self.include_trajectory_history and self._step_counter >= self.horizon_length:
             self._previous_trajectories = copy.deepcopy(self._cached_trajectories)
 
-        return action_tensor
+        return format_action_output(input_td, action_key, action_tensor)
 
 
 class LbfLLMAgent(LLMAgent):

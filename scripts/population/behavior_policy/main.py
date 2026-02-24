@@ -58,7 +58,6 @@ def run_behavior_pipeline(cfg: DictConfig):
     # Load env
     env = importlib.import_module(f"popgen.envs.{cfg.env}")
     env_description = env.ENVIRONMENT_DESCRIPTION
-    rollout_fn = env.rollout_fn
 
     policy_generator_kwargs = {
         "environment_description": env_description,
@@ -119,7 +118,7 @@ def run_behavior_pipeline(cfg: DictConfig):
     pipeline = PolicyCodeAgentGenerationPipeline(
         generator=policy_generator,
         evaluator=evaluator,
-        rollout_fn=rollout_fn,
+        env_module=env,
         output_dir=extended_output_dir,
     )
 

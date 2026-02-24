@@ -58,7 +58,6 @@ def run_llm_agent_pipeline(cfg: DictConfig):
     env = importlib.import_module(f"popgen.envs.{cfg.env}")
     env_description = env.ENVIRONMENT_DESCRIPTION
     action_type = env.ActionType
-    rollout_fn = env.rollout_fn
 
     agent_config = LitellmConfig(**cfg.agent.model_config)
     agent_kwargs = {k: v for k, v in cfg.agent.items() if k != "model_config"}
@@ -128,7 +127,7 @@ def run_llm_agent_pipeline(cfg: DictConfig):
     pipeline = LLMAgentGenerationPipeline(
         agent_model_config=agent_config,
         evaluator=evaluator,
-        rollout_fn=rollout_fn,
+        env_module=env,
         output_dir=extended_output_dir,
     )
 

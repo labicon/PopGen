@@ -18,6 +18,12 @@ dependencies = [
     "rouge-score>=0.1.2",
     "huggingface-hub>=0.34.0,<1.0",
     "sentence-transformers>=5.2.0",
+    "tensordict==0.10.0",
+    "torchrl==0.10.1",
+    "benchmarl",
+    "vmas",
+    "lbforaging",
+    "gymnasium>=0.29.0",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +31,11 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.8.0",
 ]
+
+[tool.uv.sources]
+benchmarl = { path = "deps/BenchMARL", editable = true }
+vmas = { path = "deps/VectorizedMultiAgentSimulator", editable = true }
+lbforaging = { path = "deps/lb-foraging", editable = true }
 
 [build-system]
 requires = ["hatchling"]

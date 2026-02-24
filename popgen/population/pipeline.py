@@ -2,6 +2,7 @@ import importlib
 import json
 import logging
 import os
+import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
 from time import time
@@ -23,12 +24,22 @@ from .types import Behavior
 logging.basicConfig(level=logging.INFO)
 
 
-def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn", "LLMAgent", "Trajectory"], **kwargs) -> dict:
-    """Load policy functions and environment."""
+def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn", "LLMAgent", "Trajectory"], create_env_fn: callable, scripted_policy_fn: callable = None, **kwargs) -> dict:
+    """Load policy functions and environment.
+
+    Returns:
+        Dict with:
+            - env: environment instance
+            - policies: list of policies passed into rollout_fn
+              (always [ego_policy], or [ego_policy, teammate_policy] when scripted_policy_fn is provided)
+    """
     if policy_type == "PolicyCode":
         policies = import_all_functions_from_file(kwargs["file_path"])
         policies = {name: PolicyCodeAgent(func) for name, func in policies.items()}
-        env = None  # Environment will be created during rollout
+        if "policy" not in policies:
+            raise KeyError("Expected generated policy file to define a callable named 'policy'.")
+        ego_policy = policies["policy"]
+        env = create_env_fn(num_envs=1)
     elif policy_type == "RewardFn":
         from benchmarl.experiment import Experiment
 
@@ -48,7 +59,9 @@ def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn", "LLMAgent
                 "create_json": False,
             },
         )
-        policies = {"policy": experiment.policy}
+        # Group key is "ego" when trained with a scripted teammate, "agents" otherwise.
+        ego_group = "ego" if "ego" in experiment.group_policies else "agents"
+        ego_policy = experiment.group_policies[ego_group]
         env = experiment.test_env
     elif policy_type == "LLMAgent":
         from popgen.agents import LLMAgent
@@ -75,20 +88,29 @@ def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn", "LLMAgent
             include_trajectory_history=config.get("include_trajectory_history", False),
         )
 
-        policies = {"policy": policy}
-        env = None  # Environment will be created during rollout
+        ego_policy = policy
+        env = create_env_fn(num_envs=1)
+    else:
+        raise ValueError(f"Unsupported policy_type: {policy_type}")
+
+    policies = [ego_policy]
+    if scripted_policy_fn is not None:
+        teammate_policy = scripted_policy_fn(env)
+        policies.append(teammate_policy)
 
     return {"env": env, "policies": policies}
 
 
 def _worker_rollout(args: dict) -> dict:
     """Worker function for parallel rollout execution."""
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    warnings.filterwarnings("ignore", category=UserWarning)
     # Import environment module
     rollout_fn = args["rollout_fn"]
-    artifacts_dict = load_policy_and_env(policy_type=args["policy_type"], **args.get("loading_kwargs", {}))
+    artifacts_dict = load_policy_and_env(policy_type=args["policy_type"], create_env_fn=args["create_env_fn"], scripted_policy_fn=args["scripted_policy_fn"], **args.get("loading_kwargs", {}))
 
     # Perform rollout
-    rollout_data, images, error = rollout_fn(**artifacts_dict["policies"], env=artifacts_dict["env"], **args["rollout_kwargs"])
+    rollout_data, images, error = rollout_fn(artifacts_dict["policies"], env=artifacts_dict["env"], **args["rollout_kwargs"])
 
     # Save rollout trajectory and images
     save_rollout(
@@ -114,12 +136,12 @@ class AgentGenerationPipeline(ABC):
         self,
         generator: BaseGenerator,
         evaluator: BehaviorAdherenceEvaluator,
-        rollout_fn: callable,
+        env_module: Any,
         output_dir: str,
     ):
         self.generator: BaseGenerator = generator
         self.evaluator: BehaviorAdherenceEvaluator = evaluator
-        self.rollout_fn = rollout_fn
+        self.env_module = env_module
         self.output_dir = output_dir
 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -128,7 +150,6 @@ class AgentGenerationPipeline(ABC):
     def _generate_policies(
         self,
         behaviors: list[Behavior],
-        env_module: Any,
         feedbacks: list[list[tuple[str, str]]],
         output_dirs: list[str],
         num_workers: int = 1,
@@ -330,8 +351,10 @@ class AgentGenerationPipeline(ABC):
             for rollout_idx in range(n_rollouts):
                 rollout_args.append(
                     {
-                        "rollout_fn": self.rollout_fn,
+                        "rollout_fn": self.env_module.rollout_fn,
                         "policy_type": self.policy_type,
+                        "create_env_fn": self.env_module.create_env,
+                        "scripted_policy_fn": self.env_module.ScriptedPolicy,
                         "loading_kwargs": loading_kwargs,
                         "rollout_subfolder": f"{output_path}/rollout_{rollout_idx}",
                         "rollout_kwargs": rollout_kwargs,
@@ -472,19 +495,43 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
         self,
         generator: BaseGenerator,
         evaluator: BehaviorAdherenceEvaluator,
-        rollout_fn: callable,
+        env_module: Any,
         output_dir: str,
-        train_fn: callable,
         training_attempts: int = 1,
     ):
         super().__init__(
             generator=generator,
             evaluator=evaluator,
-            rollout_fn=rollout_fn,
+            env_module=env_module,
             output_dir=output_dir,
         )
-        self.train_fn = train_fn
         self.training_attempts = training_attempts
+
+    @staticmethod
+    def _worker_train(args: dict) -> dict:
+        """Worker function for parallel RL training."""
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", category=UserWarning)
+
+        code_file_path = args["code_file_path"]
+        output_dir = args["output_dir"]
+        train_fn = args["train_fn"]
+        training_attempts = args["training_attempts"]
+        idx = args["idx"]
+
+        compute_reward = import_function_from_file(code_file_path, "compute_reward")
+        for attempt in range(training_attempts):
+            try:
+                train_fn(compute_reward, output_dir)
+                logging.info(f"[{idx}] Training complete.")
+                return {"error": None}
+            except Exception as e:
+                if attempt < training_attempts - 1:
+                    logging.warning(f"[{idx}] Training failed (attempt {attempt + 1}/{training_attempts}): {e}. Retrying...")
+                else:
+                    logging.error(f"[{idx}] Training failed after {training_attempts} attempts: {e}")
+                    return {"error": e}
+        return {"error": None}
 
     @track_time("Reward generation and RL training")
     def _generate_policies(
@@ -515,9 +562,9 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
             **kwargs,
         )
 
-        # Save rewards and train RL policies
-        generated_policies = []
+        # Save rewards and prepare training args
         loading_kwargs = []
+        train_args = []
         for i, (output_dir, gen_code) in enumerate(zip(output_dirs, generated_codes)):
             code_file_path = f"{output_dir}/reward.py"
             loading_kwargs.append({"save_dir": output_dir})
@@ -527,22 +574,34 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
                 f.write(gen_code.code)
             logging.debug(f"Saved generated reward to {code_file_path}")
 
-            # Train RL policy with retries
-            logging.info(f"[{i}] Training RL policy...")
-            compute_reward = import_function_from_file(code_file_path, "compute_reward")
-            for attempt in range(self.training_attempts):
-                try:
-                    self.train_fn(compute_reward, output_dir)
-                    logging.info(f"[{i}] Training complete.")
-                    break
-                except Exception as e:
-                    if attempt < self.training_attempts - 1:
-                        logging.warning(f"[{i}] Training failed (attempt {attempt + 1}/{self.training_attempts}): {e}. Retrying...")
-                    else:
-                        logging.error(f"[{i}] Training failed after {self.training_attempts} attempts: {e}")
-                        gen_code = e
+            train_args.append(
+                {
+                    "code_file_path": code_file_path,
+                    "output_dir": output_dir,
+                    "train_fn": self.env_module.train_fn,
+                    "training_attempts": self.training_attempts,
+                    "idx": i,
+                }
+            )
 
-            generated_policies.append(gen_code)
+        # Train RL policies in parallel
+        logging.info(f"Training {len(train_args)} RL policies with {num_workers} workers...")
+        train_results = pqdm(
+            train_args,
+            self._worker_train,
+            n_jobs=num_workers,
+            desc="Training RL policies",
+        )
+
+        # Process results
+        generated_policies = []
+        for gen_code, result in zip(generated_codes, train_results):
+            if isinstance(result, Exception):
+                generated_policies.append(result)
+            elif result["error"] is not None:
+                generated_policies.append(result["error"])
+            else:
+                generated_policies.append(gen_code)
 
         return generated_policies, loading_kwargs
 
@@ -556,13 +615,13 @@ class LLMAgentGenerationPipeline(AgentGenerationPipeline):
         self,
         agent_model_config: LitellmConfig,
         evaluator: BehaviorAdherenceEvaluator,
-        rollout_fn: callable,
+        env_module: Any,
         output_dir: str,
     ):
         super().__init__(
             generator=None,  # Not used in this pipeline
             evaluator=evaluator,
-            rollout_fn=rollout_fn,
+            env_module=env_module,
             output_dir=output_dir,
         )
         self.agent_model_config = agent_model_config

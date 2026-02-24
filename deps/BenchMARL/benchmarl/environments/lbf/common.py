@@ -31,94 +31,191 @@ class LbfTask(Task):
 
 
 class LbfGymWrapper(GymWrapper):
-    def __init__(self, env: gymnasium.Env, num_agents: int, device=DEVICE_TYPING):
+    def __init__(
+        self,
+        env: gymnasium.Env,
+        num_agents: int,
+        device=DEVICE_TYPING,
+        group_map: Optional[Dict[str, List[str]]] = None,
+    ):
         super().__init__(env, device=device)
         self.num_agents = num_agents
-        
-        # --- Fix Action Spec ---
-        # Explicitly construct the spec to ensure consistency
-        # Assuming all agents have same action dim (e.g. 6)
-        # old_action_spec from GymWrapper might be OneHot(2, 6)
-        
-        # We need to know action_dim. 
-        # For LBF 8x8-2p-2f, action_dim is 6.
-        # We can inspect old_action_spec
+        self.group_map = group_map
+
         old_action_spec = self.action_spec
         action_dim = old_action_spec.shape[-1]
-        
-        # Use DiscreteTensorSpec(shape=(n_agents,)) instead of OneHot
-        # This seems to play nicer with BenchMARL's expansion logic
-        self.action_spec = CompositeSpec({
-             "agents": CompositeSpec({
-                 "action": DiscreteTensorSpec(
-                     n=action_dim,
-                     shape=torch.Size((self.num_agents,)),
-                     device=self.device,
-                     dtype=torch.long
-                 )
-             }, shape=(self.num_agents,))
-        }, shape=self.batch_size, device=self.device)
-        
-        # --- Fix Observation Spec ---
-        # GymWrapper creates a stacked spec for Tuple observation spaces
+
         old_obs_spec = self.observation_spec["observation"]
-        self.observation_spec = CompositeSpec({
-            "agents": CompositeSpec({
-                "observation": old_obs_spec
-            }, shape=(self.num_agents,))
-        }, shape=self.batch_size, device=self.device)
-        
-        # --- Fix Reward Spec ---
-        self.reward_spec = CompositeSpec({
-            "agents": CompositeSpec({
-                "reward": UnboundedContinuousTensorSpec(
-                    shape=torch.Size([self.num_agents, 1]), 
-                    device=self.device
+
+        if self.group_map:
+            obs_dim = old_obs_spec.shape[-1]
+            obs_spec_dict = {}
+            action_spec_dict = {}
+            reward_spec_dict = {}
+
+            for gname, names in self.group_map.items():
+                n = len(names)
+                obs_spec_dict[gname] = CompositeSpec(
+                    {
+                        "observation": UnboundedContinuousTensorSpec(
+                            shape=torch.Size([n, obs_dim]),
+                            device=self.device,
+                            dtype=torch.float32,
+                        )
+                    },
+                    shape=(n,),
                 )
-            }, shape=(self.num_agents,))
-        }, shape=self.batch_size, device=self.device)
+                action_spec_dict[gname] = CompositeSpec(
+                    {
+                        "action": DiscreteTensorSpec(
+                            n=action_dim,
+                            shape=torch.Size((n,)),
+                            device=self.device,
+                            dtype=torch.long,
+                        )
+                    },
+                    shape=(n,),
+                )
+                reward_spec_dict[gname] = CompositeSpec(
+                    {
+                        "reward": UnboundedContinuousTensorSpec(
+                            shape=torch.Size([n, 1]),
+                            device=self.device,
+                        )
+                    },
+                    shape=(n,),
+                )
+
+            self.observation_spec = CompositeSpec(
+                obs_spec_dict, shape=self.batch_size, device=self.device
+            )
+            self.action_spec = CompositeSpec(
+                action_spec_dict, shape=self.batch_size, device=self.device
+            )
+            self.reward_spec = CompositeSpec(
+                reward_spec_dict, shape=self.batch_size, device=self.device
+            )
+        else:
+            self.action_spec = CompositeSpec(
+                {
+                    "agents": CompositeSpec(
+                        {
+                            "action": DiscreteTensorSpec(
+                                n=action_dim,
+                                shape=torch.Size((self.num_agents,)),
+                                device=self.device,
+                                dtype=torch.long,
+                            )
+                        },
+                        shape=(self.num_agents,),
+                    )
+                },
+                shape=self.batch_size,
+                device=self.device,
+            )
+
+            self.observation_spec = CompositeSpec(
+                {
+                    "agents": CompositeSpec(
+                        {"observation": old_obs_spec}, shape=(self.num_agents,)
+                    )
+                },
+                shape=self.batch_size,
+                device=self.device,
+            )
+
+            self.reward_spec = CompositeSpec(
+                {
+                    "agents": CompositeSpec(
+                        {
+                            "reward": UnboundedContinuousTensorSpec(
+                                shape=torch.Size([self.num_agents, 1]),
+                                device=self.device,
+                            )
+                        },
+                        shape=(self.num_agents,),
+                    )
+                },
+                shape=self.batch_size,
+                device=self.device,
+            )
 
     def _step(self, tensordict):
-        # Read action
-        action_tensor = tensordict.get(("agents", "action")) 
-        
-        # Standardize to numpy indices/values for LBF
-        if tensordict.batch_size == torch.Size([]):
+        if tensordict.batch_size != torch.Size([]):
+            raise NotImplementedError("Batch stepping not implemented yet for LbfGymWrapper")
+
+        if self.group_map:
+            # Merge per-group actions into a global action list ordered by agent index
+            action_list = [None] * self.num_agents
+            for gname, names in self.group_map.items():
+                g_action = tensordict.get((gname, "action"))
+                for local_i, aname in enumerate(names):
+                    global_idx = int(aname.split("_")[1])
+                    action_list[global_idx] = g_action[local_i].item()
+
+            obs, reward, terminated, truncated, info = self.env.step(tuple(action_list))
+
+            obs_tensor = torch.tensor(np.stack(obs), device=self.device, dtype=torch.float32)
+            reward_tensor = torch.tensor(
+                np.array(reward), device=self.device, dtype=torch.float32
+            )
+            done = terminated or truncated
+
+            out_td = TensorDict(
+                {
+                    "done": torch.tensor(done, device=self.device),
+                    "terminated": torch.tensor(terminated, device=self.device),
+                    "truncated": torch.tensor(truncated, device=self.device),
+                },
+                batch_size=torch.Size([]),
+                device=self.device,
+            )
+            for gname, names in self.group_map.items():
+                idxs = [int(n.split("_")[1]) for n in names]
+                n = len(names)
+                out_td[gname] = TensorDict(
+                    {
+                        "observation": obs_tensor[idxs],
+                        "reward": reward_tensor[idxs].unsqueeze(-1),
+                    },
+                    batch_size=(n,),
+                    device=self.device,
+                )
+            return out_td
+        else:
+            # Read action
+            action_tensor = tensordict.get(("agents", "action"))
+
             if action_tensor.ndim > 1 and action_tensor.shape[-1] > 1:
-                # Assuming OneHot -> Indices
                 action_idx = action_tensor.argmax(dim=-1)
             else:
                 action_idx = action_tensor
-            
-            # Convert to list for LBF
+
             action_np = action_idx.detach().cpu().numpy()
             action_list = tuple(action_np.tolist())
-            
-            # Step
+
             obs, reward, terminated, truncated, info = self.env.step(action_list)
-            
-            # Process output
-            # obs: tuple of arrays -> (n_agents, obs_dim)
+
             obs_tensor = torch.tensor(np.stack(obs), device=self.device, dtype=torch.float32)
-            
-            # reward: list of floats -> (n_agents,)
-            reward_tensor = torch.tensor(np.array(reward), device=self.device, dtype=torch.float32)
-            # Add reward dim -> (n_agents, 1)
-            reward_tensor = reward_tensor.unsqueeze(-1)
-            
+            reward_tensor = torch.tensor(
+                np.array(reward), device=self.device, dtype=torch.float32
+            ).unsqueeze(-1)
             done = terminated or truncated
-            
-            return TensorDict({
-                "agents": TensorDict({
-                    "observation": obs_tensor,
-                    "reward": reward_tensor
-                }, batch_size=(self.num_agents,), device=self.device),
-                "done": torch.tensor(done, device=self.device),
-                "terminated": torch.tensor(terminated, device=self.device),
-                "truncated": torch.tensor(truncated, device=self.device),
-            }, batch_size=torch.Size([]), device=self.device)
-        else:
-             raise NotImplementedError("Batch stepping not implemented yet for LbfGymWrapper")
+
+            return TensorDict(
+                {
+                    "agents": TensorDict(
+                        {"observation": obs_tensor, "reward": reward_tensor},
+                        batch_size=(self.num_agents,),
+                        device=self.device,
+                    ),
+                    "done": torch.tensor(done, device=self.device),
+                    "terminated": torch.tensor(terminated, device=self.device),
+                    "truncated": torch.tensor(truncated, device=self.device),
+                },
+                batch_size=torch.Size([]),
+                device=self.device,
+            )
 
     def render(self, *args, **kwargs):
         return self.env.render()
@@ -126,15 +223,41 @@ class LbfGymWrapper(GymWrapper):
     def _reset(self, tensordict=None, **kwargs):
         obs, info = self.env.reset(**kwargs)
         obs_tensor = torch.tensor(np.stack(obs), device=self.device, dtype=torch.float32)
-        
-        return TensorDict({
-            "agents": TensorDict({
-                "observation": obs_tensor
-            }, batch_size=(self.num_agents,), device=self.device),
-            "done": torch.tensor(False, device=self.device),
-            "terminated": torch.tensor(False, device=self.device),
-            "truncated": torch.tensor(False, device=self.device),
-        }, batch_size=torch.Size([]), device=self.device)
+
+        if self.group_map:
+            out_td = TensorDict(
+                {
+                    "done": torch.tensor(False, device=self.device),
+                    "terminated": torch.tensor(False, device=self.device),
+                    "truncated": torch.tensor(False, device=self.device),
+                },
+                batch_size=torch.Size([]),
+                device=self.device,
+            )
+            for gname, names in self.group_map.items():
+                idxs = [int(n.split("_")[1]) for n in names]
+                n = len(names)
+                out_td[gname] = TensorDict(
+                    {"observation": obs_tensor[idxs]},
+                    batch_size=(n,),
+                    device=self.device,
+                )
+            return out_td
+        else:
+            return TensorDict(
+                {
+                    "agents": TensorDict(
+                        {"observation": obs_tensor},
+                        batch_size=(self.num_agents,),
+                        device=self.device,
+                    ),
+                    "done": torch.tensor(False, device=self.device),
+                    "terminated": torch.tensor(False, device=self.device),
+                    "truncated": torch.tensor(False, device=self.device),
+                },
+                batch_size=torch.Size([]),
+                device=self.device,
+            )
 
 
 class LbfClass(TaskClass):
@@ -149,11 +272,12 @@ class LbfClass(TaskClass):
             env_name = self.config["env_name"]
             num_agents = self.config["players"]
             gym_env = gymnasium.make(env_name, render_mode="rgb_array")
-            
+
             env = LbfGymWrapper(
                 env=gym_env,
                 num_agents=num_agents,
                 device=device,
+                group_map=self.config.get("group_map"),
             )
 
             return env
@@ -179,7 +303,9 @@ class LbfClass(TaskClass):
 
     def group_map(self, env: EnvBase) -> Dict[str, List[str]]:
         # The group map mapping group names to agent names
-        # The data in the tensordict will havebe presented this way
+        # The data in the tensordict will be presented this way
+        if getattr(env, "group_map", None):
+            return env.group_map
         num_agents = self.config["players"]
         return {"agents": [f"agent_{i}" for i in range(num_agents)]}
 
