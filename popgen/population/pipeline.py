@@ -292,14 +292,15 @@ class AgentGenerationPipeline(ABC):
                 if rollout_error_feedback is not None:
                     logging.warning(f"[Attempt {attempt + 1} | Gen Retry {gen_retry}] {rollout_error_feedback}")
                     retry_log["error"] = rollout_error_feedback
-                    generation_retry_logs.append(retry_log)
                     last_error_feedback = rollout_error_feedback
 
                     prev_code = _extract_generated_code(generated_item)
                     retry_feedbacks = [(prev_code, rollout_error_feedback)]
                     if gen_retry < n_generation_retries:
+                        generation_retry_logs.append(retry_log)
                         continue
-                    break
+                    # All gen retries exhausted — fall through to evaluation;
+                    # the evaluator handles [ERROR] states and produces feedback.
 
                 # Step 3: evaluation
                 try:
@@ -317,7 +318,7 @@ class AgentGenerationPipeline(ABC):
                     break
                 evaluation_latency = eval_elapsed
                 evaluation_ran = True
-                retry_log["error"] = None
+                retry_log.setdefault("error", None)
                 generation_retry_logs.append(retry_log)
 
                 adherence = eval_result.overall_metrics["adherence"]

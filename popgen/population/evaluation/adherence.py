@@ -23,6 +23,14 @@ Evaluate whether its actions align with the described behavior, do not consider 
 Focus on the ego agent only, forget everything else including its teammates and opponents!
 You can use the rollout states to illustrate points.
 
+In rare situations where the agent cannot fully demonstrate or transcribe the expected behavior due to limitations in the environment setup, but still makes a genuine and reasonable effort to comply, you may evaluate it as adhering to the behavior. 
+However, you must clearly explain the constraints and your justification in the reasoning section as the following JSON:
+{{
+    "evaluation": true,
+    "reasoning": "The behavior cannot be fully demonstrated due to environment limitations, but the agent made a good-faith effort to follow the expected behavior within those constraints.",
+    "feedback": ""
+}}
+
 The visual description of the ego agent will be provided in the environment description.
 In the trajectory logs, the ego agent is named agent0.
 
@@ -60,7 +68,7 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
     aggregate_plot_metrics = ["adherence", "adjusted_adherence"]
     key_plot_metrics = [("adherence", "Behavior Adherence")]
 
-    def __init__(self, model_config: LitellmConfig, num_workers: int = 8):
+    def __init__(self, model_config: LitellmConfig, num_workers: int = 1):
         super().__init__(name="BehaviorAdherence", num_workers=num_workers)
         self.model_config = model_config
 

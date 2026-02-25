@@ -95,7 +95,7 @@ def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
         evaluation_cfg = job["evaluation_cfg"]
 
         evaluator = BehaviorAdherenceEvaluator(
-            model_config=LitellmConfig(model_name=evaluation_cfg["evaluator_model"])
+            model_config=LitellmConfig(model_name=evaluation_cfg["evaluator_model"]), num_workers=job["pipeline_workers"]
         )
 
         generation_type = job["generation_type"]
