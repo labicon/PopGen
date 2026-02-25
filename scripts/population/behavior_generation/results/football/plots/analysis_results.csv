@@ -1,4 +1,0 @@
-method,n_behaviors,quality_total,quality_relevance,quality_realism,quality_specificity,diversity_semantic,diversity_lexical,vocabulary_richness
-StratifiedStrategy__gpt-5-nano,5,12.0,5.0,4.0,3.0,0.25773727893829346,0.7532191025311034,0.3742559523809524
-VerbalizedSamplingStrategy__gpt-5-nano,5,11.2,4.6,4.6,2.0,0.3753592371940613,0.8461256624557766,0.6820809248554913
-InContextStrategy__gpt-5-nano,4,12.25,5.0,4.25,3.0,0.4208778142929077,0.7012417487654299,0.4936102236421725

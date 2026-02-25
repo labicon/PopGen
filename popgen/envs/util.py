@@ -61,13 +61,14 @@ def compose_rollout_policy(policy_or_policies: Any):
     return policy
 
 
-def apply_rollout_seed(env) -> None:
-    """Apply a random seed derived from time and PID to ensure unique rollout results.
+def apply_rollout_seed(env, seed: int | None = None) -> None:
+    """Apply a seed to the environment for reproducible rollouts.
 
-    Uses both time and process ID so parallel workers with overlapping wall-clock
-    milliseconds still get different seeds.
+    If seed is None, derives one from time and PID so parallel workers with
+    overlapping wall-clock milliseconds still get different seeds.
     """
-    seed = (int(time.time() * 1000) + os.getpid()) % 100000
+    if seed is None:
+        seed = (int(time.time() * 1000) + os.getpid()) % 100000
     torch.manual_seed(seed)
     if hasattr(env, "set_seed"):
         env.set_seed(seed)

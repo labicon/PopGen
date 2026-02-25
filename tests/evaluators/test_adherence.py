@@ -6,31 +6,32 @@ from popgen.population import BehaviorAdherenceEvaluator, BehaviorAdherenceResul
 from popgen.utils.config import LitellmConfig
 
 
-def _mock_evaluation_response(evaluation: bool, reasoning: str) -> MagicMock:
+def _mock_evaluation_response(evaluation: bool, reasoning: str, feedback: str = "No feedback.") -> MagicMock:
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.parsed = None
     mock_response.choices[0].message.content = BehaviorAdherenceResult(
-        evaluation=evaluation, reasoning=reasoning
+        evaluation=evaluation, reasoning=reasoning, feedback=feedback
     ).model_dump_json()
     return mock_response
 
 
 class TestBehaviorAdherenceResultModel:
     def test_evaluation_creation(self):
-        evaluation = BehaviorAdherenceResult(evaluation=True, reasoning="Agent followed behavior")
+        evaluation = BehaviorAdherenceResult(evaluation=True, reasoning="Agent followed behavior", feedback="Keep it up.")
         assert evaluation.evaluation is True
         assert evaluation.reasoning == "Agent followed behavior"
 
     def test_evaluation_from_dict(self):
-        data = {"evaluation": False, "reasoning": "Agent deviated"}
+        data = {"evaluation": False, "reasoning": "Agent deviated", "feedback": "Change strategy."}
         evaluation = BehaviorAdherenceResult.model_validate(data)
         assert evaluation.evaluation is False
         assert evaluation.reasoning == "Agent deviated"
 
     def test_evaluation_to_dict(self):
-        evaluation = BehaviorAdherenceResult(evaluation=True, reasoning="Good")
+        evaluation = BehaviorAdherenceResult(evaluation=True, reasoning="Good", feedback="Nothing to change.")
         data = evaluation.model_dump()
-        assert data == {"evaluation": True, "reasoning": "Good"}
+        assert data == {"evaluation": True, "reasoning": "Good", "feedback": "Nothing to change."}
 
     def test_evaluation_missing_field_raises(self):
         with pytest.raises(ValueError):

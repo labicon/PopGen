@@ -1,0 +1,22 @@
+[
+  {
+    "name": "Independent Scavenger",
+    "description": "This agent prioritizes collecting foods that have a level equal to or lower than its own carrying capacity, allowing it to load them unilaterally without relying on teammates. It actively avoids high-level foods that would require cooperative transport, instead moving from one low-hanging fruit to another to maximize solo collections."
+  },
+  {
+    "name": "Dedicated Supporter",
+    "description": "This agent prioritizes teamwork by constantly tracking its teammate's position rather than selecting its own targets. It follows the teammate closely and maneuvers to adjacent cells of whatever food the teammate is approaching, ensuring it is always ready to synchronize the load action for cooperative transport."
+  },
+  {
+    "name": "High-Value Hunter",
+    "description": "This agent specifically prioritizes the foods with the highest levels on the grid, even if they exceed its individual carrying capacity. It quickly navigates to an adjacent cell of the highest-level food and patiently waits there, acting as an anchor to encourage teammates to join and perform a synchronized, cooperative load action."
+  },
+  {
+    "name": "Impatient Opportunist",
+    "description": "This agent always rushes toward the absolute closest food item on the grid, irrespective of its level. If the food exceeds its individual carrying capacity and the teammate is not already nearby to assist, it acts impatiently-abandoning the target to seek out the next nearest food. This strategy prioritizes constant map traversal and avoids getting stalled indefinitely waiting for a cooperative load."
+  },
+  {
+    "name": "Adaptive Collaborator",
+    "description": "This agent balances independence with teamwork by maintaining a dual-priority system. By default, it targets foods it can carry alone to maintain a fast, continuous solo collection rate. However, it constantly monitors its teammate's status; if it observes the teammate waiting adjacent to a high-level food item that requires cooperative transport, this agent instantly aborts its current solo path to rush over and assist with the synchronized load, before returning to its own hunt."
+  }
+]

@@ -1,0 +1,22 @@
+[
+  {
+    "name": "Assertive Nearest",
+    "description": "Immediately targets the landmark that is physically closest to its starting position and moves towards it at maximum acceleration. It acts as an implicit leader, signaling its choice early and decisively through its trajectory, relying on the other agent to observe and adapt to this clear commitment."
+  },
+  {
+    "name": "Patient Follower",
+    "description": "Deliberately delays its own decision by applying minimal initial force. It continuously monitors the other agent's relative position to infer its trajectory and target landmark. Once the teammate's choice becomes clear, it smoothly accelerates towards that specific landmark to complete the rendezvous, acting as an adaptive accommodator rather than a leader."
+  },
+  {
+    "name": "Mutual Distance Minimizer",
+    "description": "Evaluates the relative positions of all landmarks and the teammate to calculate the total joint travel distance for both agents to each landmark. It immediately commits to the landmark that minimizes this combined distance, acting on the assumption that the other agent will independently deduce and select the same globally optimal cooperative focal point."
+  },
+  {
+    "name": "Altruistic Anticipator",
+    "description": "Calculates the absolute positions of all landmarks and the teammate to determine which landmark is physically closest to the teammate's starting position. It immediately commits to moving towards that specific landmark at full speed, preemptively assuming the other agent will naturally choose its easiest and most direct option without waiting to observe the teammate's actual trajectory."
+  },
+  {
+    "name": "Cohesive Shadow",
+    "description": "Ignores the landmarks at the start of the episode and focuses entirely on the teammate's relative position. It applies direct force to intercept and physically group up with the other agent. Once close, it smoothly mirrors the teammate's velocity, relinquishing all navigational choices to the partner while traveling side-by-side to guarantee that both point masses arrive at the final rendezvous landmark simultaneously."
+  }
+]

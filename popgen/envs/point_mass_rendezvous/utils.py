@@ -107,8 +107,10 @@ class ActionType(BaseModel):
 
 
 def get_state_point_mass_rendezvous(env):
-    state = {}
-
+    """
+    Extracts the global state from the Point Mass Rendezvous environment.
+    Returns {"agents": {agent_name: {...}}, "env": {landmark positions}}.
+    """
     def _get_agent_state(agent):
         pos = agent.state.pos[0].cpu().numpy().tolist()
         vel = agent.state.vel[0].cpu().numpy().tolist()
@@ -119,18 +121,14 @@ def get_state_point_mass_rendezvous(env):
             "vel": [round(x, 2) for x in vel],
         }
 
-    # Use nested 'agents' dict so rollout_states_to_str can print all entries
-    agents_data = {}
+    agents_data = {agent.name: _get_agent_state(agent) for agent in env.world.agents}
 
-    for i, agent in enumerate(env.world.agents):
-        agents_data[agent.name] = _get_agent_state(agent)
-
+    env_data = {}
     for i, landmark in enumerate(env.world.landmarks):
         pos = landmark.state.pos[0].cpu().numpy().tolist()
-        agents_data[f"landmark{i}"] = {"pos": [round(x, 2) for x in pos]}
+        env_data[f"landmark{i}_pos"] = [round(x, 2) for x in pos]
 
-    state["agents"] = agents_data
-    return state
+    return {"agents": agents_data, "env": env_data}
 
 
 # ---------------------------------------------------------------------------- #

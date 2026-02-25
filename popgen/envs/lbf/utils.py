@@ -1,3 +1,4 @@
+import random
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -129,19 +130,14 @@ class ActionType(BaseModel):
 def get_state_lbf(env) -> dict[str, Any]:
     """
     Extracts the global state from the LBF environment.
+    Returns {"agents": {agent_name: {...}}, "env": {food info}}.
     """
-    state = {}
-
     # Access unwrapped env for internal state
     if hasattr(env, "unwrapped"):
         env = env.unwrapped
 
-    # Use nested 'agents' dict to mimic VMAS structure for compatibility with logging
-    # Food is also added here so it gets printed by rollout_states_to_str
-    agents_data = {}
-
     # Agents
-    # env.players is list of Player objects
+    agents_data = {}
     for i, player in enumerate(env.players):
         agents_data[f"agent{i}"] = {
             "pos": [int(x) for x in player.position],
@@ -150,23 +146,21 @@ def get_state_lbf(env) -> dict[str, Any]:
             "score": float(player.score) if isinstance(player.score, (int, float, np.number)) else player.score,
         }
 
-    # Food
-    # env.field is ndarray of shape (rows, cols) from env
+    # Food (env-level state)
     rows, cols = env.field.shape
     food_list = []
     for r in range(rows):
         for c in range(cols):
             if env.field[r, c] > 0:
                 food_list.append(((r, c), env.field[r, c]))
-
-    # Sort food to have consistent order
     food_list.sort(key=lambda x: x[0])
 
+    env_data = {}
     for i, (pos, level) in enumerate(food_list):
-        agents_data[f"food{i}"] = {"pos": [int(x) for x in pos], "level": int(level)}
+        env_data[f"food{i}_pos"] = [int(x) for x in pos]
+        env_data[f"food{i}_level"] = int(level)
 
-    state["agents"] = agents_data
-    return state
+    return {"agents": agents_data, "env": env_data}
 
 
 # ---------------------------------------------------------------------------- #

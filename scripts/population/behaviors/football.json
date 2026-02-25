@@ -1,0 +1,22 @@
+[
+  {
+    "name": "Aggressive Striker",
+    "description": "This behavior focuses primarily on offense. The agent aggressively chases the ball, attempting to take possession and immediately drive it towards the opponent's goal area with maximum force, often ignoring defensive duties to apply continuous pressure on the red team."
+  },
+  {
+    "name": "Dedicated Goalkeeper",
+    "description": "This behavior prioritizes defending the blue team's goal. The agent positions itself primarily in its own defensive half, actively staying between the ball and the blue goal area to block incoming shots. It rarely crosses midfield, opting to clear the ball away from danger when it approaches, and relies entirely on its teammate to handle offensive maneuvers."
+  },
+  {
+    "name": "Box-to-Box Midfielder",
+    "description": "This behavior plays a balanced, transitional role, shifting dynamically between offense and defense. When the ball is in the opponent's half, it trails slightly behind the primary attacking teammate to collect rebounds, intercept loose balls, and sustain offensive pressure. When on defense, it actively tracks back into the midfield to harass opponents, disrupt their plays early, and assist in defending the goal."
+  },
+  {
+    "name": "Tactical Man-Marker",
+    "description": "This behavior prioritizes opponent disruption over direct ball possession or scoring. The agent continuously tracks and physically shadows the most threatening red team player, strategically positioning itself to block their movement paths, constantly harass them, and intercept potential passes. By relentlessly neutralizing one of the opponents and keeping them out of the main play, it aims to create highly favorable 1v1 situations for its teammate."
+  },
+  {
+    "name": "Opportunistic Poacher",
+    "description": "This behavior focuses on maintaining a high offensive position near the red team's goal. The agent rarely drops back to defend or chase the ball deep in its own half. Instead, it lurks around the scoring area, relying on its teammate to regain possession and push the ball forward, instantly springing into action to tap in rebounds or finish fast breaks with short, decisive shots."
+  }
+]

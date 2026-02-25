@@ -1,0 +1,33 @@
+{
+  "instance_metrics": [
+    {
+      "evaluation": false,
+      "reasoning": "The agent successfully collected one solo food item (food1) at the very start of the episode, which aligns with the scavenger behavior. However, for the remaining 48 steps, the agent remained completely idle at position [6, 5] instead of moving to collect the other soloable food (food0) located at [5, 1], which its level 2 capacity allowed it to collect alone.",
+      "feedback": "After collecting an initial food item, do not remain idle; actively navigate to and load the next available food item that is within your level capacity.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_0/attempt_0/rollouts/rollout_0/rollout_data.jsonl"
+    },
+    {
+      "evaluation": false,
+      "reasoning": "The ego agent (level 2) remained completely stationary at position [6, 1] throughout the entire rollout. While it did not attempt to collect the level 4 foods (which would require cooperation), it also failed to seek out or move toward any low-level foods, exhibiting total inactivity rather than the 'Scavenger' behavior described.",
+      "feedback": "The agent must actively move around the grid to locate and collect foods with a level of 2 or lower, while continuing to ignore foods with a level higher than 2.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_0/attempt_0/rollouts/rollout_1/rollout_data.jsonl"
+    },
+    {
+      "evaluation": false,
+      "reasoning": "The agent initially moves to and collects a level 1 food independently, which aligns with the behavior. However, for the remainder of the rollout (steps 5 to 48), the agent remains stationary at [1, 7] and fails to seek out other food or interact with the environment in any way despite another food being available.",
+      "feedback": "After collecting an accessible food, continue to navigate the grid to locate and collect other foods that are within your carrying capacity instead of remaining idle.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_0/attempt_0/rollouts/rollout_2/rollout_data.jsonl"
+    }
+  ],
+  "overall_metrics": {
+    "adherence": 0.0,
+    "adjusted_adherence": 0.0,
+    "n_evaluated": 3,
+    "n_errors": 0
+  },
+  "metadata": {
+    "evaluation_framework": "Behavior Adherence VLM-as-Judge",
+    "judge_model": "openrouter/google/gemini-3-flash-preview",
+    "num_rollouts": 3
+  }
+}

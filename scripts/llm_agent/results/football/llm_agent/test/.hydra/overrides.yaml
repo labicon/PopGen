@@ -1,5 +1,0 @@
-- agent.horizon_length=5
-- agent.include_trajectory_history=true
-- n_workers=1
-- run_name=test
-- env=football

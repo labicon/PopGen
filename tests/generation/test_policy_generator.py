@@ -53,6 +53,7 @@ class TestGenerate:
     def test_generate_success(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def policy(obs):\n    return obs",
             "reasoning": "Move toward target"
@@ -89,6 +90,7 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_success(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def policy(obs):\n    return obs",
             "reasoning": "Move aggressively"
@@ -108,6 +110,7 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_includes_behavior_in_message(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def policy(obs): pass",
             "reasoning": "reasoning"
@@ -128,6 +131,7 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_includes_environment_description(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def policy(obs): pass",
             "reasoning": "reasoning"
@@ -147,6 +151,7 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_with_feedbacks(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def policy(obs): return fixed",
             "reasoning": "Fixed the issue"
@@ -173,6 +178,7 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_no_refinement_with_empty_feedbacks(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def policy(obs): pass",
             "reasoning": "reasoning"
@@ -193,6 +199,7 @@ class TestGenerateStandalonePolicy:
     def test_generate_standalone_policy_no_refinement_with_none_feedbacks(self, mock_completion, generator, behavior):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def policy(obs): pass",
             "reasoning": "reasoning"

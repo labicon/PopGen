@@ -148,12 +148,16 @@ def get_state_football(env):
     agents_data = {}
 
     # Ego team agents
+    agents_data = {}
     for agent in blue_team:
+        agents_data[agent.name] = _get_agent_state(agent)
         agents_data[agent.name] = _get_agent_state(agent)
 
     # Adversary team agents
     for agent in red_team:
         agents_data[agent.name] = _get_agent_state(agent)
+
+    state["agents"] = agents_data
 
     # Ball and goal state (included here so they appear in logged output)
     ball_pos = env.scenario.ball.state.pos[0].cpu().numpy().tolist()

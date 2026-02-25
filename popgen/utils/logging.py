@@ -139,9 +139,26 @@ def encode_images_to_base64(images: list[np.ndarray]) -> list[str]:
     return encoded_images
 
 
+def _format_value(value: Any) -> str:
+    """Format a single state value for LLM consumption."""
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    elif isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    if isinstance(value, list) and all(isinstance(v, (int, float)) for v in value):
+        return "[" + ", ".join(f"{v:.4f}" if isinstance(v, float) else str(v) for v in value) + "]"
+    return str(value)
+
+
 def rollout_states_to_str(rollout_data: list[dict[str, Any]]) -> str:
     """
     Encode rollout into a string format suitable for LLM consumption.
+
+    Each state dict must have:
+      - "agents": dict mapping agent name → dict of agent fields
+      - "env":    dict mapping env-level field name → value
 
     Args:
         rollout_data: List of state dictionaries.
@@ -149,43 +166,23 @@ def rollout_states_to_str(rollout_data: list[dict[str, Any]]) -> str:
     Returns:
         A formatted string representation of all rollout states.
     """
-
-    all_lines = []
-
     if not rollout_data:
         return "Empty rollout"
 
-    # all_lines.append(f"Rollout {rollout_idx + 1} ({len(rollout_data)} total steps, showing {len(state_indices)} sampled states):")
-    # all_lines.append("-" * 60)
-
+    all_lines = []
     for state in rollout_data:
         state_idx = state.pop("step", "N/A")
-
         state_parts = []
+
+        # Agents section
         for agent_name, agent_state in state.get("agents", {}).items():
-            prefix = f"{agent_name}."
             for key, value in agent_state.items():
-                if key == "step":
-                    continue  # Skip redundant step key
-                # Convert numpy types to native Python types
-                if isinstance(value, np.ndarray):
-                    value = value.tolist()
-                elif isinstance(value, np.generic):
-                    value = value.item()
-                # Format floats with limited precision
-                if isinstance(value, float):
-                    state_parts.append(f"{prefix}{key}={value:.4f}")
-                elif isinstance(value, list) and all(isinstance(v, (int, float)) for v in value):
-                    formatted_list = [f"{v:.4f}" if isinstance(v, float) else str(v) for v in value]
-                    state_parts.append(f"{prefix}{key}=[{', '.join(formatted_list)}]")
-                else:
-                    state_parts.append(f"{prefix}{key}={value}")
+                state_parts.append(f"{agent_name}.{key}={_format_value(value)}")
 
-        state_line = f"Step {state_idx}: "
-        state_line += ", ".join(state_parts)
-        all_lines.append(state_line)
+        # Env section
+        for key, value in state.get("env", {}).items():
+            state_parts.append(f"env.{key}={_format_value(value)}")
 
-    # all_lines.append("-" * 60)
-    # all_lines.append("")  # Blank line between rollouts
+        all_lines.append(f"Step {state_idx}: " + ", ".join(state_parts))
 
     return "\n".join(all_lines).rstrip()

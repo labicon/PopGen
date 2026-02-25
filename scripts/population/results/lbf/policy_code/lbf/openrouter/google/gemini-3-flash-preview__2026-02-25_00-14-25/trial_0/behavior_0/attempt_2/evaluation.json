@@ -1,0 +1,33 @@
+{
+  "instance_metrics": [
+    {
+      "evaluation": false,
+      "reasoning": "While the agent successfully collected a low-level food (Food 1) at the very start of the episode, it remained completely stationary for the remaining 48 steps despite there being another food on the board (Food 0) that it was capable of loading solo (Agent level 2, Food level 2).",
+      "feedback": "After collecting a low-level food, immediately move toward the next available food that is equal to or below your level and collect it instead of remaining idle.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_0/attempt_2/rollouts/rollout_0/rollout_data.jsonl"
+    },
+    {
+      "evaluation": false,
+      "reasoning": "The ego agent (agent0) remained completely stationary at position [5, 1] for the entire duration of the rollout. It did not attempt to find or collect any food, regardless of the food's level.",
+      "feedback": "Move towards foods with a level equal to or lower than your own (level 2) and use the LOAD action to collect them; avoid standing still or targeting high-level foods.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_0/attempt_2/rollouts/rollout_1/rollout_data.jsonl"
+    },
+    {
+      "evaluation": false,
+      "reasoning": "The agent initially followed the behavior by collecting a level 1 food. However, for the majority of the trajectory (steps 12 to 48), it remained idle adjacent to a level 2 food while its teammate was also present. Instead of avoiding high-level foods to find solo-collectable ones as described, it participated in a failed coordination attempt or simply stood still.",
+      "feedback": "After collecting all foods equal to or below your level, actively move toward other potential low-level targets or explore the map instead of remaining stationary next to high-level food that requires a teammate.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_0/attempt_2/rollouts/rollout_2/rollout_data.jsonl"
+    }
+  ],
+  "overall_metrics": {
+    "adherence": 0.0,
+    "adjusted_adherence": 0.0,
+    "n_evaluated": 3,
+    "n_errors": 0
+  },
+  "metadata": {
+    "evaluation_framework": "Behavior Adherence VLM-as-Judge",
+    "judge_model": "openrouter/google/gemini-3-flash-preview",
+    "num_rollouts": 3
+  }
+}

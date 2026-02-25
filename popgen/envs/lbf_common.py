@@ -63,7 +63,6 @@ def _to_rollout_env(env, device: str = "cpu") -> EnvBase:
         return LbfGymWrapper(env=env, num_agents=num_agents, device=device)
     raise TypeError(f"Unsupported env type for rollout_lbf_env: {type(env).__name__}")
 
-
 def _resolve_state_env(env):
     current = env
     visited = set()
@@ -84,6 +83,7 @@ def rollout_lbf_env(
     env,
     get_state_fn: Callable | None = None,
     max_steps: int = 50,
+    seed: int | None = None,
     **kwargs,
 ):
     """Rollout a policy input that may be a single policy or a list of policies."""
@@ -100,7 +100,7 @@ def rollout_lbf_env(
             )
         return out
 
-    apply_rollout_seed(rollout_env)
+    apply_rollout_seed(rollout_env, seed=seed)
 
     states = []
     images = []

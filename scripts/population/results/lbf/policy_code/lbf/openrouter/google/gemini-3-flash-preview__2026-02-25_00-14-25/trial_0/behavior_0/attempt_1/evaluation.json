@@ -1,0 +1,33 @@
+{
+  "instance_metrics": [
+    {
+      "evaluation": false,
+      "reasoning": "The agent initially displays the behavior by collecting a level 1 food item (food1) solo at step 1. However, for the remainder of the rollout (steps 2-48), the agent remains stationary at position [6, 5] instead of actively moving to collect the remaining level 2 food (food0), which is within its capacity (level 2).",
+      "feedback": "After collecting an initial solo food item, immediately pathfind and move towards the next available food item that is within your level capacity instead of remaining idle.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_0/attempt_1/rollouts/rollout_0/rollout_data.jsonl"
+    },
+    {
+      "evaluation": false,
+      "reasoning": "The agent (level 2) failed to showcase the Independent Scavenger behavior because it remained stationary throughout the entire rollout at [6, 1]. While both available foods were level 4 and required cooperation, the agent did not attempt to move and there were no low-level foods on the grid to prioritize.",
+      "feedback": "The agent should proactively seek out and move towards food sources that match its level; if no such foods are available, it should remain active rather than stationary, or the environment should provide valid 'solo' targets to satisfy the behavior criteria.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_0/attempt_1/rollouts/rollout_1/rollout_data.jsonl"
+    },
+    {
+      "evaluation": true,
+      "reasoning": "The agent successfully identified and collected the food at [1, 6], which was level 1 (matching the agent's level), within the first few steps. Once that food was removed and only a level 2 food remained, the agent correctly avoided attempting to load it, as that would require cooperation. It remained stationary at [1, 7], effectively ignoring the high-level food.",
+      "feedback": "Continue to prioritize solo-accessible foods, but if no such foods remain, avoid idling; consider repositioning to monitor for new low-level food spawns if applicable.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_0/attempt_1/rollouts/rollout_2/rollout_data.jsonl"
+    }
+  ],
+  "overall_metrics": {
+    "adherence": 0.3333333333333333,
+    "adjusted_adherence": 0.3333333333333333,
+    "n_evaluated": 3,
+    "n_errors": 0
+  },
+  "metadata": {
+    "evaluation_framework": "Behavior Adherence VLM-as-Judge",
+    "judge_model": "openrouter/google/gemini-3-flash-preview",
+    "num_rollouts": 3
+  }
+}

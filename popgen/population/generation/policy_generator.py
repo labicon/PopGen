@@ -20,12 +20,22 @@ Environment description:
 {environment_description}
 
 Please ensure that the generated code is clean, well-structured, and adheres to the specified action format.
-The action should be a torch tensor of shape (action_dim,) where action_dim is defined in the action format description."""
+The action should be a torch tensor of shape (action_dim,) where action_dim is defined in the action format description.
+
+Output format requirements:
+- Return a valid json object.
+- The json object must contain exactly these keys: "code" and "reasoning".
+- "code" must be a Python string containing only the policy implementation.
+- "reasoning" must be a concise explanation string.
+- Do not wrap the json in markdown fences."""
 
 POLICY_GENERATION_PROMPT = """# Behavior description:
 {behavior}
 
-Provide the python code that describes the behavior as the `policy(obs)` function, and a concise reasoning on the implementation."""
+Provide the python code that describes the behavior as the `policy(obs)` function and your reasoning to arrive.
+Think step by step.
+
+Return your final answer as a single valid json object with keys "code" and "reasoning"."""
 
 # ---------------------------------------------------------------------------- #
 

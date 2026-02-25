@@ -229,12 +229,12 @@ def train_vmas_env(
     return experiment
 
 
-def rollout_vmas_env(policy, env, get_state_fn=None, **kwargs):
+def rollout_vmas_env(policy, env, get_state_fn=None, seed: int | None = None, **kwargs):
     """Rollout a policy input that may be a single policy or a list of policies."""
     policy = compose_rollout_policy(policy)
     policy.eval()
 
-    apply_rollout_seed(env)
+    apply_rollout_seed(env, seed=seed)
 
     states = []
     images = []

@@ -7,7 +7,7 @@ from typing import Literal
 import litellm
 import torch
 import torch.nn as nn
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, create_model, model_validator
 
 from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import parse_llm_response
@@ -15,6 +15,36 @@ from popgen.utils.parsing import parse_llm_response
 from .utils import extract_observation_and_action_key, flatten_obs, format_action_output
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _make_horizon_action_model(action_type: type[BaseModel], horizon_length: int) -> type[BaseModel]:
+    """Build HorizonActionOutput that coerces raw scalar actions to action_type.
+
+    LLMs sometimes return a list of raw scalars (e.g. [1, 1, 5]) instead of
+    the expected list of structured objects (e.g. [{"action": 1}, ...]).
+    The pre-validator wraps any non-dict item into {first_field: value} so
+    Pydantic can validate it as the action_type.
+    """
+    first_field = next(iter(action_type.model_fields), None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_actions(cls, data):
+        if isinstance(data, dict) and "actions" in data and first_field is not None:
+            coerced = []
+            for item in data["actions"]:
+                if not isinstance(item, (dict, action_type)):
+                    item = {first_field: item}
+                coerced.append(item)
+            data = {**data, "actions": coerced}
+        return data
+
+    return create_model(
+        "HorizonActionOutput",
+        actions=(list[action_type], Field(description=f"A list of {horizon_length} actions over the planning horizon.")),
+        __validators__={"_coerce_actions": _coerce_actions},
+    )
+
 
 # ---------------------------------- PROMPTS --------------------------------- #
 
@@ -38,6 +68,15 @@ You must respond with a structured JSON object containing:
 
 Each action should be appropriate for the current observation and consistent with your behavioral guideline."""
 
+FEEDBACK_SECTION = """
+
+# Feedback from Prior Attempts
+You previously attempted to play with your behavioral guideline but did not fully adhere to it.
+Below is feedback from each prior attempt, including a sample of the trajectory and the evaluator's assessment.
+Use this feedback to correct your behavior in the current session.
+
+{feedback_entries}"""
+
 USER_TEMPLATE = """# Behavioral Guideline:
 {behavioral_guideline}
 
@@ -49,29 +88,6 @@ USER_TEMPLATE = """# Behavioral Guideline:
 You must plan for {horizon_length} step(s) ahead. Provide your actions as a list matching the description of the action space."""
 
 # ---------------------------------------------------------------------------- #
-
-
-def create_horizon_action_output(
-    action_type: Literal["Discrete", "Continuous"],
-    horizon_length: int,
-    action_description: str,
-) -> type[BaseModel]:
-    """Dynamically create a Pydantic model for actions over a planning horizon.
-
-    Args:
-        action_type: Type of action space - "Discrete" or "Continuous".
-        horizon_length: Number of steps in the planning horizon.
-        action_description: Description of the action space.
-
-    Returns:
-        A Pydantic model class for horizon actions.
-    """
-    if action_type == "Continuous":
-        actions_field = (list[list[float]], Field(description=f"A list of {horizon_length} continuous actions over the planning horizon. Each action is a list of floats (e.g., [fx, fy])."))
-    else:  # Discrete
-        actions_field = (list[int], Field(description=f"A list of {horizon_length} discrete action indices over the planning horizon."))
-
-    return create_model("HorizonActionOutput", actions=actions_field, action_description=(str, Field(default=action_description, description="Description of the action space.")))
 
 
 class LLMAgent(nn.Module):
@@ -156,6 +172,9 @@ class LLMAgent(nn.Module):
         action_type: type[BaseModel],
         horizon_length: int = 1,
         include_trajectory_history: bool = False,
+        script_other_agents: bool = False,
+        num_actions: int = 6,
+        feedbacks: list[tuple[str, str]] = None,
     ):
         """
         Initialize the LLM agent wrapper.
@@ -169,6 +188,8 @@ class LLMAgent(nn.Module):
                 The horizon model (actions: list[action_type]) is built automatically.
             horizon_length: Number of steps to plan ahead. The LLM generates actions for this many steps at once. Default is 1 (single-step planning).
             include_trajectory_history: Whether to include the previous trajectory in the context when generating new ones. Default is False.
+            script_other_agents: If True, non-ego agents (index > 0) take random actions instead of using the LLM. Default is False.
+            num_actions: Size of the discrete action space for random scripted agents. Default is 6 (LBF action space).
         """
         super().__init__()
         self.behavior = behavior
@@ -177,12 +198,11 @@ class LLMAgent(nn.Module):
         self.horizon_length = horizon_length
         self.include_trajectory_history = include_trajectory_history
         self.action_type = action_type
+        self.script_other_agents = script_other_agents
+        self.num_actions = num_actions
 
         # Build horizon action model: actions is a list of single-action models
-        self.horizon_action_model = create_model(
-            "HorizonActionOutput",
-            actions=(list[action_type], Field(description=f"A list of {horizon_length} actions over the planning horizon.")),
-        )
+        self.horizon_action_model = _make_horizon_action_model(action_type, horizon_length)
 
         # Trajectory caching for multi-step planning
         self._cached_trajectories = []
@@ -194,6 +214,15 @@ class LLMAgent(nn.Module):
             environment_description=self.environment_description,
             action_description=self.action_type.__doc__,
         )
+        if feedbacks:
+            entries = []
+            for n, (trajectory, reasoning) in enumerate(feedbacks, 1):
+                entry = f"## Attempt #{n}\n"
+                if trajectory:
+                    entry += f"### Trajectory:\n{trajectory}\n\n"
+                entry += f"### Evaluator Assessment:\n{reasoning}"
+                entries.append(entry)
+            self.system_prompt += FEEDBACK_SECTION.format(feedback_entries="\n\n".join(entries))
 
     def _build_trajectory_history_text(self, agent_idx: int) -> str:
         """
@@ -337,90 +366,3 @@ class LLMAgent(nn.Module):
             self._previous_trajectories = copy.deepcopy(self._cached_trajectories)
 
         return format_action_output(input_td, action_key, action_tensor)
-
-
-class LbfLLMAgent(LLMAgent):
-    """
-    LLM-based agent tailored for the Level-Based Foraging (LBF) environment.
-
-    This agent parses the flat LBF observation vector into a semantic description
-    of the grid, including agent positions/levels and food positions/levels.
-    """
-
-    def __init__(
-        self,
-        model_config: LitellmConfig,
-        environment_description: str,
-        action_description: str,
-        action_type: type[BaseModel],
-        behavior: str | None = None,
-        horizon_length: int = 1,
-        include_trajectory_history: bool = False,
-    ):
-        super().__init__(
-            model_config=model_config,
-            environment_description=environment_description,
-            action_description=action_description,
-            action_type=action_type,
-            behavior=behavior,
-            horizon_length=horizon_length,
-            include_trajectory_history=include_trajectory_history,
-        )
-        self.num_agents = 2
-        self.num_food = 2
-
-    def _parse_observation(self, obs: torch.Tensor) -> dict:
-        """
-        Parse LBF flat observation tensor into a semantic dictionary.
-
-        Obs Format:
-        [Food1_row, Food1_col, Food1_lvl, ..., FoodN_row, FoodN_col, FoodN_lvl,
-         Agent1_row, Agent1_col, Agent1_lvl, ..., AgentM_row, AgentM_col, AgentM_lvl]
-
-        Where Agent1 is always the 'ego' agent (yourself).
-        If an entity is hidden/missing, values are typically -1.
-        """
-        if isinstance(obs, torch.Tensor):
-            obs = obs.detach().cpu().numpy()
-
-        parsed = {}
-
-        # --- Parse Food ---
-        food_items = []
-        for i in range(self.num_food):
-            idx = i * 3
-            if idx + 3 <= len(obs):
-                r, c, lvl = obs[idx : idx + 3]
-                if r != -1:  # Visible/Existing
-                    food_items.append(f"Food {i}: Pos({int(r)}, {int(c)}), Lvl({int(lvl)})")
-
-        if food_items:
-            parsed["Food Items"] = food_items
-        else:
-            parsed["Food Items"] = "None visible"
-
-        # --- Parse Agents ---
-        # Last 3 * num_agents obs is row, column, level of each agent
-        agent_start_idx = len(obs) - (3 * self.num_agents)
-        agents_data = obs[agent_start_idx:]
-
-        # Ego Agent (Index 0 in the agent list)
-        if len(agents_data) >= 3:
-            ego_r, ego_c, ego_lvl = agents_data[0:3]
-            parsed["My State"] = f"Position: ({int(ego_r)}, {int(ego_c)}), Level: {int(ego_lvl)}"
-
-        # Teammates
-        teammates = []
-        for i in range(1, self.num_agents):
-            idx = i * 3
-            if idx + 3 <= len(agents_data):
-                r, c, lvl = agents_data[idx : idx + 3]
-                if r != -1:  # Visible
-                    teammates.append(f"Agent {i}: Pos({int(r)}, {int(c)}), Lvl({int(lvl)})")
-
-        if teammates:
-            parsed["Teammates"] = teammates
-        else:
-            parsed["Teammates"] = "None visible"
-
-        return parsed

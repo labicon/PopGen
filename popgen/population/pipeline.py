@@ -1,4 +1,3 @@
-import importlib
 import json
 import logging
 import os
@@ -8,10 +7,10 @@ from pathlib import Path
 from time import time
 from typing import Any, Literal
 
-import torch
 from pqdm.processes import pqdm
 
 from popgen.agents import PolicyCodeAgent
+from popgen.population.evaluation.utils import combine_feedback
 from popgen.utils.config import LitellmConfig
 from popgen.utils.decorators import track_time
 from popgen.utils.imports import import_all_functions_from_file, import_function_from_file, load_entrypoint
@@ -86,6 +85,7 @@ def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn", "LLMAgent
             action_type=action_type,
             horizon_length=config.get("horizon_length", 1),
             include_trajectory_history=config.get("include_trajectory_history", False),
+            feedbacks=config.get("feedbacks", []),
         )
 
         ego_policy = policy
@@ -101,7 +101,11 @@ def load_policy_and_env(policy_type: Literal["PolicyCode", "RewardFn", "LLMAgent
     return {"env": env, "policies": policies}
 
 
-def _worker_rollout(args: dict) -> dict:
+# ---------------------------------- WORKERS --------------------------------- #
+
+
+@track_time("rollout")
+def rollout_worker(args: dict) -> dict:
     """Worker function for parallel rollout execution."""
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     warnings.filterwarnings("ignore", category=UserWarning)
@@ -129,6 +133,30 @@ def _worker_rollout(args: dict) -> dict:
     }
 
 
+@track_time("training")
+def train_worker(args: dict) -> dict:
+    """Worker function for parallel RL training."""
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    warnings.filterwarnings("ignore", category=UserWarning)
+
+    compute_reward = import_function_from_file(args["code_file_path"], "compute_reward")
+    for attempt in range(args["training_attempts"]):
+        try:
+            args["train_fn"](compute_reward, args["output_dir"])
+            logging.info(f"[{args['idx']}] Training complete.")
+            return {"error": None}
+        except Exception as e:
+            if attempt < args["training_attempts"] - 1:
+                logging.warning(f"[{args['idx']}] Training failed (attempt {attempt + 1}/{args['training_attempts']}): {e}. Retrying...")
+            else:
+                logging.error(f"[{args['idx']}] Training failed after {args['training_attempts']} attempts: {e}")
+                return {"error": e}
+    return {"error": None}
+
+
+# ---------------------------------------------------------------------------- #
+
+
 class AgentGenerationPipeline(ABC):
     """Base pipeline for behavior-aligned policy generation and evaluation."""
 
@@ -149,16 +177,14 @@ class AgentGenerationPipeline(ABC):
     @abstractmethod
     def _generate_policies(
         self,
-        behaviors: list[Behavior],
-        feedbacks: list[list[tuple[str, str]]],
-        output_dirs: list[str],
-        num_workers: int = 1,
+        *args,
         **kwargs,
-    ) -> tuple[list[Any], list[dict]]:
+    ) -> tuple[list[Any], list[dict], list[float]]:
         """Generate policies for a batch of behaviors.
 
         Returns:
-            Tuple of (generated_policies, loading_kwargs_list)
+            Tuple of (generated_policies, loading_kwargs_list, gen_latencies)
+            where gen_latencies[i] is the per-behavior generation wall-clock time.
         """
         pass
 
@@ -209,21 +235,23 @@ class AgentGenerationPipeline(ABC):
 
             # Step 1: Generate policies for pending behaviors
             pending_behaviors = [behaviors[i] for i in pending_indices]
-            pending_feedbacks = [feedbacks[i][-1:] for i in pending_indices]
-            # make output dirs
+            pending_feedbacks = [feedbacks[i][-1:] for i in pending_indices]  # Only pass the most recent feedback for generation to avoid overwhelming the model with long feedback histories.
+
             pending_output_dirs = []
             for i in pending_indices:
                 dir = os.path.join(self.output_dir, f"behavior_{i}", f"attempt_{attempt}")
                 pending_output_dirs.append(dir)
                 os.makedirs(dir, exist_ok=True)
 
-            (gen_results, loading_policy_kwargs), gen_latency = self._generate_policies(
+            t0 = time()
+            gen_results, loading_policy_kwargs, per_gen_latencies = self._generate_policies(
                 behaviors=pending_behaviors,
                 feedbacks=pending_feedbacks,
                 output_dirs=pending_output_dirs,
                 num_workers=num_workers,
                 **generation_kwargs,
             )
+            gen_latency = time() - t0
 
             # Map generated results back to original behavior indices
             # and filter out failed generations
@@ -245,7 +273,8 @@ class AgentGenerationPipeline(ABC):
             # Step 2 & 3: Run rollouts and evaluate only for valid generations
             if valid_indices:
                 valid_behavior_dirs = [os.path.join(self.output_dir, f"behavior_{idx}", f"attempt_{attempt}") for idx in valid_indices]
-                behaviors_rollouts, rollout_latency = self._run_rollouts(
+                t0 = time()
+                behaviors_rollouts, per_rollout_latencies = self._run_rollouts(
                     n_rollouts=n_rollouts,
                     attempt=attempt,
                     num_workers=num_workers,
@@ -253,17 +282,22 @@ class AgentGenerationPipeline(ABC):
                     behavior_dirs=valid_behavior_dirs,
                     **evaluation_kwargs,
                 )
-                eval_results, evaluation_latency = self._evaluate_policies(
+                rollout_latency = time() - t0
+
+                t0 = time()
+                eval_results, per_eval_latencies = self._evaluate_policies(
                     behaviors=valid_behaviors,
                     behaviors_rollouts=behaviors_rollouts,
                     behavior_dirs=valid_behavior_dirs,
+                    num_workers=num_workers,
                     **evaluation_kwargs,
                 )
+                evaluation_latency = time() - t0
 
                 # Process evaluation results for valid indices
                 for i, idx in enumerate(valid_indices):
-                    instance_metric = eval_results.instance_metrics[i]
-                    adherence = instance_metric["adherence"]
+                    behavior_eval_results = eval_results[i]
+                    adherence = behavior_eval_results.overall_metrics["adherence"]
                     success = adherence >= adherence_threshold
 
                     # Map results back to original behavior index
@@ -274,9 +308,9 @@ class AgentGenerationPipeline(ABC):
                         logging.info(f"[B={idx}] SUCCESS on attempt {attempt + 1}")
                     else:
                         logging.warning(f"[B={idx}] FAILURE – Adherence: {adherence:.2f}")
-                        overall_feedback = instance_metric["reasoning"]
-                        # For code-based pipelines, include the generated code in feedback
-                        # For other pipelines (e.g., LLM agents), just use the feedback text
+                        overall_feedback = combine_feedback(behavior_eval_results.instance_metrics)
+                        # For code-based pipelines, include the generated code in feedback.
+                        # For other pipelines (e.g., LLM agents), include the full trajectory.
                         if hasattr(generated_items[idx], "code"):
                             feedbacks[idx].append((generated_items[idx].code, overall_feedback))
                         else:
@@ -284,6 +318,20 @@ class AgentGenerationPipeline(ABC):
             else:
                 rollout_latency = 0.0
                 evaluation_latency = 0.0
+                per_rollout_latencies = []
+                per_eval_latencies = []
+
+            # Save per-behavior latency.json for this attempt
+            valid_rollout_lat = {idx: per_rollout_latencies[j] for j, idx in enumerate(valid_indices)}
+            valid_eval_lat = {idx: per_eval_latencies[j] for j, idx in enumerate(valid_indices)}
+            for local_i, (global_idx, output_dir) in enumerate(zip(pending_indices, pending_output_dirs)):
+                latency_record = {
+                    "generation": per_gen_latencies[local_i],
+                    "rollout": valid_rollout_lat.get(global_idx, []),
+                    "evaluation": valid_eval_lat.get(global_idx, 0.0),
+                }
+                with open(os.path.join(output_dir, "latency.json"), "w") as f:
+                    json.dump(latency_record, f, indent=2)
 
             # Log per-attempt summary
             attempt_summary = {
@@ -333,13 +381,13 @@ class AgentGenerationPipeline(ABC):
 
         return successes, overall_summary
 
-    @track_time("Rollouts")
     def _run_rollouts(
         self,
         behavior_dirs: list[str],
         loading_kwargs_list: list[dict],
         n_rollouts: int,
         num_workers: int,
+        seed: int = 0,
         **rollout_kwargs,
     ) -> list[list[dict]]:
         """Run rollouts with generated policy."""
@@ -349,6 +397,7 @@ class AgentGenerationPipeline(ABC):
             os.makedirs(output_path, exist_ok=True)
 
             for rollout_idx in range(n_rollouts):
+                rollout_seed = seed + rollout_idx * 1000
                 rollout_args.append(
                     {
                         "rollout_fn": self.env_module.rollout_fn,
@@ -357,7 +406,7 @@ class AgentGenerationPipeline(ABC):
                         "scripted_policy_fn": self.env_module.ScriptedPolicy,
                         "loading_kwargs": loading_kwargs,
                         "rollout_subfolder": f"{output_path}/rollout_{rollout_idx}",
-                        "rollout_kwargs": rollout_kwargs,
+                        "rollout_kwargs": {**rollout_kwargs, "seed": rollout_seed},
                         "_behavior_idx": behavior_idx,
                         "_rollout_idx": rollout_idx,
                     }
@@ -366,27 +415,33 @@ class AgentGenerationPipeline(ABC):
         logging.info(f"Running {len(rollout_args)} rollouts ({len(behavior_dirs)} behaviors, {n_rollouts} each) with {num_workers} workers...")
         rollout_results = pqdm(
             rollout_args,
-            _worker_rollout,
+            rollout_worker,
             n_jobs=num_workers,
             desc="Running rollouts",
         )
 
         n_behaviors = len(behavior_dirs)
         behavior_rollouts: list[list[dict]] = [[] for _ in range(n_behaviors)]
+        behavior_latencies: list[list[float]] = [[] for _ in range(n_behaviors)]
 
-        for args, result in zip(rollout_args, rollout_results):
+        for args, item in zip(rollout_args, rollout_results):
             behavior_idx = args["_behavior_idx"]
-            behavior_rollouts[behavior_idx].append(result)
+            if isinstance(item, Exception):
+                behavior_rollouts[behavior_idx].append(item)
+                behavior_latencies[behavior_idx].append(0.0)
+            else:
+                result, elapsed = item
+                behavior_rollouts[behavior_idx].append(result)
+                behavior_latencies[behavior_idx].append(elapsed)
 
-        return behavior_rollouts
+        return behavior_rollouts, behavior_latencies
 
-    @track_time("Policy evaluation")
     def _evaluate_policies(
         self,
         behaviors: list[Behavior],
         behaviors_rollouts: list[list[dict]],
         behavior_dirs: list[str],
-        environment_description: str,
+        num_workers: int = 8,
         **kwargs,
     ) -> Any:
         """Evaluate policies for a batch of behaviors using parallel rollouts.
@@ -394,48 +449,68 @@ class AgentGenerationPipeline(ABC):
         Returns:
             EvalResult object with evaluation results
         """
+        environment_description = self.env_module.ENVIRONMENT_DESCRIPTION
+
         # Build evaluator inputs
-        eval_inputs = []
+        all_eval_inputs = []
         for behavior_idx, behavior in enumerate(behaviors):
+            behavior_eval_inputs = []
             rollouts = behaviors_rollouts[behavior_idx]
 
             rollout_states = []
             rollout_images = []
             for result in rollouts:
                 if isinstance(result, Exception):
-                    rollout_states.append(f"[ERROR] Rollout: {result}")
-                    rollout_images.append(None)
+                    rollout_states = f"[ERROR] Rollout: {result}"
+                    rollout_images = None
                 elif result["error"] is not None:
-                    rollout_states.append(f"[ERROR] Rollout: {result['error']}")
-                    rollout_images.append(None)
+                    rollout_states = f"[ERROR] Rollout: {result['error']}"
+                    rollout_images = None
                 else:
-                    rollout_states.append(result["states"])
-                    rollout_images.append(result["images"])
+                    rollout_states = result["states"]
+                    rollout_images = result["images"]
 
-            eval_inputs.append(
-                {
-                    "behavior": str(behavior),
-                    "environment_description": environment_description,
-                    "rollout_states": rollout_states,
-                    "rollout_images": rollout_images,
-                }
-            )
+                behavior_eval_inputs.append(
+                    {
+                        "behavior": str(behavior),
+                        "environment_description": environment_description,
+                        "rollout_states": rollout_states,
+                        "rollout_images": rollout_images,
+                    }
+                )
+            all_eval_inputs.append(behavior_eval_inputs)
 
-        # Run evaluation
-        logging.info(f"Evaluating {len(eval_inputs)} behaviors...")
-        eval_result = self.evaluator.evaluate(inputs=eval_inputs)
+        # Run evaluation with per-behavior timing
+        logging.info(f"Evaluating {len(all_eval_inputs)} behaviors...")
+        num_parallel_eval = max(1, num_workers // self.evaluator.num_workers)
+
+        timed_evaluate = track_time("evaluate")(self.evaluator.evaluate)
+        timed_eval = pqdm(all_eval_inputs, timed_evaluate, n_jobs=num_parallel_eval, desc="Running evaluations")
+        eval_result, eval_latencies = [], []
+        for item in timed_eval:
+            if isinstance(item, Exception):
+                eval_result.append(item)
+                eval_latencies.append(0.0)
+            else:
+                eval_result.append(item[0])
+                eval_latencies.append(item[1])
+
+        # Add rollout data paths to instance metrics
+        for idx, behavior_dir in enumerate(behavior_dirs):
+            for rollout_idx, instance_metric in enumerate(eval_result[idx].instance_metrics):
+                instance_metric["rollout_data_path"] = os.path.abspath(f"{behavior_dir}/rollouts/rollout_{rollout_idx}/rollout_data.jsonl")
 
         # Save per-behavior results
         for idx, behavior_dir in enumerate(behavior_dirs):
             instance_result = {
-                "instance_metrics": [eval_result.instance_metrics[idx]],
-                "overall_metrics": eval_result.instance_metrics[idx],
-                "metadata": eval_result.metadata,
+                "instance_metrics": eval_result[idx].instance_metrics,
+                "overall_metrics": eval_result[idx].overall_metrics,
+                "metadata": eval_result[idx].metadata,
             }
             with open(f"{behavior_dir}/evaluation.json", "w") as f:
                 json.dump(instance_result, f, indent=2)
 
-        return eval_result
+        return eval_result, eval_latencies
 
 
 class PolicyCodeAgentGenerationPipeline(AgentGenerationPipeline):
@@ -443,11 +518,9 @@ class PolicyCodeAgentGenerationPipeline(AgentGenerationPipeline):
 
     policy_type = "PolicyCode"
 
-    @track_time("Policy generation")
     def _generate_policies(
         self,
         behaviors: list[Behavior],
-        environment_description: str,
         feedbacks: list[list[tuple[str, str]]],
         output_dirs: list[str],
         num_workers: int = 1,
@@ -456,6 +529,8 @@ class PolicyCodeAgentGenerationPipeline(AgentGenerationPipeline):
         """Generate policies using LLM with feedback."""
         loading_kwargs = []
         generated_code_policies = []
+
+        environment_description = self.env_module.ENVIRONMENT_DESCRIPTION
 
         logging.info(f"Generating {len(behaviors)} policies with {num_workers} workers...")
         inputs = [
@@ -467,9 +542,10 @@ class PolicyCodeAgentGenerationPipeline(AgentGenerationPipeline):
             }
             for b, fb in zip(behaviors, feedbacks)
         ]
-        generated_codes = self.generator.batch_generate(
+        generated_codes, gen_latencies = self.generator.batch_generate(
             inputs=inputs,
             num_workers=num_workers,
+            timed=True,
             **kwargs,
         )
 
@@ -478,12 +554,21 @@ class PolicyCodeAgentGenerationPipeline(AgentGenerationPipeline):
             loading_kwargs.append({"file_path": code_file_path})
             generated_code_policies.append(gen_code)
 
-            # Save generated policy code
+            # Save generated policy code (or error if generation failed)
             with open(code_file_path, "w") as f:
-                f.write(gen_code.code)
+                if isinstance(gen_code, Exception):
+                    f.write(f"# Generation error: {gen_code}\n")
+                else:
+                    f.write(gen_code.code)
             logging.debug(f"Saved generated policy to {code_file_path}")
 
-        return generated_code_policies, loading_kwargs
+            # Save full model output to the attempt folder
+            record = {"output_dir": output_dir}
+            record.update(gen_code.model_dump() if not isinstance(gen_code, Exception) else {"error": str(gen_code)})
+            with open(os.path.join(output_dir, "model_outputs.jsonl"), "w") as f:
+                f.write(json.dumps(record) + "\n")
+
+        return generated_code_policies, loading_kwargs, gen_latencies
 
 
 class RLAgentGenerationPipeline(AgentGenerationPipeline):
@@ -507,45 +592,19 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
         )
         self.training_attempts = training_attempts
 
-    @staticmethod
-    def _worker_train(args: dict) -> dict:
-        """Worker function for parallel RL training."""
-        warnings.filterwarnings("ignore", category=DeprecationWarning)
-        warnings.filterwarnings("ignore", category=UserWarning)
-
-        code_file_path = args["code_file_path"]
-        output_dir = args["output_dir"]
-        train_fn = args["train_fn"]
-        training_attempts = args["training_attempts"]
-        idx = args["idx"]
-
-        compute_reward = import_function_from_file(code_file_path, "compute_reward")
-        for attempt in range(training_attempts):
-            try:
-                train_fn(compute_reward, output_dir)
-                logging.info(f"[{idx}] Training complete.")
-                return {"error": None}
-            except Exception as e:
-                if attempt < training_attempts - 1:
-                    logging.warning(f"[{idx}] Training failed (attempt {attempt + 1}/{training_attempts}): {e}. Retrying...")
-                else:
-                    logging.error(f"[{idx}] Training failed after {training_attempts} attempts: {e}")
-                    return {"error": e}
-        return {"error": None}
-
-    @track_time("Reward generation and RL training")
     def _generate_policies(
         self,
         behaviors: list[Behavior],
-        environment_description: str,
-        examples: list[str],
         feedbacks: list[list[tuple[str, str]]],
         output_dirs: list[str],
         num_workers: int = 1,
         **kwargs,
-    ) -> tuple[list[Any], list[dict]]:
+    ) -> tuple[list[Any], list[dict], list[dict]]:
         """Generate reward functions and train RL policies."""
-        # Batch generate reward functions
+        environment_description = self.env_module.ENVIRONMENT_DESCRIPTION
+        examples = [self.env_module.REWARD_EXAMPLE]
+
+        # Step 1: Batch generate reward functions
         logging.info(f"Generating {len(behaviors)} reward functions with {num_workers} workers...")
         inputs = [
             {
@@ -556,23 +615,31 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
             }
             for b, fb in zip(behaviors, feedbacks)
         ]
-        generated_codes = self.generator.batch_generate(
+        generated_codes, reward_gen_latencies = self.generator.batch_generate(
             inputs=inputs,
             num_workers=num_workers,
+            timed=True,
             **kwargs,
         )
 
-        # Save rewards and prepare training args
+        # Step 2: Save reward files and prepare training args
         loading_kwargs = []
         train_args = []
         for i, (output_dir, gen_code) in enumerate(zip(output_dirs, generated_codes)):
             code_file_path = f"{output_dir}/reward.py"
             loading_kwargs.append({"save_dir": output_dir})
 
-            # Save generated reward
             with open(code_file_path, "w") as f:
-                f.write(gen_code.code)
+                if isinstance(gen_code, Exception):
+                    f.write(f"# Generation error: {gen_code}\n")
+                else:
+                    f.write(gen_code.code)
             logging.debug(f"Saved generated reward to {code_file_path}")
+
+            record = {"output_dir": output_dir}
+            record.update(gen_code.model_dump() if not isinstance(gen_code, Exception) else {"error": str(gen_code)})
+            with open(os.path.join(output_dir, "model_outputs.jsonl"), "w") as f:
+                f.write(json.dumps(record) + "\n")
 
             train_args.append(
                 {
@@ -584,26 +651,36 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
                 }
             )
 
-        # Train RL policies in parallel
+        # Step 3: Train RL policies in parallel
         logging.info(f"Training {len(train_args)} RL policies with {num_workers} workers...")
         train_results = pqdm(
             train_args,
-            self._worker_train,
+            train_worker,
             n_jobs=num_workers,
             desc="Training RL policies",
         )
 
-        # Process results
+        # Step 4: Collect results and per-behavior latencies
         generated_policies = []
-        for gen_code, result in zip(generated_codes, train_results):
+        per_gen_latencies = []
+        for i, (gen_code, result) in enumerate(zip(generated_codes, train_results)):
             if isinstance(result, Exception):
                 generated_policies.append(result)
-            elif result["error"] is not None:
-                generated_policies.append(result["error"])
+                train_latency = 0.0
             else:
-                generated_policies.append(gen_code)
+                train_result, train_latency = result
+                if train_result["error"] is not None:
+                    generated_policies.append(train_result["error"])
+                else:
+                    generated_policies.append(gen_code)
+            per_gen_latencies.append(
+                {
+                    "reward_generation": reward_gen_latencies[i],
+                    "training": train_latency,
+                }
+            )
 
-        return generated_policies, loading_kwargs
+        return generated_policies, loading_kwargs, per_gen_latencies
 
 
 class LLMAgentGenerationPipeline(AgentGenerationPipeline):
@@ -626,24 +703,24 @@ class LLMAgentGenerationPipeline(AgentGenerationPipeline):
         )
         self.agent_model_config = agent_model_config
 
-    @track_time("LLM Agent configuration")
     def _generate_policies(
         self,
         behaviors: list[Behavior],
         output_dirs: list[str],
-        environment_description: str = "",
-        action_type: Literal["Discrete", "Continuous"] = None,
+        feedbacks: list[list[tuple[str, str]]] = None,
         horizon_length: int = 1,
         include_trajectory_history: bool = False,
-        **kwargs,
     ) -> tuple[list[Any], list[dict]]:
         """Generate LLM agent configurations for each behavior."""
         loading_kwargs = []
         generated_configs = []
 
+        environment_description = self.env_module.ENVIRONMENT_DESCRIPTION
+        action_type = self.env_module.ActionType
+
         logging.info(f"Creating LLM agent configurations for {len(behaviors)} behaviors...")
 
-        for output_dir, behavior in zip(output_dirs, behaviors):
+        for bi, (output_dir, behavior) in enumerate(zip(output_dirs, behaviors)):
             # Create configuration for this LLM agent
             config = {
                 "behavior": behavior.description,
@@ -656,6 +733,7 @@ class LLMAgentGenerationPipeline(AgentGenerationPipeline):
                 "action_type_module": f"{action_type.__module__}:{action_type.__qualname__}",
                 "horizon_length": horizon_length,
                 "include_trajectory_history": include_trajectory_history,
+                "feedbacks": feedbacks[bi] if feedbacks else [],
             }
 
             # Save configuration to JSON
@@ -663,8 +741,16 @@ class LLMAgentGenerationPipeline(AgentGenerationPipeline):
             with open(config_file_path, "w") as f:
                 json.dump(config, f, indent=2)
 
+            # Save model outputs record — include config_path as attribute of the wrapper
+            record = {"config_path": config_file_path}
+            record.update(config)
+            with open(os.path.join(output_dir, "model_outputs.jsonl"), "w") as f:
+                f.write(json.dumps(record) + "\n")
+
             # Add loading kwargs for this agent
             loading_kwargs.append({"config_path": config_file_path})
             generated_configs.append(behavior.description)
 
-        return generated_configs, loading_kwargs
+        # No LLM generation step — generation latency is 0
+        gen_latencies = [0.0] * len(behaviors)
+        return generated_configs, loading_kwargs, gen_latencies

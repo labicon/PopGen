@@ -1,0 +1,6 @@
+type: llm_agent
+
+# LLM agent model settings
+model_name: openrouter/google/gemini-3-flash-preview
+horizon_length: 3
+include_trajectory_history: false

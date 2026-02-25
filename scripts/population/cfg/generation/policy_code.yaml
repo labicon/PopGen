@@ -1,0 +1,5 @@
+type: policy_code
+
+# Model used for policy code generation
+model_name: openrouter/google/gemini-3-flash-preview
+

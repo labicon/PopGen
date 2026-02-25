@@ -70,6 +70,7 @@ class TestGenerate:
     def test_generate_success(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def compute_reward(self, agent):\n    return 1.0",
             "reasoning": "Reward for moving toward target"
@@ -89,6 +90,7 @@ class TestGenerate:
     def test_generate_includes_behavior_in_message(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def compute_reward(self, agent): return 0",
             "reasoning": "reasoning"
@@ -109,6 +111,7 @@ class TestGenerate:
     def test_generate_includes_environment_description_in_system_prompt(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def compute_reward(self, agent): return 0",
             "reasoning": "reasoning"
@@ -128,6 +131,7 @@ class TestGenerate:
     def test_generate_with_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def compute_reward(self, agent): return fixed",
             "reasoning": "Fixed the issue"
@@ -154,6 +158,7 @@ class TestGenerate:
     def test_generate_with_multiple_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def compute_reward(self, agent): return fixed",
             "reasoning": "Fixed the issues"
@@ -182,6 +187,7 @@ class TestGenerate:
     def test_generate_no_refinement_with_empty_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def compute_reward(self, agent): pass",
             "reasoning": "reasoning"
@@ -202,6 +208,7 @@ class TestGenerate:
     def test_generate_no_refinement_with_none_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def compute_reward(self, agent): pass",
             "reasoning": "reasoning"
@@ -222,6 +229,7 @@ class TestGenerate:
     def test_generate_uses_correct_model(self, mock_completion, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
         mock_response.choices[0].message.content = json.dumps({
             "code": "def compute_reward(self, agent): pass",
             "reasoning": "reasoning"

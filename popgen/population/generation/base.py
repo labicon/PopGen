@@ -5,6 +5,7 @@ from pqdm.threads import pqdm
 from pydantic import BaseModel
 
 from popgen.utils.config import LitellmConfig
+from popgen.utils.decorators import track_time
 
 
 class BaseGenerator(ABC):
@@ -12,6 +13,10 @@ class BaseGenerator(ABC):
 
     def __init__(self, generation_type: str):
         self.generation_type = generation_type
+
+    @property
+    def metadata(self) -> dict:
+        return {"generation_type": self.generation_type}
 
     @abstractmethod
     def generate(self, *args, **kwargs) -> dict | BaseModel:
@@ -22,26 +27,49 @@ class BaseGenerator(ABC):
         self,
         inputs: list[dict],
         num_workers: int = 1,
+        timed: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> tuple[list, list[float]]:
         """Generate items for a batch of behaviors.
 
         Args:
-            *args: Positional arguments passed to generate()
+            inputs: List of per-item kwargs dicts passed to generate()
             num_workers: Number of parallel workers
-            **kwargs: Additional arguments passed to generate()
+            timed: Whether to record per-item wall-clock latencies
+            **kwargs: Additional arguments merged into every input
 
         Returns:
-            List of generated items
+            Tuple of (results, latencies) where latencies[i] is the elapsed
+            wall-clock seconds for item i (0.0 if timed=False).
         """
-        # merge with kwargs
         inputs = [{**inp, **kwargs} for inp in inputs]
-        return pqdm(
+
+        if timed:
+            worker = track_time("generate")(lambda x: self.generate(**x))
+        else:
+
+            def worker(x):
+                return self.generate(**x)
+
+        raw_results = pqdm(
             inputs,
-            lambda x: self.generate(**x),
+            worker,
             n_jobs=num_workers,
             desc="Generating policies",
         )
+
+        results, latencies = [], []
+        for item in raw_results:
+            if isinstance(item, Exception):
+                results.append(item)
+                latencies.append(0.0)
+            elif timed:
+                results.append(item[0])
+                latencies.append(item[1])
+            else:
+                results.append(item)
+                latencies.append(0.0)
+        return results, latencies
 
 
 class GeneratorWithFeedback(BaseGenerator):
@@ -68,6 +96,10 @@ class GeneratorWithFeedback(BaseGenerator):
         super().__init__(generation_type=generation_type)
         self.model_config = model_config
         self.model_name = model_config.model_name
+
+    @property
+    def metadata(self) -> dict:
+        return {"generation_type": self.generation_type, "model_name": self.model_name}
 
     def generate(self, user_prompt: str, system_prompt: str = None, examples: list | None = None, feedbacks: list = None, **kwargs) -> dict | BaseModel:
         """Generate items based on prompts and feedback.

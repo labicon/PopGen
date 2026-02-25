@@ -8,6 +8,25 @@ from pydantic import BaseModel, ValidationError
 T = TypeVar("T", bound=BaseModel)
 
 
+class LLMResponseParseError(ValueError):
+    """Raised when an LLM response cannot be parsed into the expected schema."""
+
+
+def _extract_text_content(content) -> str:
+    """Normalize response message content into a string for JSON parsing."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    text_parts.append(text)
+        return "\n".join(text_parts)
+    return "" if content is None else str(content)
+
+
 def parse_llm_response(
     response,
     model_class: type[T],
@@ -26,38 +45,46 @@ def parse_llm_response(
         An instance of the model_class.
 
     Raises:
-        ValidationError: If the response cannot be parsed into the model after all fallback attempts.
+        LLMResponseParseError: If the response cannot be parsed into the model after all fallback attempts.
     """
-    content = response.choices[0].message.content
+    message = response.choices[0].message
+    parsed = getattr(message, "parsed", None)
     result = None
+    if isinstance(parsed, model_class):
+        result = parsed
+    elif isinstance(parsed, dict):
+        result = model_class.model_validate(parsed)
+
+    content = _extract_text_content(getattr(message, "content", ""))
 
     # Strategy 1: Try direct JSON validation
-    try:
-        result = model_class.model_validate_json(content)
-    except (ValidationError, json.JSONDecodeError):
-        pass
+    if result is None and content:
+        try:
+            result = model_class.model_validate_json(content)
+        except (ValidationError, json.JSONDecodeError, TypeError):
+            pass
 
     # Strategy 2: Try to extract JSON from markdown code blocks
-    if result is None:
+    if result is None and content:
         try:
             json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
             if json_match:
                 result = model_class.model_validate_json(json_match.group(1))
-        except (ValidationError, json.JSONDecodeError):
+        except (ValidationError, json.JSONDecodeError, TypeError):
             pass
 
     # Strategy 3: Try to find any JSON object in the content
-    if result is None:
+    if result is None and content:
         try:
             json_match = re.search(r"\{.*\}", content, re.DOTALL)
             if json_match:
                 result = model_class.model_validate_json(json_match.group(0))
-        except (ValidationError, json.JSONDecodeError):
+        except (ValidationError, json.JSONDecodeError, TypeError):
             pass
 
     # All strategies failed
     if result is None:
-        raise ValidationError(f"Failed to parse LLM response into {model_class.__name__}. Response content:\n{content[:500]}...")
+        raise LLMResponseParseError(f"Failed to parse LLM response into {model_class.__name__}. Response content:\n{content[:500]}...")
 
     # Apply postprocessing if provided
     if postprocess_fn is not None:

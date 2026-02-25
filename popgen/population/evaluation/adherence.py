@@ -5,15 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 import litellm
-import numpy as np
-from pqdm.threads import pqdm
 from pydantic import BaseModel
 
 from popgen.utils.config import LitellmConfig
 from popgen.utils.logging import encode_images_to_base64, rollout_states_to_str, uniform_sample
 from popgen.utils.parsing import parse_llm_response
 
-from .base import BaseEvaluator, EvalResult, calculate_stats
+from .base import BaseEvaluator, EvalResult
 
 # ---------------------------------- PROMPTS --------------------------------- #
 
@@ -26,12 +24,17 @@ Focus on the ego agent only, forget everything else including its teammates and 
 You can use the rollout states to illustrate points.
 
 The visual description of the ego agent will be provided in the environment description.
-In the trajectories, the ego agent is named agent0.
+In the trajectory logs, the ego agent is named agent0.
 
 # Environment Description
 {environment_description}
 
-Provide a concise reasoning and feedback in your evaluation."""
+# Output Format
+Return a JSON object with the following fields:
+- "evaluation": boolean indicating whether the rollout showcases the behavior.
+- "reasoning": short and concise explanation justifying the evaluation.
+- "feedback": concise actionable instruction on what to change in the policy to better align with the behavior next time (focus on the *what*, not the *why*).
+"""
 
 BEHAVIOR_ADHERENCE_USER_PROMPT = """Behavior:
 {behavior}"""
@@ -44,9 +47,10 @@ class BehaviorAdherenceResult(BaseModel):
 
     evaluation: bool
     reasoning: str
+    feedback: str
 
     def __str__(self) -> str:
-        return f"Evaluation: {self.evaluation}\nReasoning: {self.reasoning}"
+        return f"Evaluation: {self.evaluation}\nReasoning: {self.reasoning}\nFeedback: {self.feedback}"
 
 
 class BehaviorAdherenceEvaluator(BaseEvaluator):
@@ -75,49 +79,15 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
         """
         behavior = input_data["behavior"]
         environment_description = input_data["environment_description"]
+        rollout_states = input_data["rollout_states"]
+        rollout_images = input_data.get("rollout_images", [None] * len(input_data["rollout_states"]))
 
-        rollouts = list(
-            zip(
-                input_data["rollout_states"],
-                input_data.get("rollout_images", [None] * len(input_data["rollout_states"])),
-            )
-        )
-
-        def _worker_evaluate_rollout(rollout):
-            rollout_states, rollout_images = rollout
-            return self.evaluate_single_rollout(
-                behavior=behavior,
-                environment_description=environment_description,
-                rollout_states=rollout_states,
-                rollout_images=rollout_images,
-                **kwargs,
-            )
-
-        all_results = pqdm(rollouts, _worker_evaluate_rollout, n_jobs=min(self.num_workers, len(rollouts)), desc="Evaluating rollouts", disable=True)
-
-        # Aggregate results across rollouts
-        n_adherent = sum(1 for r in all_results if r.evaluation)
-        n_errors = sum(1 for r in all_results if "[ERROR]" in r.reasoning)
-        n_evaluated = len(all_results) - n_errors
-        adherence = n_adherent / len(all_results)
-        adjusted_adherence = n_adherent / n_evaluated if n_evaluated > 0 else 0.0
-
-        return {
-            "adherence": adherence,
-            "adjusted_adherence": adjusted_adherence,
-            "n_adherent": n_adherent,
-            "n_evaluated": n_evaluated,
-            "n_errors": n_errors,
-            "reasoning": combine_reasoning([r.model_dump() for r in all_results]),
-        }
-
-    def evaluate_single_rollout(self, behavior: str, environment_description: str, rollout_states: dict[str, Any], rollout_images: list[np.ndarray] = None, **kwargs) -> dict[str, Any]:
-        """Evaluate adherence for a single rollout."""
         if isinstance(rollout_states, str) and "[ERROR]" in rollout_states:
-            return BehaviorAdherenceResult(evaluation=False, reasoning=rollout_states)
+            return {"adherence": 0.0, "reasoning": rollout_states, "feedback": "Fix the implementation."}
 
         if rollout_images is None:
             rollout_images = []
+        rollout_images = [img for img in rollout_images if img is not None]
 
         # Only use 5 equally spaced images if there are more
         if len(rollout_images) > 5:
@@ -147,8 +117,9 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
                 }
             )
 
-        # Add all states
-        content.append({"type": "text", "text": rollout_states_to_str(rollout_states)})
+        # Add all states (flatten list of rollouts into list of states)
+        flat_states = [state for rollout in rollout_states for state in rollout]
+        content.append({"type": "text", "text": rollout_states_to_str(flat_states)})
         content.append({"type": "text", "text": separator})
 
         try:
@@ -161,24 +132,30 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
                 response_format=BehaviorAdherenceResult,
                 **self.model_config.get_completion_kwargs(overrides=kwargs),
             )
-            result = parse_llm_response(response, BehaviorAdherenceResult)
-            return result
+            eval_result = parse_llm_response(response, BehaviorAdherenceResult)
         except Exception as e:
-            return BehaviorAdherenceResult(evaluation=False, reasoning=f"[ERROR] Evaluation failed: {e}")
+            eval_result = BehaviorAdherenceResult(evaluation=False, reasoning=f"[ERROR] Evaluation failed: {e}", feedback="")
+
+        result = eval_result.model_dump()
+        result["adherence"] = 1.0 if result["evaluation"] else 0.0
+        return {
+            "adherence": 1.0 if result["evaluation"] else 0.0,
+            "reasoning": result["reasoning"],
+            "feedback": result["feedback"],
+        }
 
     def aggregate_metrics(self, instance_metrics: list[dict[str, Any]], **kwargs) -> dict[str, Any]:
         """Aggregate instance-level metrics into overall metrics."""
-        # Filter out exceptions from pqdm
-        valid_metrics = [m for m in instance_metrics if isinstance(m, dict)]
-        n_failed = len(instance_metrics) - len(valid_metrics)
+        # Aggregate results across rollouts
+        n_adherent = sum(r["adherence"] for r in instance_metrics)
+        n_errors = sum(1 for r in instance_metrics if "[ERROR]" in r["reasoning"])
+        n_evaluated = len(instance_metrics) - n_errors
 
         return {
-            "adherence": calculate_stats([m["adherence"] for m in valid_metrics]),
-            "adjusted_adherence": calculate_stats([m["adjusted_adherence"] for m in valid_metrics]),
-            "n_adherent": calculate_stats([m["n_adherent"] for m in valid_metrics]),
-            "n_evaluated": calculate_stats([m["n_evaluated"] for m in valid_metrics]),
-            "n_errors": calculate_stats([m["n_errors"] for m in valid_metrics]),
-            "n_failed_workers": n_failed,
+            "adherence": n_adherent / len(instance_metrics),
+            "adjusted_adherence": n_adherent / n_evaluated if n_evaluated > 0 else 0.0,
+            "n_evaluated": n_evaluated,
+            "n_errors": n_errors,
         }
 
     def evaluate(self, inputs: list[Any], metadata: dict[str, Any] = None) -> EvalResult:
@@ -190,18 +167,8 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             {
                 "evaluation_framework": "Behavior Adherence VLM-as-Judge",
                 "judge_model": self.model_config.model_name,
-                "num_behaviors": len(inputs),
+                "num_rollouts": len(inputs),
             }
         )
 
         return super().evaluate(inputs, metadata=metadata)
-
-
-def combine_reasoning(instance_metrics: list[dict[str, Any]]) -> str:
-    """Combine reasoning from all instance metrics into a single string."""
-    reasonings = []
-    for i, m in enumerate(instance_metrics):
-        reasoning = m.get("reasoning", "No reasoning provided.")
-        success = m.get("evaluation", False)
-        reasonings.append(f"> [{success}] Rollout #{i + 1}:\n{reasoning}\n")
-    return "Rollouts reasonings:\n" + "\n".join(reasonings)

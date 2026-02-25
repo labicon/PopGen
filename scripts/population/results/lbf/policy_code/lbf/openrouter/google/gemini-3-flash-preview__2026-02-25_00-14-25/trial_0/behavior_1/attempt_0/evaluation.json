@@ -1,0 +1,33 @@
+{
+  "instance_metrics": [
+    {
+      "evaluation": false,
+      "reasoning": "The agent remains completely stationary at position [5, 5] for the entire duration of the rollout. While it is positioned near its teammate, it does not demonstrate the active following or maneuvering behavior described. It fails to adjust its position as the teammate moves from [4, 6] to [5, 6].",
+      "feedback": "Actively track the teammate's movement and move to maintain a position adjacent to the teammate or the food they are approaching.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_1/attempt_0/rollouts/rollout_0/rollout_data.jsonl"
+    },
+    {
+      "evaluation": false,
+      "reasoning": "The agent reached a position near the food the teammate was approaching but then remained stationary at [3, 3] for the remainder of the rollout (steps 5 to 48). It did not maneuver to a cell adjacent to the food (which was at [2, 4]) to synchronize a load action.",
+      "feedback": "Move to a neighboring cell (up, down, left, or right) of the food being targeted by the teammate and perform the LOAD action simultaneously with them.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_1/attempt_0/rollouts/rollout_1/rollout_data.jsonl"
+    },
+    {
+      "evaluation": false,
+      "reasoning": "The agent did not fulfill the 'Dedicated Supporter' behavior. While it did follow the teammate (agent1) to food1 at position [6, 2], it failed to 'synchronize the load action'. From step 15 to step 50, both agents are positioned adjacent to a level 2 food, yet the ego agent remains idle and never executes the LOAD (5) action required for cooperative transport.",
+      "feedback": "When positioned adjacent to a food alongside a teammate, observe the teammate's state and execute the LOAD action simultaneously to complete the cooperative transport.",
+      "rollout_data_path": "/home/paul/GenAI4MARL/zeroshot_coordination/scripts/population/results/lbf/policy_code/lbf/openrouter/google/gemini-3-flash-preview__2026-02-25_00-14-25/trial_0/behavior_1/attempt_0/rollouts/rollout_2/rollout_data.jsonl"
+    }
+  ],
+  "overall_metrics": {
+    "adherence": 0.0,
+    "adjusted_adherence": 0.0,
+    "n_evaluated": 3,
+    "n_errors": 0
+  },
+  "metadata": {
+    "evaluation_framework": "Behavior Adherence VLM-as-Judge",
+    "judge_model": "openrouter/google/gemini-3-flash-preview",
+    "num_rollouts": 3
+  }
+}
