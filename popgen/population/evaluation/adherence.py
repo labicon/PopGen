@@ -12,6 +12,7 @@ from popgen.utils.logging import encode_images_to_base64, rollout_states_to_str,
 from popgen.utils.parsing import parse_llm_response
 
 from .base import BaseEvaluator, EvalResult
+from .base import BaseEvaluator, EvalResult
 
 # ---------------------------------- PROMPTS --------------------------------- #
 
@@ -25,10 +26,17 @@ You can use the rollout states to illustrate points.
 
 The visual description of the ego agent will be provided in the environment description.
 In the trajectory logs, the ego agent is named agent0.
+In the trajectory logs, the ego agent is named agent0.
 
 # Environment Description
 {environment_description}
 
+# Output Format
+Return a JSON object with the following fields:
+- "evaluation": boolean indicating whether the rollout showcases the behavior.
+- "reasoning": short and concise explanation justifying the evaluation.
+- "feedback": concise actionable instruction on what to change in the policy to better align with the behavior next time (focus on the *what*, not the *why*).
+"""
 # Output Format
 Return a JSON object with the following fields:
 - "evaluation": boolean indicating whether the rollout showcases the behavior.
@@ -48,8 +56,10 @@ class BehaviorAdherenceResult(BaseModel):
     evaluation: bool
     reasoning: str
     feedback: str
+    feedback: str
 
     def __str__(self) -> str:
+        return f"Evaluation: {self.evaluation}\nReasoning: {self.reasoning}\nFeedback: {self.feedback}"
         return f"Evaluation: {self.evaluation}\nReasoning: {self.reasoning}\nFeedback: {self.feedback}"
 
 
@@ -77,52 +87,41 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
         Returns:
             Dict with adherence evaluation and reasoning
         """
-        behavior = input_data["behavior"]
-        environment_description = input_data["environment_description"]
-        rollout_states = input_data["rollout_states"]
-        rollout_images = input_data.get("rollout_images", [None] * len(input_data["rollout_states"]))
-
-        if isinstance(rollout_states, str) and "[ERROR]" in rollout_states:
-            return {"adherence": 0.0, "reasoning": rollout_states, "feedback": "Fix the implementation."}
-
-        if rollout_images is None:
-            rollout_images = []
-        rollout_images = [img for img in rollout_images if img is not None]
-
-        # Only use 5 equally spaced images if there are more
-        if len(rollout_images) > 5:
-            rollout_images = uniform_sample(rollout_images, n_samples=5)
-        # Only use 20 equally spaced states if there are more
-        if len(rollout_states) > 20:
-            rollout_states = uniform_sample(rollout_states, n_samples=20)
-
-        system_prompt = BEHAVIOR_ADHERENCE_SYSTEM_PROMPT.format(
-            environment_description=environment_description,
-        )
-        user_prompt = BEHAVIOR_ADHERENCE_USER_PROMPT.format(
-            behavior=behavior,
-        )
-        content = [{"type": "text", "text": user_prompt}]
-
-        prefix = f"Rollout (showing {len(rollout_states)} sampled states and {len(rollout_images)} sampled images):"
-        separator = "-" * 60
-        content.append({"type": "text", "text": f"{prefix}\n{separator}"})
-
-        # Add all images
-        for encoded_string in encode_images_to_base64(rollout_images):
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{encoded_string}"},
-                }
-            )
-
-        # Add all states (flatten list of rollouts into list of states)
-        flat_states = [state for rollout in rollout_states for state in rollout]
-        content.append({"type": "text", "text": rollout_states_to_str(flat_states)})
-        content.append({"type": "text", "text": separator})
-
         try:
+            behavior = input_data["behavior"]
+            environment_description = input_data["environment_description"]
+            rollout_states = input_data["rollout_states"]
+            rollout_images = input_data.get("rollout_images", [None] * len(input_data["rollout_states"]))
+
+            # Error in rollout -> skip evaluation and return 0 adherence with error message as reasoning
+            if isinstance(rollout_states, str) and "[ERROR]" in rollout_states:
+                return {"adherence": 0.0, "reasoning": rollout_states, "feedback": "Fix the implementation."}
+
+            system_prompt = BEHAVIOR_ADHERENCE_SYSTEM_PROMPT.format(
+                environment_description=environment_description,
+            )
+            user_prompt = BEHAVIOR_ADHERENCE_USER_PROMPT.format(
+                behavior=behavior,
+            )
+            content = [{"type": "text", "text": user_prompt}]
+
+            prefix = f"Rollout (showing {len(rollout_states)} sampled states and {len(rollout_images)} sampled images):"
+            separator = "-" * 60
+            content.append({"type": "text", "text": f"{prefix}\n{separator}"})
+
+            # Add all images
+            for encoded_string in encode_images_to_base64(rollout_images):
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{encoded_string}"},
+                    }
+                )
+
+            # Add all states
+            content.append({"type": "text", "text": rollout_states_to_str(rollout_states)})
+            content.append({"type": "text", "text": separator})
+
             response = litellm.completion(
                 model=self.model_config.model_name,
                 messages=[
@@ -133,7 +132,17 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
                 **self.model_config.get_completion_kwargs(overrides=kwargs),
             )
             eval_result = parse_llm_response(response, BehaviorAdherenceResult)
+            eval_result = parse_llm_response(response, BehaviorAdherenceResult)
         except Exception as e:
+            eval_result = BehaviorAdherenceResult(evaluation=False, reasoning=f"[ERROR] Evaluation failed: {e}", feedback="")
+
+        result = eval_result.model_dump()
+        result["adherence"] = 1.0 if result["evaluation"] else 0.0
+        return {
+            "adherence": 1.0 if result["evaluation"] else 0.0,
+            "reasoning": result["reasoning"],
+            "feedback": result["feedback"],
+        }
             eval_result = BehaviorAdherenceResult(evaluation=False, reasoning=f"[ERROR] Evaluation failed: {e}", feedback="")
 
         result = eval_result.model_dump()
@@ -150,8 +159,16 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
         n_adherent = sum(r["adherence"] for r in instance_metrics)
         n_errors = sum(1 for r in instance_metrics if "[ERROR]" in r["reasoning"])
         n_evaluated = len(instance_metrics) - n_errors
+        # Aggregate results across rollouts
+        n_adherent = sum(r["adherence"] for r in instance_metrics)
+        n_errors = sum(1 for r in instance_metrics if "[ERROR]" in r["reasoning"])
+        n_evaluated = len(instance_metrics) - n_errors
 
         return {
+            "adherence": n_adherent / len(instance_metrics),
+            "adjusted_adherence": n_adherent / n_evaluated if n_evaluated > 0 else 0.0,
+            "n_evaluated": n_evaluated,
+            "n_errors": n_errors,
             "adherence": n_adherent / len(instance_metrics),
             "adjusted_adherence": n_adherent / n_evaluated if n_evaluated > 0 else 0.0,
             "n_evaluated": n_evaluated,
@@ -167,6 +184,7 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             {
                 "evaluation_framework": "Behavior Adherence VLM-as-Judge",
                 "judge_model": self.model_config.model_name,
+                "num_rollouts": len(inputs),
                 "num_rollouts": len(inputs),
             }
         )

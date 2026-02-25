@@ -26,12 +26,16 @@ Output format requirements:
 - Return a valid json object.
 - The json object must contain exactly these keys: "code" and "reasoning".
 - "code" must be a Python string containing only the policy implementation.
-- "reasoning" must be a concise explanation string.
+- "reasoning" must be the detailed explanation of how the policy was generated and why it is appropriate for the given behavior.
 - Do not wrap the json in markdown fences."""
 
 POLICY_GENERATION_PROMPT = """# Behavior description:
 {behavior}
 
+Provide the python code that describes the behavior as the `policy(obs)` function and your reasoning to arrive.
+Think step by step.
+
+Return your final answer as a single valid json object with keys "code" and "reasoning"."""
 Provide the python code that describes the behavior as the `policy(obs)` function and your reasoning to arrive.
 Think step by step.
 

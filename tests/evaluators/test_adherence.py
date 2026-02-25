@@ -73,6 +73,7 @@ class TestComputeInstanceMetric:
                 "behavior": behavior,
                 "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
+                "rollout_images": [],
             }
         )
 
@@ -89,6 +90,7 @@ class TestComputeInstanceMetric:
                 "behavior": behavior,
                 "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
+                "rollout_images": [],
             }
         )
 
@@ -104,6 +106,7 @@ class TestComputeInstanceMetric:
                 "behavior": behavior,
                 "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
+                "rollout_images": [],
             }
         )
 
@@ -126,6 +129,7 @@ class TestComputeInstanceMetric:
                 "behavior": behavior,
                 "environment_description": "Test environment",
                 "rollout_states": sample_rollout_states,
+                "rollout_images": [],
             }
         )
 

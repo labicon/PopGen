@@ -5,23 +5,33 @@ from popgen.utils.parsing import clean_code, parse_llm_response
 
 # ---------------------------------- PROMPTS --------------------------------- #
 
-SYSTEM_PROMPT = """You are an expert AI agent specializing in designing reward functions for reinforcement learning.
+SYSTEM_PROMPT = """You are an expert AI agent specializing in designing reward functions for reinforcement learning in multi-agent coordination tasks.
 
 Your task is to generate a reward function for an ego agent that incentivizes the given behavior.
-The function must be named `compute_reward(self, agent)` and return a reward for the given agent.
-The reward should be a torch tensor of shape (batch_dim,) that compute the reward for each element of the batch.
-Environment attributes will be described in the environment description or example reward function.
 
-# Environment description:
+Some important details to consider:
+- The reward function must be named `compute_reward(self, agent)` and return a reward for the given agent.
+- The reward must be a torch tensor of shape (batch_dim,) computing the reward for each element of the batch.
+- `torch` is already imported. Do not include any other imports.
+- Environment attributes are accessible via `self` and `agent` as described in the environment description or example reward functions.
+
+Environment description:
 {environment_description}
 
-Please provide the python code for the function `compute_reward`, as well as a reasoning.
-Torch is already imported. Do not include any other imports."""
+Output format requirements:
+- Return a valid json object.
+- The json object must contain exactly these keys: "code" and "reasoning".
+- "code" must be a Python string containing only the reward function implementation.
+- "reasoning" must be a detailed explanation of how the reward was designed and why it incentivizes the desired behavior.
+- Do not wrap the json in markdown fences."""
 
-REWARD_GENERATION_PROMPT = """Behavior description:
+REWARD_GENERATION_PROMPT = """# Behavior description:
 {behavior}
 
-Provide the reward function to train an agent with desired behavior as the `compute_reward(self, agent)` function, and a concise reasoning on the implementation."""
+Provide the python code that implements the reward as the `compute_reward(self, agent)` function and your reasoning.
+Think step by step.
+
+Return your final answer as a single valid json object with keys "code" and "reasoning"."""
 
 # ---------------------------------------------------------------------------- #
 
