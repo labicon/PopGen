@@ -3,5 +3,5 @@ type: rl_reward
 # Model used for reward generation
 model_name: openrouter/google/gemini-3-flash-preview
 
-# RL training settings
-training_attempts: 3
+# Retry generation/training+rollout failures inside each alignment attempt.
+n_generation_retries: 5

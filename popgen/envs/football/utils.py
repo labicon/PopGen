@@ -1,7 +1,7 @@
 from pathlib import Path
 
-import yaml
 import torch
+import yaml
 from benchmarl.environments import VmasTask
 from pydantic import BaseModel, Field
 from vmas.scenarios import football as football_scenario
@@ -23,7 +23,9 @@ Each team consists of 2 agents.
 The agents can move around the field and kick the ball by applying forces to it.
 The agents must coordinate with their teammate to score goals and defend against the opponent team.
 
-Note that the ego team is located in the left side of the football field, wearing blue jerseys, and the opponent team is located in the right side of the football field, wearing red jerseys. The ego agent is represented as the blue football player with the tag #1.
+Note that the ego team is located in the left side of the football field, wearing blue jerseys,
+and the opponent team is located in the right side of the football field, wearing red jerseys.
+The ego agent is represented as the blue football player with the tag #1.
 
 > **Observation Space**:
 Each agent observes a flattened vector describing its interaction with the ball, goal, teammate, and adversaries. All vectors are typically 2D `(x, y)`.
@@ -50,6 +52,19 @@ The action is represented as a tuple (fx, fy) where:
 - `fy`: Vertical force component, where -1 means full force downwards and 1 means full force upwards.
 Note that you can only move the agent, and therefore do not have direct access to kick the ball. You should move towards the ball and apply force to it in order to kick the ball towards the goal."""
 
+REWARD_API_REFERENCE = """Reward function API (authoritative):
+- Signature: `compute_reward(self, agent)`.
+- In football training, `self` is the VMAS football scenario (`Scenario`) and `agent` is one VMAS agent.
+- Accessible state:
+  - `self.world`: world object.
+  - `self.world.batch_dim`: number of parallel environments.
+  - `self.world.blue_agents`, `self.world.red_agents`: team agent lists.
+  - `self.world.ball`: ball entity.
+  - For any entity `e`: `e.state.pos` and `e.state.vel` are tensors of shape `(batch_dim, 2)`.
+  - Typical scenario attributes used in default reward: `self.pitch_length`, `self.goal_size`, `self.ball_size`, `self.scoring_reward`.
+- Return value:
+  - Return a torch tensor of shape `(batch_dim,)` on the same device as world tensors."""
+
 REWARD_EXAMPLE = """Simple reward function example for the football environment:
 
 ```python
@@ -60,7 +75,7 @@ def reward_fn(self, agent: Agent):
     # You are designing reward for 'agent' in 'world'
     # You can access to list of blue team agents and red team agents via self.world.blue_agents and self.world.red_agents
     # You can also access the ball state via self.world.ball.
-    
+
     blue_team = self.world.blue_agents # List of blue team agents
     red_team = self.world.red_agents # List of red team agents
     ball = self.world.ball

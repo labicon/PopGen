@@ -1,9 +1,20 @@
 # PopGen
 
-## Quick Start
+PopGen generates and evaluates behavior-conditioned agents for multi-agent environments.
 
-### Install
-> We recommand using [`uv`](https://docs.astral.sh/uv/). In which case you can skip this and simply run `uv sync`
+Current active pipeline is single-behavior, per-run generation/evaluation under:
+- `scripts/population/` (general harness)
+- `experiments/b2t/` (experiment harness)
+
+## Setup
+
+Recommended:
+
+```bash
+uv sync
+```
+
+Alternative editable install:
 
 ```bash
 pip install -e .
@@ -11,9 +22,49 @@ pip install -e deps/VectorizedMultiAgentSimulator
 pip install -e deps/BenchMARL
 ```
 
-### Setup API Keys
-Create a `.env` file at root with your API keys. You can copy the `.env.example`.
+Add provider keys in `.env` at repo root (copy from `.env.example` if present).
 
-## Examples
-- **Diverse Teammate Generation (Policy Code)**: `scripts/behavior_policy`
-- **Diverse Teammate Generation (Reward Function)**: `scripts/reward_generation`
+## Main Workflows
+
+### Population harness
+
+```bash
+cd scripts/population
+./run_pipeline.sh env=lbf generation=policy_code
+```
+
+Key scripts:
+- `generate_behaviors.py`
+- `generate_agents.py`
+- `gather_results.py`
+
+### B2T harness
+
+```bash
+cd experiments/b2t
+bash run.sh --env lbf --output-dir ./results
+```
+
+## Output Layout (Current)
+
+Both harnesses produce per-experiment outputs with:
+
+```text
+<result_path>/
+  agents/
+    behavior_<i>/
+      <run_timestamp>/
+        attempt_<j>/...
+  metadata/
+    <timestamp>/
+      behaviors.json
+      summary.json
+```
+
+`gather_results.py` supports this layout and legacy layouts.
+
+## Documentation
+
+- Environment integration: `docs/add_env.md`
+- LLM configuration/usage: `docs/llm_usage.md`
+- Diversity discriminator evaluator: `docs/evaluators/diversity_discriminator.md`

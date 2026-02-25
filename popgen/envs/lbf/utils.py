@@ -4,12 +4,12 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
-import yaml
 
 # Ensure lbforaging is registered
 import lbforaging  # noqa: F401
 import numpy as np
 import torch
+import yaml
 from benchmarl.environments.lbf.common import LbfTask
 from pydantic import BaseModel, Field
 
@@ -59,6 +59,18 @@ The action space is discrete with the following mapping:
 5: LOAD
 
 For example to move NORTH, you would return 1."""
+
+REWARD_API_REFERENCE = """Reward function API (authoritative):
+- Signature: `compute_reward(self, agent)`.
+- In LBF training, `self` is the underlying `ForagingEnv` instance (not the VMAS scenario).
+- `agent` is one player object from `self.players` corresponding to the currently evaluated agent.
+- Accessible state:
+  - `self.players`: list of all players.
+  - `self.field`: 2D numpy array grid. Cells with value > 0 are foods, and the value is food level.
+  - For each player `p` in `self.players`: `p.position`, `p.level`, `p.reward`, `p.score`.
+  - Current agent is `agent` (same attributes as above).
+- Return value:
+  - Return a scalar reward for this single agent at the current step (Python `float` recommended; scalar torch is also accepted)."""
 
 REWARD_EXAMPLE = """
 Behavior: agent stays close to food
@@ -343,4 +355,3 @@ def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **k
         seed=seed,
         device=device,
     )()
-

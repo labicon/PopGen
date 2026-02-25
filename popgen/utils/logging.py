@@ -6,6 +6,36 @@ import numpy as np
 from PIL import Image
 
 
+def write_json(path: str, payload: dict[str, Any]) -> None:
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _extract_generated_code(generated_item: Any) -> str:
+    return generated_item.code if hasattr(generated_item, "code") else ""
+
+
+def write_code_file(file_path: str, generated_item: Any) -> None:
+    with open(file_path, "w") as f:
+        if isinstance(generated_item, Exception):
+            f.write(f"# Generation error: {generated_item}\n")
+        else:
+            f.write(_extract_generated_code(generated_item))
+
+
+def write_model_output_record(output_dir: str, generated_item: Any, extra_record: dict[str, Any] | None = None) -> None:
+    record = {"output_dir": output_dir}
+    if extra_record:
+        record.update(extra_record)
+    elif generated_item is None:
+        record.update({})
+    else:
+        record.update(generated_item.model_dump() if not isinstance(generated_item, Exception) else {"error": str(generated_item)})
+
+    with open(os.path.join(output_dir, "model_outputs.jsonl"), "w") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 def _save_rollout_gif(images, save_path, filename="rollout.gif"):
     # Save images as GIF
     frames = []

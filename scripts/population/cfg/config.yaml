@@ -4,7 +4,7 @@ defaults:
   - _self_
 
 # Optional: pass a path to a pre-generated behaviors JSON to skip behavior generation
-behavior_path: ./behaviors/${env}.json
+behavior_path: ./data/behaviors/${env}.json
 
 # Environment
 env: lbf
@@ -18,16 +18,16 @@ evaluation:
 
 n_behaviors: 1
 n_workers: 9
-num_trials: 1
+n_trials: 1
 seed: 0
 
 # Output
-output_dir: ./results/${env}/${generation.type}/${behavior_source:${behavior_path},${behavior._target_}}
-run_name: ${generation.model_name}__${now:%Y-%m-%d_%H-%M-%S}
+output_dir: ./results/${env}/${generation.type}/${basename:${generation.model_name}}
+run_name: ${generation.model_name}
 
 hydra:
   run:
-    dir: ${output_dir}/${run_name}
+    dir: ${output_dir}
   sweep:
-    dir: ${output_dir}/${run_name}
+    dir: ${output_dir}
     subdir: ${hydra.job.num}

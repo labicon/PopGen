@@ -1,130 +1,79 @@
-# Population Scripts
+# Population Harness
 
-This folder contains:
-- `main.py`: run behavior generation + policy/reward/agent generation + evaluation.
-- `gather_results.py`: aggregate run outputs into one CSV.
+This directory contains the current single-behavior generation/evaluation harness.
 
-## Prerequisites
+## Scripts
 
-- Run from repo root: `zeroshot_coordination/`
-- Install project dependencies.
-- Set required API keys in `.env` (loaded by `main.py` via `python-dotenv`).
+- `generate_behaviors.py`: generate behavior descriptions into `data/behaviors/`
+- `generate_agents.py`: run agent generation/evaluation for a behavior file
+- `gather_results.py`: aggregate one or more result directories into CSV
+- `run_pipeline.sh`: convenience wrapper for all three steps
 
-## Run `main.py`
-
-Default run:
+## Quick Start
 
 ```bash
-python scripts/population/main.py
+cd scripts/population
+./run_pipeline.sh env=lbf generation=policy_code
 ```
 
-This uses config from `scripts/population/cfg/config.yaml`:
-- `generation=policy_code`
-- `behavior=verbalized_sampling`
-- `env=lbf`
+## Step-by-Step
 
-### Common overrides
-
-Switch generation type:
+1. Generate behaviors:
 
 ```bash
-python scripts/population/main.py generation=llm_agent
-python scripts/population/main.py generation=rl_reward
+python generate_behaviors.py env=lbf n_behaviors=5
 ```
 
-Switch behavior strategy:
+2. Generate/evaluate agents:
 
 ```bash
-python scripts/population/main.py behavior=in_context
-python scripts/population/main.py behavior=stratified
-python scripts/population/main.py behavior=verbalized_sampling_multiturn
+python generate_agents.py \
+  behavior_path=./data/behaviors/lbf.json \
+  env=lbf \
+  generation=policy_code
 ```
 
-Set env, seeds, and scale:
+3. Gather results:
 
 ```bash
-python scripts/population/main.py env=football n_behaviors=10 n_workers=10 seed=42
+python gather_results.py \
+  ./results/lbf/policy_code/gemini-3-flash-preview \
+  -o ./results/lbf/policy_code/gemini-3-flash-preview/results.csv
 ```
 
-Set a custom run name:
+## Parallelism
 
-```bash
-python scripts/population/main.py run_name=my_run
-```
+- `n_workers`: number of jobs launched in parallel (outer level)
+- `pipeline_workers`: workers used inside each run for rollout/eval internals (inner level, defaults to `1`)
 
-Run multiple trials:
+Effective load is roughly multiplicative (`n_workers * pipeline_workers`).
 
-```bash
-python scripts/population/main.py num_trials=3
-```
+## Defaults
 
-Reuse pre-generated behaviors:
+See `cfg/config.yaml` for current defaults:
+- `n_trials`
+- `n_workers`
+- `evaluation.n_eval_rollouts`
+- `evaluation.max_alignment_retries`
 
-```bash
-python scripts/population/main.py behavior_path=/path/to/behaviors.json
-```
+Generation-specific defaults live under `cfg/generation/*.yaml`.
 
-### Output layout
-
-Results are written under:
+## Output Layout
 
 ```text
-results/<env>/<generation.type>/<behavior_source>/<run_name>/
+<output_dir>/
+  agents/
+    behavior_<i>/
+      <run_timestamp>/
+        attempt_<j>/
+          evaluation.json
+          latency.json
+          model_outputs.jsonl
+          rollouts/...
+  metadata/
+    <timestamp>/
+      behaviors.json
+      summary.json
 ```
 
-`results/` is relative to the directory where you launch the command.
-
-Inside each run:
-
-```text
-.hydra/config.yaml
-behaviors.json
-trial_<k>/behavior_<i>/attempt_<j>/...   # when num_trials > 1
-behavior_<i>/attempt_<j>/...             # when num_trials == 1
-```
-
-Attempt folders contain:
-- `evaluation.json`
-- `latency.json`
-- `model_outputs.jsonl`
-
-## Run `gather_results.py`
-
-Aggregate one or more experiment folders into one CSV.
-
-```bash
-python scripts/population/gather_results.py \
-  scripts/population/results/lbf/policy_code/VerbalizedSamplingStrategy \
-  -o /tmp/gathered_results.csv
-```
-
-Multiple experiment folders:
-
-```bash
-python scripts/population/gather_results.py \
-  scripts/population/results/lbf/policy_code/VerbalizedSamplingStrategy \
-  scripts/population/results/lbf/llm_agent/VerbalizedSamplingStrategy \
-  -o /tmp/gathered_results.csv
-```
-
-### CSV columns
-
-- `experiment_id`
-- `run_id`
-- `env`
-- `seed`
-- `generation_type`
-- `generation_model`
-- `trial_id`
-- `behavior_id`
-- `attempt_id`
-- `rollout_idx`
-- `success`
-- `generation_tokens`
-- `generation_latency`
-- `rollout_latency`
-
-### Notes
-
-- `generation_tokens` is computed from `model_outputs.jsonl` using `tiktoken` (`o200k_base`).
-- For `generation_type=llm_agent`, token counts align rollouts with the last entries in `model_outputs.jsonl`.
+`gather_results.py` supports this layout and the legacy layout.

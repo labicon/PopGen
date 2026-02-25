@@ -4,12 +4,23 @@
 Usage:
     python gather_results.py results/lbf/policy_code/VerbalizedSamplingStrategy [dir2 ...] -o results.csv
 
-Each input directory is treated as one experiment. Inside it the expected
-layout is:
+Each input directory is treated as one experiment.
+
+Supported layouts:
+1) New layout:
+    <experiment_dir>/
+        agents/
+            behavior_<i>/<run_timestamp>/attempt_<j>/
+                evaluation.json  latency.json  model_outputs.jsonl
+        metadata/
+            <metadata_timestamp>/behaviors.json
+            <metadata_timestamp>/summary.json
+
+2) Legacy layout:
     <experiment_dir>/<run_id>/                      # .hydra/config.yaml lives here
-        behavior_<i>/attempt_<j>/                   # when num_trials == 1
+        behavior_<i>/attempt_<j>/                   # when n_trials == 1
             evaluation.json  latency.json  model_outputs.jsonl
-        trial_<k>/behavior_<i>/attempt_<j>/FILES    # when num_trials > 1
+        trial_<k>/behavior_<i>/attempt_<j>/FILES    # when n_trials > 1
 """
 
 import argparse
@@ -66,6 +77,35 @@ def _sorted_dirs(parent: Path, prefix: str) -> list[Path]:
         [d for d in parent.iterdir() if d.is_dir() and d.name.startswith(prefix)],
         key=lambda d: _parse_idx(d.name),
     )
+
+
+def _is_new_layout(experiment_dir: Path) -> bool:
+    return (experiment_dir / "agents").is_dir() and (experiment_dir / "metadata").is_dir()
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    with open(path) as f:
+        return json.load(f)
+
+
+def _metric_success(metric: dict[str, Any]) -> bool:
+    """Normalize success for different evaluator schemas."""
+    if "evaluation" in metric:
+        return bool(metric.get("evaluation", False))
+    adherence = metric.get("adherence")
+    return bool(adherence is not None and float(adherence) >= 1.0)
+
+
+def _normalize_generation_latency(value: Any) -> float | None:
+    """Normalize generation latency to a scalar for CSV."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, dict):
+        numeric_values = [float(v) for v in value.values() if isinstance(v, (int, float))]
+        return sum(numeric_values) if numeric_values else None
+    return None
 
 
 def _collect_text_fields(obj: Any) -> str:
@@ -130,21 +170,124 @@ def _read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
-def gather_experiment(experiment_dir: Path) -> list[dict]:
+def _collect_attempt_rows(
+    *,
+    experiment_id: str,
+    run_id: str,
+    env: str,
+    seed: int,
+    generation_type: str,
+    generation_model: str,
+    trial_id: int,
+    behavior_id: int,
+    run_output_dir: Path,
+) -> list[dict]:
+    rows = []
+    for attempt_dir in _sorted_dirs(run_output_dir, "attempt_"):
+        attempt_id = _parse_idx(attempt_dir.name)
+
+        eval_path = attempt_dir / "evaluation.json"
+        if not eval_path.exists():
+            continue
+        eval_data = _load_json(eval_path)
+        instance_metrics = eval_data.get("instance_metrics", [])
+
+        latency_path = attempt_dir / "latency.json"
+        latency_data: dict = _load_json(latency_path) if latency_path.exists() else {}
+        generation_latency = _normalize_generation_latency(latency_data.get("generation"))
+        rollout_latencies = latency_data.get("rollout", [])
+
+        model_outputs = _read_jsonl(attempt_dir / "model_outputs.jsonl")
+
+        for rollout_idx, metric in enumerate(instance_metrics):
+            rollout_latency = rollout_latencies[rollout_idx] if rollout_idx < len(rollout_latencies) else None
+            gen_tokens = _generation_tokens(
+                model_outputs=model_outputs,
+                rollout_idx=rollout_idx,
+                generation_type=generation_type,
+                n_rollouts=len(instance_metrics),
+            )
+            rows.append(
+                {
+                    "experiment_id": experiment_id,
+                    "run_id": run_id,
+                    "env": env,
+                    "seed": seed,
+                    "generation_type": generation_type,
+                    "generation_model": generation_model,
+                    "trial_id": trial_id,
+                    "behavior_id": behavior_id,
+                    "attempt_id": attempt_id,
+                    "rollout_idx": rollout_idx,
+                    "success": _metric_success(metric),
+                    "generation_tokens": gen_tokens,
+                    "generation_latency": generation_latency,
+                    "rollout_latency": rollout_latency,
+                }
+            )
+    return rows
+
+
+def _gather_experiment_new_layout(experiment_dir: Path) -> list[dict]:
     experiment_id = experiment_dir.name
     rows = []
 
-    run_dirs = sorted(
-        [d for d in experiment_dir.iterdir() if d.is_dir() and not d.name.startswith(".")],
-        key=lambda d: d.name,
-    )
+    metadata_root = experiment_dir / "metadata"
+    metadata_runs = sorted([d for d in metadata_root.iterdir() if d.is_dir()], key=lambda d: d.name)
+    for metadata_dir in metadata_runs:
+        summary_path = metadata_dir / "summary.json"
+        if not summary_path.exists():
+            continue
+        summary_data = _load_json(summary_path)
 
+        env = summary_data.get("env", "")
+        generation_type = summary_data.get("generation_type", "")
+        generation_model = summary_data.get("generation_model", experiment_dir.name)
+        run_group_id = metadata_dir.name
+
+        for run in summary_data.get("runs", []):
+            behavior_id = int(run.get("behavior_idx", 0))
+            trial_id = int(run.get("trial_idx", 0))
+            run_timestamp = run.get("run_timestamp", "")
+
+            run_output_dir = Path(run.get("output_dir", ""))
+            if not run_output_dir.exists():
+                run_output_dir = experiment_dir / "agents" / f"behavior_{behavior_id}" / run_timestamp
+            if not run_output_dir.exists():
+                continue
+
+            run_meta_path = run_output_dir / "run_metadata.json"
+            run_meta = _load_json(run_meta_path) if run_meta_path.exists() else {}
+
+            seed = int(run.get("seed", run_meta.get("seed", 0)))
+            run_generation_type = run.get("generation_type", run_meta.get("generation_type", generation_type))
+            rows.extend(
+                _collect_attempt_rows(
+                    experiment_id=experiment_id,
+                    run_id=run_group_id,
+                    env=env,
+                    seed=seed,
+                    generation_type=run_generation_type,
+                    generation_model=generation_model,
+                    trial_id=trial_id,
+                    behavior_id=behavior_id,
+                    run_output_dir=run_output_dir,
+                )
+            )
+    return rows
+
+
+def _gather_experiment_legacy_layout(experiment_dir: Path) -> list[dict]:
+    experiment_id = experiment_dir.name
+    rows = []
+
+    run_dirs = sorted([d for d in experiment_dir.iterdir() if d.is_dir() and not d.name.startswith(".")], key=lambda d: d.name)
     for run_dir in run_dirs:
         run_id = run_dir.name
-
         hydra_cfg_path = run_dir / ".hydra" / "config.yaml"
         if not hydra_cfg_path.exists():
             continue
+
         with open(hydra_cfg_path) as f:
             hydra_cfg = yaml.safe_load(f)
 
@@ -154,69 +297,32 @@ def gather_experiment(experiment_dir: Path) -> list[dict]:
         generation_type = generation_cfg.get("type", "")
         generation_model = generation_cfg.get("model_name", "")
 
-        # Detect whether run uses trial subdirs or puts behaviors directly at run level
         trial_dirs = _sorted_dirs(run_dir, "trial_")
-        if trial_dirs:
-            trials = [(d, _parse_idx(d.name)) for d in trial_dirs]
-        else:
-            # num_trials == 1: behaviors live directly under run_dir; treat as trial 0
-            trials = [(run_dir, 0)]
+        trials = [(d, _parse_idx(d.name)) for d in trial_dirs] if trial_dirs else [(run_dir, 0)]
 
         for trial_dir, trial_id in trials:
             for behavior_dir in _sorted_dirs(trial_dir, "behavior_"):
                 behavior_id = _parse_idx(behavior_dir.name)
-
-                for attempt_dir in _sorted_dirs(behavior_dir, "attempt_"):
-                    attempt_id = _parse_idx(attempt_dir.name)
-
-                    eval_path = attempt_dir / "evaluation.json"
-                    if not eval_path.exists():
-                        continue
-                    with open(eval_path) as f:
-                        eval_data = json.load(f)
-                    instance_metrics = eval_data.get("instance_metrics", [])
-
-                    latency_path = attempt_dir / "latency.json"
-                    latency_data: dict = {}
-                    if latency_path.exists():
-                        with open(latency_path) as f:
-                            latency_data = json.load(f)
-                    generation_latency = latency_data.get("generation", None)
-                    rollout_latencies = latency_data.get("rollout", [])
-
-                    model_outputs = _read_jsonl(attempt_dir / "model_outputs.jsonl")
-
-                    for rollout_idx, metric in enumerate(instance_metrics):
-                        rollout_latency = (
-                            rollout_latencies[rollout_idx]
-                            if rollout_idx < len(rollout_latencies)
-                            else None
-                        )
-                        gen_tokens = _generation_tokens(
-                            model_outputs=model_outputs,
-                            rollout_idx=rollout_idx,
-                            generation_type=generation_type,
-                            n_rollouts=len(instance_metrics),
-                        )
-
-                        rows.append({
-                            "experiment_id": experiment_id,
-                            "run_id": run_id,
-                            "env": env,
-                            "seed": seed,
-                            "generation_type": generation_type,
-                            "generation_model": generation_model,
-                            "trial_id": trial_id,
-                            "behavior_id": behavior_id,
-                            "attempt_id": attempt_id,
-                            "rollout_idx": rollout_idx,
-                            "success": metric.get("evaluation", False),
-                            "generation_tokens": gen_tokens,
-                            "generation_latency": generation_latency,
-                            "rollout_latency": rollout_latency,
-                        })
-
+                rows.extend(
+                    _collect_attempt_rows(
+                        experiment_id=experiment_id,
+                        run_id=run_id,
+                        env=env,
+                        seed=seed,
+                        generation_type=generation_type,
+                        generation_model=generation_model,
+                        trial_id=trial_id,
+                        behavior_id=behavior_id,
+                        run_output_dir=behavior_dir,
+                    )
+                )
     return rows
+
+
+def gather_experiment(experiment_dir: Path) -> list[dict]:
+    if _is_new_layout(experiment_dir):
+        return _gather_experiment_new_layout(experiment_dir)
+    return _gather_experiment_legacy_layout(experiment_dir)
 
 
 def main():

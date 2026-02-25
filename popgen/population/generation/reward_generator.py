@@ -11,12 +11,15 @@ Your task is to generate a reward function for an ego agent that incentivizes th
 
 Some important details to consider:
 - The reward function must be named `compute_reward(self, agent)` and return a reward for the given agent.
-- The reward must be a torch tensor of shape (batch_dim,) computing the reward for each element of the batch.
+- The exact return type/shape must follow the reward API reference below.
 - `torch` is already imported. Do not include any other imports.
 - Environment attributes are accessible via `self` and `agent` as described in the environment description or example reward functions.
 
 Environment description:
 {environment_description}
+
+Reward API reference:
+{reward_api_reference}
 
 Output format requirements:
 - Return a valid json object.
@@ -46,6 +49,7 @@ class RewardFnGenerator(GeneratorWithFeedback):
         self,
         behavior: str,
         environment_description: str,
+        reward_api_reference: str | None = None,
         examples: list | None = None,
         feedbacks: list | None = None,
         **kwargs,
@@ -56,12 +60,16 @@ class RewardFnGenerator(GeneratorWithFeedback):
         Args:
             behavior: The behavior the reward should incentivize.
             environment_description: Description of the environment.
+            reward_api_reference: Explicit reference of accessible runtime attributes/methods.
             examples: Example reward functions to guide generation.
             feedbacks: Optional feedbacks to refine generation.
         Returns:
             Reward containing the generated code and optional reasoning.
         """
-        system_prompt = SYSTEM_PROMPT.format(environment_description=environment_description)
+        system_prompt = SYSTEM_PROMPT.format(
+            environment_description=environment_description,
+            reward_api_reference=reward_api_reference or "Not provided.",
+        )
         user_prompt = REWARD_GENERATION_PROMPT.format(behavior=behavior)
 
         response = super().generate(

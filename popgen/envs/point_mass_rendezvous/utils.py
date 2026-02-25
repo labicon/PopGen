@@ -1,11 +1,11 @@
 from pathlib import Path
-import yaml
 
 import torch
+import yaml
 from benchmarl.environments import VmasTask
 from pydantic import BaseModel, Field
-from vmas.scenarios import point_mass_rendezvous as point_mass_rendezvous_scenario
 from vmas import make_env
+from vmas.scenarios import point_mass_rendezvous as point_mass_rendezvous_scenario
 
 from popgen.agents.utils import extract_observation_and_action_key, format_action_output
 from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
@@ -37,6 +37,19 @@ The agents can apply a force in the horizontal and vertical directions to move a
 The action is represented as a tuple (fx, fy) where:
 - `fx`: Horizontal force component, where -1 means full force to the left and 1 means full force to the right.
 - `fy`: Vertical force component, where -1 means full force downwards and 1 means full force upwards."""
+
+REWARD_API_REFERENCE = """Reward function API (authoritative):
+- Signature: `compute_reward(self, agent)`.
+- In point-mass-rendezvous training, `self` is the VMAS scenario and `agent` is one VMAS agent.
+- Accessible state:
+  - `self.world`: world object.
+  - `self.world.batch_dim`: number of parallel environments.
+  - `self.world.agents`: list of agents.
+  - `self.world.landmarks`: list of landmarks.
+  - For agents/landmarks `e`: `e.state.pos` and (for agents) `e.state.vel` are tensors with leading dim `batch_dim`.
+  - Radii are available via `e.shape.radius`.
+- Return value:
+  - Return a torch tensor of shape `(batch_dim,)` on the world device."""
 
 REWARD_EXAMPLE = """Simple sparse reward: +1 if both agents are on the same landmark at the same time step, otherwise 0.
 

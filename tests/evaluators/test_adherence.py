@@ -58,11 +58,11 @@ class TestComputeInstanceMetric:
 
     @pytest.fixture
     def sample_rollout_states(self):
-        return [[{"position": [0, 0], "velocity": [1, 0]}, {"position": [1, 0], "velocity": [1, 0]}]]
+        return [{"position": [0, 0], "velocity": [1, 0]}, {"position": [1, 0], "velocity": [1, 0]}]
 
     @pytest.fixture
     def sample_rollout_images(self):
-        return [[np.zeros((64, 64, 3), dtype=np.uint8)]]
+        return [np.zeros((64, 64, 3), dtype=np.uint8)]
 
     def test_compute_instance_metric_with_behavior_object(self, mock_completion, evaluator, sample_rollout_states):
         mock_completion.return_value = _mock_evaluation_response(True, "Followed correctly")
@@ -171,11 +171,11 @@ class TestComputeInstanceMetricWithImages:
 
     @pytest.fixture
     def sample_rollout_states(self):
-        return [[{"position": [0, 0]}, {"position": [1, 0]}]]
+        return [{"position": [0, 0]}, {"position": [1, 0]}]
 
     @pytest.fixture
     def sample_rollout_images(self):
-        return [[np.zeros((64, 64, 3), dtype=np.uint8)]]
+        return [np.zeros((64, 64, 3), dtype=np.uint8)]
 
     def test_compute_with_images_success(self, mock_completion, mock_encode_images, evaluator, sample_rollout_states, sample_rollout_images):
         mock_completion.return_value = _mock_evaluation_response(True, "Visual confirms behavior")
