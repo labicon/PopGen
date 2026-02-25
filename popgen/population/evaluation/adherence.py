@@ -12,7 +12,6 @@ from popgen.utils.logging import encode_images_to_base64, rollout_states_to_str,
 from popgen.utils.parsing import parse_llm_response
 
 from .base import BaseEvaluator, EvalResult
-from .base import BaseEvaluator, EvalResult
 
 # ---------------------------------- PROMPTS --------------------------------- #
 
@@ -26,17 +25,10 @@ You can use the rollout states to illustrate points.
 
 The visual description of the ego agent will be provided in the environment description.
 In the trajectory logs, the ego agent is named agent0.
-In the trajectory logs, the ego agent is named agent0.
 
 # Environment Description
 {environment_description}
 
-# Output Format
-Return a JSON object with the following fields:
-- "evaluation": boolean indicating whether the rollout showcases the behavior.
-- "reasoning": short and concise explanation justifying the evaluation.
-- "feedback": concise actionable instruction on what to change in the policy to better align with the behavior next time (focus on the *what*, not the *why*).
-"""
 # Output Format
 Return a JSON object with the following fields:
 - "evaluation": boolean indicating whether the rollout showcases the behavior.
@@ -56,10 +48,8 @@ class BehaviorAdherenceResult(BaseModel):
     evaluation: bool
     reasoning: str
     feedback: str
-    feedback: str
 
     def __str__(self) -> str:
-        return f"Evaluation: {self.evaluation}\nReasoning: {self.reasoning}\nFeedback: {self.feedback}"
         return f"Evaluation: {self.evaluation}\nReasoning: {self.reasoning}\nFeedback: {self.feedback}"
 
 
@@ -132,21 +122,10 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
                 **self.model_config.get_completion_kwargs(overrides=kwargs),
             )
             eval_result = parse_llm_response(response, BehaviorAdherenceResult)
-            eval_result = parse_llm_response(response, BehaviorAdherenceResult)
         except Exception as e:
             eval_result = BehaviorAdherenceResult(evaluation=False, reasoning=f"[ERROR] Evaluation failed: {e}", feedback="")
 
         result = eval_result.model_dump()
-        result["adherence"] = 1.0 if result["evaluation"] else 0.0
-        return {
-            "adherence": 1.0 if result["evaluation"] else 0.0,
-            "reasoning": result["reasoning"],
-            "feedback": result["feedback"],
-        }
-            eval_result = BehaviorAdherenceResult(evaluation=False, reasoning=f"[ERROR] Evaluation failed: {e}", feedback="")
-
-        result = eval_result.model_dump()
-        result["adherence"] = 1.0 if result["evaluation"] else 0.0
         return {
             "adherence": 1.0 if result["evaluation"] else 0.0,
             "reasoning": result["reasoning"],
@@ -155,20 +134,11 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
 
     def aggregate_metrics(self, instance_metrics: list[dict[str, Any]], **kwargs) -> dict[str, Any]:
         """Aggregate instance-level metrics into overall metrics."""
-        # Aggregate results across rollouts
-        n_adherent = sum(r["adherence"] for r in instance_metrics)
-        n_errors = sum(1 for r in instance_metrics if "[ERROR]" in r["reasoning"])
-        n_evaluated = len(instance_metrics) - n_errors
-        # Aggregate results across rollouts
         n_adherent = sum(r["adherence"] for r in instance_metrics)
         n_errors = sum(1 for r in instance_metrics if "[ERROR]" in r["reasoning"])
         n_evaluated = len(instance_metrics) - n_errors
 
         return {
-            "adherence": n_adherent / len(instance_metrics),
-            "adjusted_adherence": n_adherent / n_evaluated if n_evaluated > 0 else 0.0,
-            "n_evaluated": n_evaluated,
-            "n_errors": n_errors,
             "adherence": n_adherent / len(instance_metrics),
             "adjusted_adherence": n_adherent / n_evaluated if n_evaluated > 0 else 0.0,
             "n_evaluated": n_evaluated,
@@ -184,7 +154,6 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             {
                 "evaluation_framework": "Behavior Adherence VLM-as-Judge",
                 "judge_model": self.model_config.model_name,
-                "num_rollouts": len(inputs),
                 "num_rollouts": len(inputs),
             }
         )

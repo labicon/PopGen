@@ -36,10 +36,6 @@ Provide the python code that describes the behavior as the `policy(obs)` functio
 Think step by step.
 
 Return your final answer as a single valid json object with keys "code" and "reasoning"."""
-Provide the python code that describes the behavior as the `policy(obs)` function and your reasoning to arrive.
-Think step by step.
-
-Return your final answer as a single valid json object with keys "code" and "reasoning"."""
 
 # ---------------------------------------------------------------------------- #
 
