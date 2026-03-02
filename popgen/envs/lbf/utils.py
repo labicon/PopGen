@@ -41,13 +41,23 @@ Any food or agent cannot be on the same cell as another food or agent.
 They can load the food only when they are on the neighboring (up, down, left, or right) cell of the food (not on the food cell).
 
 > **Observation Space**:
-The observation is a flattened vector that includes the positions and levels of all agents and foods in the grid.
-The order of the vector is as follows:
-- For each food (num_foods*3 elements): [Food_row, Food_col, Food_level] – The row and column indices of the food in the grid, and its level.
-- For each agent (num_agents*3 elements): [Agent_row, Agent_col, Agent_level] – The row and column indices of the agent in the grid, and its level.
+The observation is a flattened vector of exactly `max_num_foods * 3 + num_agents * 3` elements.
+For this environment: 2 food slots + 2 agent slots = **12 elements total**.
 
-Note that row index `r` increases as you go down, and column index `c` increases as you go right.
-Both indices start from 0 at the top-left corner.
+Layout:
+- Food slots (first 6 elements, always 2 slots regardless of how many foods are currently visible):
+  [Food0_row, Food0_col, Food0_level, Food1_row, Food1_col, Food1_level]
+- Agent slots (last 6 elements, always 2 slots):
+  [Self_row, Self_col, Self_level, Teammate_row, Teammate_col, Teammate_level]
+
+**Important**: The number of food slots is fixed at `max_num_foods = 2`, even if a food has been eaten.
+Eaten or invisible items use sentinel values: row = -1, col = -1, level = 0.
+Always use the fixed offset `max_num_foods * 3 = 6` to separate foods from agents — never count visible foods dynamically.
+
+The ego agent (self) is always the first entry in the agent slots.
+
+All row/column values are raw integer grid coordinates (not normalized).
+Row index increases downward, column index increases rightward, both starting from 0 at the top-left corner.
 
 > **Action Space**:
 The action space is discrete with the following mapping:
