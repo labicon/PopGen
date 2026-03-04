@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import litellm
 import numpy as np
 from rouge_score import rouge_scorer
-from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+
+from popgen.utils.config import LitellmConfig
 
 from .base import BaseEvaluator, EvalResult, calculate_stats
 
@@ -27,26 +29,22 @@ class SimilarityEvaluator(BaseEvaluator):
     aggregate_plot_metrics = ["semantic_similarity", "lexical_similarity"]
     key_plot_metrics = [("semantic_similarity", "Semantic Similarity")]
 
-    def __init__(self, embedding_model: str, num_workers: int = 1, batch_size: int = 32):
+    def __init__(self, embedding_model: str | LitellmConfig, num_workers: int = 1, batch_size: int = 32):
         """Initialize the similarity evaluator.
 
         Args:
-            embedding_model: Name of the sentence transformer model for embeddings.
+            embedding_model: LitellmConfig or model name string for the API embedding model
+                             (e.g., "openrouter/google/gemini-embedding-001").
             num_workers: Number of workers.
-            batch_size: Batch size for sentence transformer encoding.
+            batch_size: Batch size for API embedding calls.
         """
         super().__init__(name="BehaviorSimilarity", num_workers=num_workers)
-        self.embedding_model = embedding_model
+        if isinstance(embedding_model, str):
+            embedding_model = LitellmConfig(model_name=embedding_model)
+        self.embedding_config = embedding_model
+        self.embedding_model = embedding_model.model_name  # kept for metadata
         self.batch_size = batch_size
-        self._model = None
         self._rouge_scorer = None
-
-    @property
-    def model(self) -> SentenceTransformer:
-        """Lazy-load the sentence transformer model."""
-        if self._model is None:
-            self._model = SentenceTransformer(self.embedding_model)
-        return self._model
 
     @property
     def scorer(self) -> rouge_scorer.RougeScorer:
@@ -54,6 +52,22 @@ class SimilarityEvaluator(BaseEvaluator):
         if self._rouge_scorer is None:
             self._rouge_scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
         return self._rouge_scorer
+
+    def _get_embeddings(self, texts: list[str]) -> np.ndarray:
+        """Get embeddings for a list of texts using the configured API embedder."""
+        all_embeddings = []
+        for i in range(0, len(texts), self.batch_size):
+            batch = texts[i : i + self.batch_size]
+            response = litellm.embedding(
+                model=self.embedding_config.model_name,
+                input=batch,
+                **self.embedding_config.get_completion_kwargs(),
+            )
+            all_embeddings.extend(
+                item["embedding"] if isinstance(item, dict) else item.embedding
+                for item in response.data
+            )
+        return np.array(all_embeddings)
 
     def compute_instance_metric(self, input_data: dict[str, Any]) -> dict[str, Any]:
         """Compute similarity metrics for two lists of texts.
@@ -118,13 +132,8 @@ class SimilarityEvaluator(BaseEvaluator):
         }
 
     def _compute_semantic_similarity(self, texts1: list[str], texts2: list[str]) -> list[float]:
-        # Batch encode together to share the same pass/batching settings
-        combined_texts = texts1 + texts2
-        combined_embeddings = self.model.encode(
-            combined_texts,
-            batch_size=self.batch_size,
-            convert_to_numpy=True,
-        )
+        # Batch encode together to minimise API round-trips
+        combined_embeddings = self._get_embeddings(texts1 + texts2)
         split_idx = len(texts1)
         embeddings1 = combined_embeddings[:split_idx]
         embeddings2 = combined_embeddings[split_idx:]
@@ -155,7 +164,7 @@ class SimilarityEvaluator(BaseEvaluator):
 
         # Compute pairwise similarities
         triu_indices = np.triu_indices(len(matrix), k=1)
-        pairwise_sims = matrix[triu_indices]
+        pairwise_sims = np.array(matrix)[triu_indices]
 
         return (np.mean(pairwise_sims), {"similarity_matrix": matrix})
 

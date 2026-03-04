@@ -20,7 +20,8 @@ Environment description:
 {environment_description}
 
 Please ensure that the generated code is clean, well-structured, and adheres to the specified action format.
-The action should be a torch tensor of shape (action_dim,) where action_dim is defined in the action format description.
+The returned action should be a torch tensor of shape (action_dim,) where action_dim is defined in the action format description.
+In example for a continuous action space with 3 dimensions, the returned action should be something like `torch.tensor([0.5, -0.2, 1.0])`.
 
 Output format requirements:
 - Return a valid json object.

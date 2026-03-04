@@ -1,16 +1,10 @@
 import logging
-import warnings
 
 import litellm
+from popgen.utils.warnings import configure_warning_filters
 
 # Suppress LiteLLM INFO logs
 litellm.suppress_debug_info = True
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
-# Suppress Pydantic serialization warning from litellm's Message object
-warnings.filterwarnings(
-    "ignore",
-    message="Pydantic serializer warnings",
-    category=UserWarning,
-    module="pydantic.main",
-)
+configure_warning_filters()

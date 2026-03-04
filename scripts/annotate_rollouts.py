@@ -33,46 +33,54 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def load_behaviors(results_path: Path) -> list[dict]:
-    """Load the behaviors.json from the results directory."""
-    behaviors_file = results_path / "behaviors.json"
-    if not behaviors_file.exists():
-        sys.exit(f"Error: behaviors.json not found in {results_path}")
-    return json.loads(behaviors_file.read_text())
+    """Load behaviors.json from results_path/metadata/<timestamp>/behaviors.json."""
+    candidates = sorted(results_path.glob("metadata/*/behaviors.json"))
+    if not candidates:
+        sys.exit(f"Error: behaviors.json not found under {results_path}/metadata/")
+    return json.loads(candidates[-1].read_text())
 
 
 def discover_rollouts(results_path: Path, behaviors: list[dict]) -> list[dict]:
-    """Walk the results directory and collect every rollout with its metadata.
+    """Walk results_path/agents/ and collect every rollout with its metadata.
+
+    Layout: agents/behavior_<i>/<trial_timestamp>/attempt_<j>/rollouts/rollout_<k>/rollout.gif
 
     Returns a list of dicts, each containing:
         behavior_idx, behavior_name, behavior_description,
-        attempt_idx, rollout_idx, gif_path (relative to results_path)
+        attempt_idx, rollout_idx, gif_rel (relative to results_path)
     """
     rollouts: list[dict] = []
-    for behavior_dir in sorted(results_path.glob("behavior_*")):
+    agents_dir = results_path / "agents"
+    if not agents_dir.is_dir():
+        sys.exit(f"Error: agents/ directory not found in {results_path}")
+    for behavior_dir in sorted(agents_dir.glob("behavior_*")):
         behavior_idx = int(behavior_dir.name.split("_")[1])
         if behavior_idx >= len(behaviors):
             continue
         behavior = behaviors[behavior_idx]
-        for attempt_dir in sorted(behavior_dir.glob("attempt_*")):
-            attempt_idx = int(attempt_dir.name.split("_")[1])
-            rollouts_dir = attempt_dir / "rollouts"
-            if not rollouts_dir.is_dir():
+        for trial_dir in sorted(behavior_dir.iterdir()):
+            if not trial_dir.is_dir():
                 continue
-            for rollout_dir in sorted(rollouts_dir.glob("rollout_*")):
-                rollout_idx = int(rollout_dir.name.split("_")[1])
-                gif = rollout_dir / "rollout.gif"
-                if not gif.exists():
+            for attempt_dir in sorted(trial_dir.glob("attempt_*")):
+                attempt_idx = int(attempt_dir.name.split("_")[1])
+                rollouts_dir = attempt_dir / "rollouts"
+                if not rollouts_dir.is_dir():
                     continue
-                rollouts.append(
-                    {
-                        "behavior_idx": behavior_idx,
-                        "behavior_name": behavior["name"],
-                        "behavior_description": behavior["description"],
-                        "attempt_idx": attempt_idx,
-                        "rollout_idx": rollout_idx,
-                        "gif_rel": str(gif.relative_to(results_path)),
-                    }
-                )
+                for rollout_dir in sorted(rollouts_dir.glob("rollout_*")):
+                    rollout_idx = int(rollout_dir.name.split("_")[1])
+                    gif = rollout_dir / "rollout.gif"
+                    if not gif.exists():
+                        continue
+                    rollouts.append(
+                        {
+                            "behavior_idx": behavior_idx,
+                            "behavior_name": behavior["name"],
+                            "behavior_description": behavior["description"],
+                            "attempt_idx": attempt_idx,
+                            "rollout_idx": rollout_idx,
+                            "gif_rel": str(gif.relative_to(results_path)),
+                        }
+                    )
     return rollouts
 
 

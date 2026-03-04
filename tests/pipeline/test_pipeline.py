@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from popgen.population.pipeline import AgentGenerationPipeline, RLAgentGenerationPipeline
@@ -76,6 +77,19 @@ class _DummyPipeline(AgentGenerationPipeline):
         return _DummyEvalResult(), 0.01
 
 
+class _EvalFailingPipeline(_DummyPipeline):
+    def _evaluate_policy(
+        self,
+        behavior: Behavior,
+        rollouts: list[dict],
+        behavior_dir: str,
+        num_workers: int = 8,
+        **kwargs,
+    ):
+        del behavior, rollouts, behavior_dir, num_workers, kwargs
+        raise RuntimeError("forced evaluation failure")
+
+
 def test_generation_exception_is_retried_with_feedback(tmp_path):
     pipeline = _DummyPipeline(output_dir=str(tmp_path), fail_generate_n=1, fail_rollout_n=0)
     behavior = Behavior(name="b0", description="test behavior")
@@ -90,7 +104,7 @@ def test_generation_exception_is_retried_with_feedback(tmp_path):
 
     assert success is True
     assert pipeline.generate_calls == 2
-    assert summary["attempt_summaries"][0]["generation_retries_used"] == 1
+    assert summary["attempt_summaries"][0]["generation_retries"] == 1
     assert pipeline.feedback_history[0] == []
     assert "Generation or training failed" in pipeline.feedback_history[1][0][1]
 
@@ -110,11 +124,76 @@ def test_rollout_failure_triggers_generation_retry_with_rollout_feedback(tmp_pat
     assert success is True
     assert pipeline.generate_calls == 2
     assert pipeline.rollout_calls == 2
-    assert summary["attempt_summaries"][0]["generation_retries_used"] == 1
+    assert summary["attempt_summaries"][0]["generation_retries"] == 1
     assert "Rollout execution failed" in pipeline.feedback_history[1][0][1]
-    assert "Rollout #0: rollout crashed" in pipeline.feedback_history[1][0][1]
+    assert "Rollout #0:" in pipeline.feedback_history[1][0][1]
+    assert "rollout crashed" in pipeline.feedback_history[1][0][1]
     assert not (tmp_path / "attempt_0" / "generation_retry_1").exists()
     assert (tmp_path / "attempt_0" / "policy.py").read_text() == "code-2"
+
+
+def test_evaluation_exception_sets_zero_eval_latency(tmp_path):
+    pipeline = _EvalFailingPipeline(output_dir=str(tmp_path), fail_generate_n=0, fail_rollout_n=0)
+    behavior = Behavior(name="b_eval_fail", description="test behavior")
+
+    success, summary = pipeline(
+        behavior=behavior,
+        num_attempts=1,
+        n_rollouts=1,
+        n_generation_retries=0,
+        num_workers=1,
+    )
+
+    assert success is False
+    assert summary["attempt_summaries"][0]["latencies"]["evaluation"] == 0.0
+    latency_payload = json.loads((tmp_path / "attempt_0" / "latency.json").read_text())
+    assert latency_payload["evaluation"] == 0.0
+
+
+def test_rollout_latency_is_scalar_in_summary(tmp_path):
+    pipeline = _DummyPipeline(output_dir=str(tmp_path), fail_generate_n=0, fail_rollout_n=0)
+    behavior = Behavior(name="b_latency", description="test behavior")
+
+    success, summary = pipeline(
+        behavior=behavior,
+        num_attempts=1,
+        n_rollouts=1,
+        n_generation_retries=0,
+        num_workers=1,
+    )
+
+    assert success is True
+    assert isinstance(summary["attempt_summaries"][0]["latencies"]["rollout"], float)
+    assert summary["attempt_summaries"][0]["latencies"]["rollout"] == 0.1
+    assert isinstance(summary["avg_latencies"]["rollout"], float)
+    assert summary["avg_latencies"]["rollout"] == 0.1
+
+
+def test_generate_with_retries_defaults_do_not_share_feedback_state(tmp_path):
+    pipeline = _DummyPipeline(output_dir=str(tmp_path), fail_generate_n=1, fail_rollout_n=0)
+    behavior = Behavior(name="b_defaults", description="test behavior")
+
+    first_attempt_dir = tmp_path / "attempt_0"
+    second_attempt_dir = tmp_path / "attempt_1"
+    first_attempt_dir.mkdir()
+    second_attempt_dir.mkdir()
+
+    pipeline._generate_with_retries(
+        behavior=behavior,
+        attempt_dir=str(first_attempt_dir),
+        n_generation_retries=1,
+        n_rollouts=1,
+        num_workers=1,
+    )
+    pipeline._generate_with_retries(
+        behavior=behavior,
+        attempt_dir=str(second_attempt_dir),
+        n_generation_retries=0,
+        n_rollouts=1,
+        num_workers=1,
+    )
+
+    assert pipeline.feedback_history[2] == []
 
 
 def test_rl_generation_receives_env_reward_api_reference(tmp_path):

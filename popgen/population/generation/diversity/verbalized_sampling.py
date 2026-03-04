@@ -23,6 +23,19 @@ Return the responses in the following format:
 
 COT_INSTRUCTION = """Additionally, provide a "reasoning" field explaining your thought process for generating diverse responses and estimating their probabilities."""
 
+RERANKER_SYSTEM_PROMPT = """You are a behavior curator. You are given {num_candidates} candidate behaviors generated for the task below.
+
+Produce a final curated list of exactly {num_items} behaviors that jointly maximize:
+1. DIVERSITY — each behavior must explore a clearly distinct strategy, playstyle, or approach; no two should be variations of the same idea.
+2. QUALITY — each behavior must be realistic (feasible in the game environment) and specific (concrete enough to implement directly, not vague).
+
+For each output behavior you may:
+- Copy a candidate verbatim if it already meets both criteria.
+- Refine a candidate to make it more specific, realistic, or clearly distinct from others.
+- Synthesize a new behavior by combining complementary aspects of two or more candidates, as long as the result is coherent.
+
+First, write your reasoning: survey the candidates, identify clusters of similar ideas, note quality gaps, and decide your curation plan. Then output exactly {num_items} behaviors."""
+
 
 class VerbalizedSamplingStrategy(GenerationStrategy):
     """Generate diverse items by asking LLM to verbalize probability distributions."""
@@ -35,11 +48,13 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
         probability_tuning: float | None = None,
         do_cot: bool = False,
         samples_per_turn: int | None = None,
+        reranker_multiplier: float = 1,
     ):
         super().__init__(model_config, output_type, output_dir)
         self.probability_tuning = probability_tuning
         self.do_cot = do_cot
         self.samples_per_turn = samples_per_turn
+        self.reranker_multiplier = reranker_multiplier
         self._build_response_types()
 
     def _build_response_types(self) -> None:
@@ -58,6 +73,11 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
             reasoning=(str, ...),
             responses=(list[self.sampled_response_type], ...),
         )
+        self.reranker_response_type = create_model(
+            "RerankerResponse",
+            reasoning=(str, ...),
+            behaviors=(list[self.output_type], ...),
+        )
 
     def generate(self, input_prompt: str, **kwargs: Any) -> list[T]:
         """
@@ -71,20 +91,30 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
         num_items = kwargs.get("num_items", 4)
         target_words = kwargs.get("target_words", None)
 
+        num_samplings = int(num_items * self.reranker_multiplier) if self.reranker_multiplier > 1 else num_items
+
         sampled_responses = self._generate_samples(
             input_prompt=input_prompt,
-            num_samplings=num_items,
+            num_samplings=num_samplings,
             target_words=target_words,
         )
 
-        # Save samples with probabilities
+        # Save all candidates (with probabilities) before any reranking
         if self.output_dir:
             samples_data = [{"item": r.item.model_dump(), "probability": r.probability} for r in sampled_responses]
             samples_path = os.path.join(self.output_dir, "samples_with_probs.json")
             with open(samples_path, "w") as f:
                 json.dump(samples_data, f, indent=2)
 
-        items = [r.item for r in sampled_responses]
+        # Rerank: curate/compose num_items from the larger candidate pool
+        if self.reranker_multiplier > 1 and len(sampled_responses) > num_items:
+            items = self._rerank_samples(
+                input_prompt=input_prompt,
+                candidates=sampled_responses,
+                num_items=num_items,
+            )
+        else:
+            items = [r.item for r in sampled_responses]
 
         self.generated_items.extend(items)
 
@@ -116,29 +146,21 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
         num_samplings: int,
         target_words: int | None = None,
     ) -> list[T]:
-        """Generate samples iteratively, providing past generations as context."""
-        all_responses = []
+        """Generate samples in parallel independent calls of samples_per_turn each."""
+        batch_sizes: list[int] = []
         remaining = num_samplings
-
         while remaining > 0:
-            batch_size = min(self.samples_per_turn, remaining)
+            batch_sizes.append(min(self.samples_per_turn, remaining))
+            remaining -= batch_sizes[-1]
 
-            if all_responses:
-                # Build list of past generations
-                samples_list = "\n".join(f"- {r.item.model_dump_json()}" for r in all_responses)
-                batch_prompt = f"{input_prompt}\n\nGenerate {batch_size} alternative responses to the ones already generated:\n{samples_list}"
-            else:
-                batch_prompt = input_prompt
+        from pqdm.threads import pqdm
 
-            batch_responses = self._generate_samples_single(
-                input_prompt=batch_prompt,
-                num_samplings=batch_size,
-                target_words=target_words,
-            )
-            all_responses.extend(batch_responses)
-            remaining -= batch_size
-
-        return all_responses
+        args = [
+            {"input_prompt": input_prompt, "num_samplings": bs, "target_words": target_words}
+            for bs in batch_sizes
+        ]
+        results = pqdm(args, self._generate_samples_single, n_jobs=len(batch_sizes), argument_type="kwargs")
+        return [r for batch in results for r in batch]
 
     def _generate_samples_single(
         self,
@@ -179,3 +201,49 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
 
         except Exception as e:
             raise RuntimeError(f"Failed to generate samples: {e}")
+
+    def _rerank_samples(
+        self,
+        input_prompt: str,
+        candidates: list,
+        num_items: int,
+    ) -> list[T]:
+        """Curate num_items final behaviors from candidates.
+
+        The LLM may select, refine, or compose behaviors from the candidate pool
+        to maximize diversity and quality (realism + specificity).
+        Returns a list of output_type instances directly.
+        """
+        num_candidates = len(candidates)
+        system_prompt = RERANKER_SYSTEM_PROMPT.format(
+            num_candidates=num_candidates,
+            num_items=num_items,
+        )
+
+        candidates_text = "\n".join(f"[{i}] {c.item.model_dump_json()}" for i, c in enumerate(candidates))
+        user_message = f"Task:\n{input_prompt}\n\nCandidates:\n{candidates_text}"
+
+        try:
+            response = litellm.completion(
+                model=self.model_config.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                response_format=self.reranker_response_type,
+                max_retries=3,
+                **self.model_config.get_completion_kwargs(),
+            )
+
+            result = parse_llm_response(response, self.reranker_response_type)
+            behaviors = result.behaviors[:num_items]
+
+            # Fall back to original candidates if reranker returned too few
+            if len(behaviors) < num_items:
+                fallback = [c.item for c in candidates]
+                behaviors.extend(fallback[:num_items - len(behaviors)])
+
+            return behaviors
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to rerank samples: {e}")

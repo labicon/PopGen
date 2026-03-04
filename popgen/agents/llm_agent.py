@@ -66,7 +66,7 @@ The actions return type is defined as follows:
 You must respond with a structured JSON object containing:
 - actions: A list of these action(s) for the planning horizon. You will be provided with the horizon length, which indicates how many steps you should plan for.
 
-Each action should be appropriate for the current observation and consistent with your behavioral guideline."""
+Think before acting: reason first, then derive your `actions` from it. Each action should be appropriate for the current observation and consistent with your behavioral guideline."""
 
 FEEDBACK_SECTION = """
 

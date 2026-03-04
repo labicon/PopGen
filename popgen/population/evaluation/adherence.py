@@ -40,8 +40,8 @@ In the trajectory logs, the ego agent is named agent0.
 # Output Format
 Return a JSON object with the following fields:
 - "evaluation": boolean indicating whether the rollout showcases the behavior.
-- "reasoning": short and concise explanation justifying the evaluation.
-- "feedback": concise actionable instruction on what to change in the policy to better align with the behavior next time (focus on the *what*, not the *why*).
+- "reasoning": detailed explanation justifying the evaluation (e.g., what specific actions or states in the rollout demonstrate adherence or non-adherence).
+- "feedback": actionable instruction on what to change in the policy to better align with the behavior next time (focus on the *what*, not the *why*).
 """
 
 BEHAVIOR_ADHERENCE_USER_PROMPT = """Behavior:

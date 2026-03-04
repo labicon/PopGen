@@ -5,11 +5,15 @@ from pydantic import BaseModel
 from popgen.utils.config import LitellmConfig
 
 from .base import GenerationStrategy
+from .direct import DirectStrategy
 from .in_context import InContextStrategy
+from .independent import IndependentStrategy
 from .simplestrat import StratifiedStrategy
 from .verbalized_sampling import VerbalizedSamplingStrategy
 
 STRATEGY_REGISTRY: dict[str, type[GenerationStrategy]] = {
+    "direct": DirectStrategy,
+    "independent": IndependentStrategy,
     "in_context": InContextStrategy,
     "stratified": StratifiedStrategy,
     "verbalized_sampling": VerbalizedSamplingStrategy,
@@ -46,6 +50,8 @@ def load_strategy(
 
 __all__ = [
     "GenerationStrategy",
+    "DirectStrategy",
+    "IndependentStrategy",
     "InContextStrategy",
     "StratifiedStrategy",
     "VerbalizedSamplingStrategy",

@@ -75,7 +75,7 @@ def _build_job(
         "run_timestamp": run_timestamp,
         "output_dir": output_dir,
         "env": str(cfg.env),
-        "seed": int(cfg.seed) + flat_idx,
+        "seed": int(cfg.seed),
         "pipeline_workers": pipeline_workers,
         "generation_type": generation_type,
         "generation_cfg": generation_cfg,
@@ -122,7 +122,7 @@ def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
             )
             generation_kwargs = {}
         elif generation_type == "llm_agent":
-            agent_cfg = LitellmConfig(model_name=generation_cfg["model_name"])
+            agent_cfg = LitellmConfig(model_name=generation_cfg["model_name"], generation_kwargs={"max_tokens": 2048})
             pipeline = LLMAgentGenerationPipeline(
                 agent_model_config=agent_cfg,
                 evaluator=evaluator,
