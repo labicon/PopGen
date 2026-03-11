@@ -21,7 +21,7 @@ collect_with_grad: False
 parallel_collection: False
 
 # Discount factor
-gamma: 0.9
+gamma: 0.99
 # Learning rate
 lr: 0.00005
 # The epsilon parameter of the adam optimizer
@@ -55,12 +55,12 @@ max_n_frames: 5_000_000
 
 # Number of frames collected and each experiment iteration
 on_policy_collected_frames_per_batch: 60_000
-# Number of environments used for collection
-# If the environment is vectorized, this will be the number of batched environments.
-# Otherwise batching will be simulated and each env will be run sequentially or parallelly depending on parallel_collection.
-on_policy_n_envs_per_worker: 600
+# Number of environments used for collection.
+# Set to 200 so per-env rollout length per iteration is:
+# 60,000 / 200 = 300 steps, matching football.yaml max_steps.
+on_policy_n_envs_per_worker: 200
 # This is the number of times collected_frames_per_batch will be split into minibatches and trained
-on_policy_n_minibatch_iters: 45
+on_policy_n_minibatch_iters: 20
 # In on-policy algorithms the train_batch_size will be equal to the on_policy_collected_frames_per_batch
 # and it will be split into minibatches with this number of frames for training
 on_policy_minibatch_size: 4096
@@ -90,11 +90,11 @@ off_policy_prb_beta: 0.4
 
 evaluation: True
 # Whether to render the evaluation (if rendering is available)
-render: True
+render: False
 # Frequency of evaluation in terms of collected frames (this should be a multiple of on/off_policy_collected_frames_per_batch)
 evaluation_interval: 120_000
 # Number of episodes that evaluation is run on
-evaluation_episodes: 200
+evaluation_episodes: 50
 # If True, when stochastic policies are evaluated, their deterministic value is taken, otherwise, if False, they are sampled
 evaluation_deterministic_actions: True
 # If True, seed the environment before evaluation leading to always the same evaluation env being used

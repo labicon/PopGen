@@ -6,5 +6,6 @@ from .utils import (
     ScriptedPolicy,
     create_env,
     rollout_fn,
+    serialize_state_fn,
     train_fn,
 )

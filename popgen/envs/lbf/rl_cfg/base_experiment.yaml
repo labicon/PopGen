@@ -3,12 +3,12 @@ defaults:
   - _self_
 
 # The device for collection (e.g. cuda)
-sampling_device: "cpu"
+sampling_device: "cuda"
 # The device for training (e.g. cuda)
-train_device: "cpu"
+train_device: "cuda"
 # The device for the replay buffer of off-policy algorithms (e.g. cuda).
 # Use "disk" to store it on disk (in the experiment save_folder)
-buffer_device: "cpu"
+buffer_device: "cuda"
 
 # Whether to share the parameters of the policy within agent groups
 share_policy_params: False
@@ -21,7 +21,7 @@ collect_with_grad: False
 parallel_collection: False
 
 # Discount factor
-gamma: 0.9
+gamma: 0.99
 # Learning rate
 lr: 0.00005
 # The epsilon parameter of the adam optimizer
@@ -51,19 +51,19 @@ exploration_anneal_frames: 1_000_000
 # The maximum number of experiment iterations before the experiment terminates, exclusive with max_n_frames
 max_n_iters: null
 # Number of collected frames before ending, exclusive with max_n_iters
-max_n_frames: 500_000
+max_n_frames: 200_000
 
 # Number of frames collected and each experiment iteration
-on_policy_collected_frames_per_batch: 4096
-# Number of environments used for collection
-# If the environment is vectorized, this will be the number of batched environments.
-# Otherwise batching will be simulated and each env will be run sequentially or parallelly depending on parallel_collection.
-on_policy_n_envs_per_worker: 4
+on_policy_collected_frames_per_batch: 12_800
+# Number of environments used for collection.
+# 12,800 / 64 = 200 steps per env per iteration, yielding multiple episode
+# terminations for max_episode_steps=50 while remaining GPU efficient.
+on_policy_n_envs_per_worker: 64
 # This is the number of times collected_frames_per_batch will be split into minibatches and trained
 on_policy_n_minibatch_iters: 4
 # In on-policy algorithms the train_batch_size will be equal to the on_policy_collected_frames_per_batch
 # and it will be split into minibatches with this number of frames for training
-on_policy_minibatch_size: 512
+on_policy_minibatch_size: 1024
 
 # Number of frames collected and each experiment iteration
 off_policy_collected_frames_per_batch: 60_000
@@ -90,7 +90,7 @@ off_policy_prb_beta: 0.4
 
 evaluation: False
 # Whether to render the evaluation (if rendering is available)
-render: True
+render: False
 # Frequency of evaluation in terms of collected frames (this should be a multiple of on/off_policy_collected_frames_per_batch)
 evaluation_interval: 204800
 # Number of episodes that evaluation is run on
@@ -124,11 +124,11 @@ restore_file: null
 restore_map_location: null
 # Interval for experiment saving in terms of collected frames (this should be a multiple of on/off_policy_collected_frames_per_batch).
 # Set it to 0 to disable checkpointing
-checkpoint_interval: 0
+checkpoint_interval: 64_000
 # Whether to checkpoint when the experiment is done
 checkpoint_at_end: True
 # How many checkpoints to keep. As new checkpoints are taken, temporally older checkpoints are deleted to keep this number of
 # checkpoints. The checkpoint at the end is included in this number. Set to `null` to keep all checkpoints.
-keep_checkpoints_num: 1
+keep_checkpoints_num: 2
 # Whether to exclude the replay buffers from the checkpoint
 exclude_buffer_from_checkpoint: True

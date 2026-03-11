@@ -262,6 +262,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 def _collect_attempt_rows(
     *,
     experiment_id: str,
+    run_name: str,
     run_id: str,
     split: str,
     env: str,
@@ -274,6 +275,7 @@ def _collect_attempt_rows(
 ) -> list[dict]:
     return _collect_rows_for_attempt_dirs(
         experiment_id=experiment_id,
+        run_name=run_name,
         run_id=run_id,
         split=split,
         env=env,
@@ -289,6 +291,7 @@ def _collect_attempt_rows(
 def _collect_single_attempt_rows(
     *,
     experiment_id: str,
+    run_name: str,
     run_id: str,
     split: str,
     env: str,
@@ -301,6 +304,7 @@ def _collect_single_attempt_rows(
 ) -> list[dict]:
     return _collect_rows_for_attempt_dirs(
         experiment_id=experiment_id,
+        run_name=run_name,
         run_id=run_id,
         split=split,
         env=env,
@@ -316,6 +320,7 @@ def _collect_single_attempt_rows(
 def _collect_rows_for_attempt_dirs(
     *,
     experiment_id: str,
+    run_name: str,
     run_id: str,
     split: str,
     env: str,
@@ -357,6 +362,7 @@ def _collect_rows_for_attempt_dirs(
             rows.append(
                 {
                     "experiment_id": experiment_id,
+                    "run_name": run_name,
                     "run_id": run_id,
                     "split": _normalize_split(split),
                     "env": env,
@@ -381,6 +387,7 @@ def _collect_rows_for_attempt_dirs(
 def _gather_experiment_eval_layout(experiment_dir: Path) -> list[dict]:
     """Gather latest eval result for each (behavior_id, trial_id)."""
     experiment_id = experiment_dir.name
+    run_name = experiment_dir.name
     rows = []
 
     eval_root = experiment_dir / "eval"
@@ -420,6 +427,7 @@ def _gather_experiment_eval_layout(experiment_dir: Path) -> list[dict]:
 
             latest_trial_runs[key] = {
                 "experiment_id": experiment_id,
+                "run_name": run_name,
                 "run_id": run_group_id,
                 "env": env,
                 "seed": int(run.get("base_seed", run.get("seed", 0))),
@@ -432,10 +440,11 @@ def _gather_experiment_eval_layout(experiment_dir: Path) -> list[dict]:
 
     for _, selected_run in sorted(latest_trial_runs.items(), key=lambda kv: kv[0]):
         rows.extend(
-            _collect_single_attempt_rows(
-                experiment_id=selected_run["experiment_id"],
-                run_id=selected_run["run_id"],
-                split="eval",
+                _collect_single_attempt_rows(
+                    experiment_id=selected_run["experiment_id"],
+                    run_name=selected_run["run_name"],
+                    run_id=selected_run["run_id"],
+                    split="eval",
                 env=selected_run["env"],
                 seed=selected_run["seed"],
                 generation_type=selected_run["generation_type"],
@@ -450,6 +459,7 @@ def _gather_experiment_eval_layout(experiment_dir: Path) -> list[dict]:
 
 def _gather_experiment_new_layout(experiment_dir: Path) -> list[dict]:
     experiment_id = experiment_dir.name
+    run_name = experiment_dir.name
     split = _infer_split(experiment_dir)
     rows = []
 
@@ -486,6 +496,7 @@ def _gather_experiment_new_layout(experiment_dir: Path) -> list[dict]:
             rows.extend(
                 _collect_attempt_rows(
                     experiment_id=experiment_id,
+                    run_name=run_name,
                     run_id=run_group_id,
                     split=split,
                     env=env,
@@ -504,6 +515,7 @@ def _gather_experiment_new_layout(experiment_dir: Path) -> list[dict]:
 
 def _gather_experiment_legacy_layout(experiment_dir: Path) -> list[dict]:
     experiment_id = experiment_dir.name
+    run_name = experiment_dir.name
     split = _infer_split(experiment_dir)
     rows = []
 
@@ -532,6 +544,7 @@ def _gather_experiment_legacy_layout(experiment_dir: Path) -> list[dict]:
                 rows.extend(
                     _collect_attempt_rows(
                         experiment_id=experiment_id,
+                        run_name=run_name,
                         run_id=run_id,
                         split=split,
                         env=env,
@@ -588,6 +601,7 @@ def main():
 
     fieldnames = [
         "experiment_id",
+        "run_name",
         "run_id",
         "split",
         "env",

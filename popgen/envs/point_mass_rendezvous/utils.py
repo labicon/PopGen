@@ -54,7 +54,9 @@ REWARD_API_REFERENCE = """Reward function API (authoritative):
 REWARD_EXAMPLE = """Simple sparse reward: +1 if both agents are on the same landmark at the same time step, otherwise 0.
 
 ```python
-def reward_fn(self, agent: Agent):
+import torch
+
+def compute_reward(self, agent):
 
     reward = torch.zeros(self.world.batch_dim, device=self.world.device)
 
@@ -115,36 +117,6 @@ class ActionType(BaseModel):
 
 
 # ---------------------------------------------------------------------------- #
-#                              State Extraction                                #
-# ---------------------------------------------------------------------------- #
-
-
-def get_state_point_mass_rendezvous(env):
-    """
-    Extracts the global state from the Point Mass Rendezvous environment.
-    Returns {"agents": {agent_name: {...}}, "env": {landmark positions}}.
-    """
-    def _get_agent_state(agent):
-        pos = agent.state.pos[0].cpu().numpy().tolist()
-        vel = agent.state.vel[0].cpu().numpy().tolist()
-        action = agent.action.u[0].cpu().numpy().tolist()
-        return {
-            "action": [round(x, 2) for x in action],
-            "pos": [round(x, 2) for x in pos],
-            "vel": [round(x, 2) for x in vel],
-        }
-
-    agents_data = {agent.name: _get_agent_state(agent) for agent in env.world.agents}
-
-    env_data = {}
-    for i, landmark in enumerate(env.world.landmarks):
-        pos = landmark.state.pos[0].cpu().numpy().tolist()
-        env_data[f"landmark{i}_pos"] = [round(x, 2) for x in pos]
-
-    return {"agents": agents_data, "env": env_data}
-
-
-# ---------------------------------------------------------------------------- #
 #                            Training & Rollout                                #
 # ---------------------------------------------------------------------------- #
 
@@ -187,7 +159,7 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
 def rollout_fn(policy, env=None, **kwargs):
     """
     Rollout the policy loaded from the checkpoint in save_dir.
-    Uses the experiment's test_env to ensure correct observation structure.
+    Uses rollout states extracted directly from tensordicts.
     """
     # if env is not defined, load default pm_rdv environment
     if env is None:
@@ -196,18 +168,52 @@ def rollout_fn(policy, env=None, **kwargs):
     if "max_steps" not in kwargs:
         kwargs["max_steps"] = 100  # Default max steps for point_mass_rendezvous
 
-    # If policy is a list of policies, wrap it into a MultiPolicyWrapper with ego and teammate roles
-    if isinstance(policy, list) and len(policy) > 1:
-        from popgen.agents.scripted_partner import MultiPolicyWrapper
-
-        policy = MultiPolicyWrapper(policies=policy)
-
     return rollout_vmas_env(
         policy=policy,
         env=env,
-        get_state_fn=get_state_point_mass_rendezvous,
         **kwargs,
     )
+
+
+def serialize_state_fn(rollout_data: list[dict]) -> list[dict]:
+    for step in rollout_data:
+        for team_name in ("ego_team", "opponent_team"):
+            for agent_state in step.get(team_name, {}).values():
+                raw_state = agent_state.get("state")
+                if isinstance(raw_state, list) and len(raw_state) >= 14:
+                    ego_pos = [float(raw_state[0]), float(raw_state[1])]
+                    ego_vel = [float(raw_state[2]), float(raw_state[3])]
+                    other_rel = [float(raw_state[12]), float(raw_state[13])]
+                    other_pos = [ego_pos[0] + other_rel[0], ego_pos[1] + other_rel[1]]
+                    landmarks = []
+                    nearest_landmark_slot = None
+                    nearest_landmark_distance = None
+
+                    for i in range(4):
+                        rel = [float(raw_state[4 + 2 * i]), float(raw_state[5 + 2 * i])]
+                        dist = float((rel[0] ** 2 + rel[1] ** 2) ** 0.5)
+                        if nearest_landmark_distance is None or dist < nearest_landmark_distance:
+                            nearest_landmark_distance = dist
+                            nearest_landmark_slot = i
+                        landmarks.append(
+                            {
+                                "slot": i,
+                                "relative_pos": rel,
+                                "pos": [ego_pos[0] + rel[0], ego_pos[1] + rel[1]],
+                                "distance": dist,
+                            }
+                        )
+
+                    agent_state["serialized_state"] = {
+                        "ego_pos": ego_pos,
+                        "ego_vel": ego_vel,
+                        "other_agent_pos": other_pos,
+                        "other_agent_distance": float((other_rel[0] ** 2 + other_rel[1] ** 2) ** 0.5),
+                        "landmarks": landmarks,
+                        "nearest_landmark_slot": nearest_landmark_slot,
+                        "nearest_landmark_distance": nearest_landmark_distance,
+                    }
+    return rollout_data
 
 # ---------------------------------------------------------------------------- #
 #                              Make env function                               #

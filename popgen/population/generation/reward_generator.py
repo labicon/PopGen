@@ -12,7 +12,9 @@ Your task is to generate a reward function for an ego agent that incentivizes th
 Some important details to consider:
 - The reward function must be named `compute_reward(self, agent)` and return a reward for the given agent.
 - The exact return type/shape must follow the reward API reference below.
-- `torch` is already imported. Do not include any other imports.
+- The generated code must be a standalone Python module.
+- The first non-empty line of code must be exactly: `import torch`
+- Do not include any imports other than `import torch`.
 - Environment attributes are accessible via `self` and `agent` as described in the environment description or example reward functions.
 
 Environment description:
@@ -24,7 +26,7 @@ Reward API reference:
 Output format requirements:
 - Return a valid json object.
 - The json object must contain exactly these keys: "code" and "reasoning".
-- "code" must be a Python string containing only the reward function implementation.
+- "code" must be a Python string containing full module code, starting with `import torch`, and defining `compute_reward(self, agent)`.
 - "reasoning" must be a detailed explanation of how the reward was designed and why it incentivizes the desired behavior.
 - Do not wrap the json in markdown fences."""
 
@@ -33,6 +35,7 @@ REWARD_GENERATION_PROMPT = """# Behavior description:
 
 Provide the python code that implements the reward as the `compute_reward(self, agent)` function and your reasoning.
 Think step by step.
+The code must be a full module and start with `import torch` on the first non-empty line.
 
 Return your final answer as a single valid json object with keys "code" and "reasoning"."""
 
@@ -55,7 +58,7 @@ class RewardFnGenerator(GeneratorWithFeedback):
         **kwargs,
     ) -> CodeSnippet:
         """
-        Generate a reward function for agent0 based on behavior description.
+        Generate a reward function for the ego agent based on behavior description.
 
         Args:
             behavior: The behavior the reward should incentivize.

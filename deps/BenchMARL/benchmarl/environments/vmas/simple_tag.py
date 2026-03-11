@@ -12,6 +12,7 @@ class TaskConfig:
     max_steps: int = MISSING
     num_good_agents: int = MISSING
     num_adversaries: int = MISSING
+    ai_good_agents: bool = MISSING
     num_landmarks: int = MISSING
     shape_agent_rew: bool = MISSING
     shape_adversary_rew: bool = MISSING

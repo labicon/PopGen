@@ -128,6 +128,28 @@ class TestGenerate:
         system_message = messages[0]["content"]
         assert "test environment" in system_message
 
+    def test_generate_requires_import_torch_in_prompt(self, mock_completion, generator, behavior, codebase_context):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "import torch\ndef compute_reward(self, agent): return 0",
+            "reasoning": "reasoning"
+        })
+        mock_completion.return_value = mock_response
+
+        generator.generate(
+            behavior=behavior,
+            environment_description="test environment",
+        )
+
+        call_args = mock_completion.call_args
+        messages = call_args.kwargs["messages"]
+        system_message = messages[0]["content"]
+        user_message = messages[1]["content"]
+        assert "import torch" in system_message
+        assert "start with `import torch`" in user_message
+
     def test_generate_with_feedbacks(self, mock_completion, generator, behavior, codebase_context):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -246,6 +268,47 @@ class TestGenerate:
 
         call_args = mock_completion.call_args
         assert call_args.kwargs["model"] == "custom-model"
+
+    def test_generate_uses_default_timeout(self, mock_completion, behavior):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def compute_reward(self, agent): pass",
+            "reasoning": "reasoning"
+        })
+        mock_completion.return_value = mock_response
+
+        config = LitellmConfig(model_name="custom-model")
+        generator = RewardFnGenerator(model_config=config)
+        generator.generate(
+            behavior=behavior,
+            environment_description="test environment",
+        )
+
+        call_args = mock_completion.call_args
+        assert call_args.kwargs["timeout"] == 120
+
+    def test_generate_allows_timeout_override(self, mock_completion, behavior):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.parsed = None
+        mock_response.choices[0].message.content = json.dumps({
+            "code": "def compute_reward(self, agent): pass",
+            "reasoning": "reasoning"
+        })
+        mock_completion.return_value = mock_response
+
+        config = LitellmConfig(model_name="custom-model", generation_kwargs={"timeout": 45})
+        generator = RewardFnGenerator(model_config=config)
+        generator.generate(
+            behavior=behavior,
+            environment_description="test environment",
+            timeout=30,
+        )
+
+        call_args = mock_completion.call_args
+        assert call_args.kwargs["timeout"] == 30
 
 
 class TestCleanCode:

@@ -4,99 +4,35 @@ import os
 import shutil
 import traceback
 from abc import ABC, abstractmethod
+from pathlib import Path
 from time import time
 from typing import Any
 
 from pqdm.processes import pqdm
 
+from popgen.agents import MultiPolicyWrapper
+from popgen.agents.reward_policy import (
+    latest_reward_training_log,
+    load_reward_rollout_artifacts,
+)
+from popgen.population.evaluation import BehaviorAdherenceEvaluator
+from popgen.population.feedback import gather_feedback
+from popgen.population.generation import BaseGenerator
+from popgen.population.types import Behavior
 from popgen.utils.config import LitellmConfig
 from popgen.utils.decorators import track_time
+from popgen.utils.exceptions import format_exc_last_frame
 from popgen.utils.imports import import_function_from_file, load_entrypoint
 from popgen.utils.logging import save_rollout, uniform_sample, write_code_file, write_json, write_model_output_record
+from popgen.utils.stats import average_values
 from popgen.utils.warnings import configure_warning_filters
-
-from .evaluation import BehaviorAdherenceEvaluator
-from .generation import BaseGenerator
-from .types import Behavior
 
 logging.basicConfig(level=logging.INFO)
 configure_warning_filters()
 
-def combine_feedback(instance_metrics: list[dict[str, Any]]) -> str:
-    """Combine feedback from failing rollouts into a string for the next generation attempt."""
-
-    def _build_feedback_str(i: int, reasoning: str, feedback: str, adherence: float) -> str:
-        success = adherence == 1
-        s = f"- [Rollout #{i}] {'Success' if success else 'Failure'}:\n"
-        s += f"  Reason: {reasoning}\n"
-        if not success:
-            s += f"  Feedback: {feedback}\n"
-        return s
-
-    bullets = [
-        _build_feedback_str(i, m["reasoning"], m["feedback"], m["adherence"]) 
-        for i, m in enumerate(instance_metrics) 
-    ]
-    if not bullets:
-        return "No specific feedback provided."
-    return "Feedback from rollouts:\n" + "\n".join(bullets)
-
-def _average_latency(values: list[Any]) -> Any:
-    """Average homogeneous lists of numbers or dicts of numbers."""
-    if not values:
-        return 0.0
-
-    first = values[0]
-    if isinstance(first, dict):
-        keys = first.keys()
-        out = {}
-        for key in keys:
-            key_values = [v[key] for v in values if isinstance(v, dict) and key in v]
-            out[key] = sum(key_values) / len(key_values) if key_values else 0.0
-        return out
-
-    return sum(float(v) for v in values) / len(values)
-
-
-def _latency_total(latency: Any) -> float:
-    """Reduce nested latency structures (dict/list/float) to one scalar."""
-    if isinstance(latency, dict):
-        return sum(_latency_total(v) for v in latency.values())
-    if isinstance(latency, list):
-        return sum(_latency_total(v) for v in latency)
-    if latency is None:
-        return 0.0
-    return float(latency)
-
-def _format_exc_last_frame(exc: BaseException) -> str:
-    """Return only the deepest traceback frame + exception message."""
-    tb = exc.__traceback__
-    if tb is None:
-        return f"{type(exc).__name__}: {exc}"
-    last = traceback.extract_tb(tb)[-1]
-    return (
-        f'File "{last.filename}", line {last.lineno}, in {last.name}\n'
-        f"    {last.line}\n"
-        f"{type(exc).__name__}: {exc}"
-    )
-
-
-def _build_rollout_error_feedback(rollouts: list[dict[str, Any] | Exception]) -> str | None:
-    """Return structured feedback when any rollout fails."""
-    errors = []
-    for rollout_idx, result in enumerate(rollouts):
-        if isinstance(result, Exception):
-            errors.append(f"Rollout #{rollout_idx}:\n{_format_exc_last_frame(result)}")
-        elif result.get("error") is not None:
-            errors.append(f"Rollout #{rollout_idx}:\n{result['error']}")
-
-    if not errors:
-        return None
-
-    feedback = "Rollout execution failed:\n"
-    feedback += "\n".join(f"- {err}" for err in errors)
-    feedback += "\nPlease fix the code implementation so rollouts execute without errors."
-    return feedback
+DEFAULT_EVAL_ROLLOUTS = 5
+EVAL_ROLLOUT_STATES = 30
+EVAL_ROLLOUT_IMAGES = 3
 
 
 def _load_policy_and_env(policy_type: str, create_env_fn: callable, scripted_policy_fn: callable = None, **kwargs) -> dict[str, Any]:
@@ -110,30 +46,11 @@ def _load_policy_and_env(policy_type: str, create_env_fn: callable, scripted_pol
         if "policy" not in policies:
             raise KeyError("Expected generated policy file to define a callable named 'policy'.")
         ego_policy = policies["policy"]
-        env = create_env_fn(num_envs=1)
     elif policy_type == "RewardFn":
-        from pathlib import Path
-
-        from benchmarl.experiment import Experiment
-
-        save_dir = Path(kwargs["save_dir"])
-        checkpoints = sorted(list(save_dir.rglob("checkpoints/checkpoint_*.pt")), key=lambda p: int(p.stem.split("_")[1]))
-        if not checkpoints:
-            raise FileNotFoundError(f"No checkpoints found in {save_dir}")
-
-        checkpoint = checkpoints[-1]
-        experiment_folder = checkpoint.parent.parent.resolve()
-        experiment = Experiment.reload_from_file(
-            str(checkpoint),
-            experiment_patch={
-                "save_folder": str(experiment_folder.parent),
-                "loggers": [],
-                "create_json": False,
-            },
+        return load_reward_rollout_artifacts(
+            save_dir=kwargs["save_dir"],
+            scripted_policy_fn=scripted_policy_fn,
         )
-        ego_group = "ego" if "ego" in experiment.group_policies else "agents"
-        ego_policy = experiment.group_policies[ego_group]
-        env = experiment.test_env
     elif policy_type == "LLMAgent":
         from popgen.agents import LLMAgent
 
@@ -141,28 +58,33 @@ def _load_policy_and_env(policy_type: str, create_env_fn: callable, scripted_pol
         with open(config_path) as f:
             config = json.load(f)
 
-        model_config = LitellmConfig(**config["model_config"])
-        action_type = load_entrypoint(config["action_type_module"])
-
         ego_policy = LLMAgent(
             behavior=config["behavior"],
-            model_config=model_config,
+            model_config=LitellmConfig(**config["model_config"]),
             environment_description=config["environment_description"],
-            action_type=action_type,
+            action_type=load_entrypoint(config["action_type_module"]),
             horizon_length=config.get("horizon_length", 1),
             include_trajectory_history=config.get("include_trajectory_history", False),
             feedbacks=config.get("feedbacks", []),
         )
-        env = create_env_fn(num_envs=1)
     else:
         raise ValueError(f"Unsupported policy_type: {policy_type}")
 
-    policies = [ego_policy]
+    # Create the rollout environment
+    env = create_env_fn(num_envs=1)
+
+    # If a scripted policy is provided, load it and wrap with the ego policy for rollouts.
     if scripted_policy_fn is not None:
         teammate_policy = scripted_policy_fn(env)
-        policies.append(teammate_policy)
+        if isinstance(teammate_policy, (list, tuple)):
+            policies = [ego_policy, *teammate_policy]
+        else:
+            policies = [ego_policy, teammate_policy]
+        policy = MultiPolicyWrapper(policies=policies)
+    else:
+        policy = ego_policy
 
-    return {"env": env, "policies": policies}
+    return env, policy
 
 
 @track_time("rollout")
@@ -170,8 +92,9 @@ def _rollout_worker(args: dict[str, Any]) -> dict[str, Any]:
     """Run one rollout and save artifacts."""
     # Child workers may start a fresh interpreter depending on start method.
     configure_warning_filters(force=True)
+
     rollout_fn = args["rollout_fn"]
-    artifacts_dict = _load_policy_and_env(
+    env, policy = _load_policy_and_env(
         policy_type=args["policy_type"],
         create_env_fn=args["create_env_fn"],
         scripted_policy_fn=args["scripted_policy_fn"],
@@ -179,9 +102,13 @@ def _rollout_worker(args: dict[str, Any]) -> dict[str, Any]:
     )
 
     try:
-        rollout_data, images, error = rollout_fn(artifacts_dict["policies"], env=artifacts_dict["env"], **args["rollout_kwargs"])
+        rollout_data, images, error = rollout_fn(policy, env=env, **args["rollout_kwargs"])
     except Exception as e:
-        return {"error": _format_exc_last_frame(e), "states": None, "images": None}
+        try:
+            env.close()
+        except Exception:
+            pass
+        return {"error": format_exc_last_frame(e), "states": None, "images": None}
 
     save_rollout(
         rollout_data=rollout_data,
@@ -190,14 +117,23 @@ def _rollout_worker(args: dict[str, Any]) -> dict[str, Any]:
     )
 
     if error is not None:
-        error_str = _format_exc_last_frame(error) if isinstance(error, Exception) else str(error)
+        error_str = format_exc_last_frame(error) if isinstance(error, Exception) else str(error)
+        try:
+            env.close()
+        except Exception:
+            pass
         return {"error": error_str, "states": None, "images": None}
 
-    return {
+    result = {
         "error": None,
-        "states": uniform_sample(rollout_data, n_samples=20),
-        "images": uniform_sample(images, n_samples=5),
+        "states": uniform_sample(rollout_data, n_samples=EVAL_ROLLOUT_STATES),
+        "images": uniform_sample(images, n_samples=EVAL_ROLLOUT_IMAGES),
     }
+    try:
+        env.close()
+    except Exception:
+        pass
+    return result
 
 
 class AgentGenerationPipeline(ABC):
@@ -211,11 +147,13 @@ class AgentGenerationPipeline(ABC):
         evaluator: BehaviorAdherenceEvaluator,
         env_module: Any,
         output_dir: str,
+        advisor: LitellmConfig | None = None,
     ):
         self.generator = generator
         self.evaluator = evaluator
         self.env_module = env_module
         self.output_dir = output_dir
+        self.advisor = advisor
         os.makedirs(self.output_dir, exist_ok=True)
 
     @abstractmethod
@@ -228,7 +166,7 @@ class AgentGenerationPipeline(ABC):
     ) -> tuple[Any, dict[str, Any], Any]:
         """Generate one policy artifact and loading kwargs."""
 
-    def _generate_with_retries(
+    def generate_and_rollout(
         self,
         behavior: Behavior,
         attempt_dir: str,
@@ -250,9 +188,7 @@ class AgentGenerationPipeline(ABC):
         generation_latency = 0.0
         success = False
 
-
         for gen_retry in range(n_generation_retries + 1):
-            # Step 1: generation
             try:
                 generated_item, loading_kwargs, generation_latency = self._generate_policy(
                     behavior=behavior,
@@ -266,7 +202,12 @@ class AgentGenerationPipeline(ABC):
                 feedbacks.append(("", generation_error))
                 continue
 
-            # Step 2: rollouts
+            if isinstance(generated_item, Exception):
+                generation_error = f"Generation or training failed: {generated_item}. Please try again."
+                logging.warning(generation_error)
+                feedbacks.append(("", generation_error))
+                continue
+
             try:
                 rollouts, rollout_latencies = self._run_rollouts(
                     behavior_dir=attempt_dir,
@@ -279,28 +220,37 @@ class AgentGenerationPipeline(ABC):
                 rollouts, rollout_latencies = [e], []
 
             # If error in rollback -> retry
-            rollout_error_feedback = _build_rollout_error_feedback(rollouts)
-            success = rollout_error_feedback is None
-            if success:
-                break
-            else:
-                logging.warning(f"[Gen Retry {gen_retry}] {rollout_error_feedback}")
+            errors = []
+            for rollout_idx, result in enumerate(rollouts):
+                if isinstance(result, Exception):
+                    errors.append(f"Rollout #{rollout_idx}:\n{format_exc_last_frame(result)}")
+                elif result.get("error") is not None:
+                    errors.append(f"Rollout #{rollout_idx}:\n{result['error']}")
 
-                prev_code = getattr(generated_item, "code", "")
-                feedbacks.append((prev_code, rollout_error_feedback))
+            if not errors:
+                success = True
+                break
+
+            rollout_error_feedback = "Rollout execution failed:\n"
+            rollout_error_feedback += "\n".join(f"- {err}" for err in errors)
+            rollout_error_feedback += "\nPlease fix the code implementation so rollouts execute without errors."
+            logging.warning(f"[Gen Retry {gen_retry}] {rollout_error_feedback}")
+
+            prev_code = getattr(generated_item, "code", "")
+            feedbacks.append((prev_code, rollout_error_feedback))
 
         latencies = {
             "generation": generation_latency,
             "rollout": rollout_latencies,
         }
-            
+
         return generated_item, rollouts, success, gen_retry, latencies
 
     def __call__(
         self,
         behavior: Behavior,
         num_attempts: int = 5,
-        n_rollouts: int = 3,
+        n_rollouts: int = DEFAULT_EVAL_ROLLOUTS,
         adherence_threshold: float = 1.0,
         n_generation_retries: int = 0,
         num_workers: int = 8,
@@ -316,19 +266,20 @@ class AgentGenerationPipeline(ABC):
         generation_kwargs = generation_kwargs or {}
         evaluation_kwargs = evaluation_kwargs or {}
 
+        generated_item: Any = None
         feedbacks: list[tuple[str, str]] = []
         best_adherence = 0.0
         best_feedback: tuple[str, str] | None = None
         last_adherence = 0.0
-        success = False
         attempts_to_success: int | None = None
-        generated_item: Any = None
         attempt_summaries: list[dict[str, Any]] = []
+        success = False
 
         for attempt in range(num_attempts):
             if success:
                 break
 
+            # Create attempt directory for artifacts and logs
             # Create attempt directory for artifacts and logs
             attempt_dir = os.path.join(self.output_dir, f"attempt_{attempt}")
             os.makedirs(attempt_dir, exist_ok=True)
@@ -341,8 +292,13 @@ class AgentGenerationPipeline(ABC):
             if feedbacks and feedbacks[-1] is not best_feedback:
                 context_feedbacks.append((feedbacks[-1][0], f"[Last attempt (adherence={last_adherence:.2f})]\n{feedbacks[-1][1]}"))
 
+            write_json(
+                os.path.join(attempt_dir, "feedback.json"),
+                [{"code": code, "feedback": fb} for code, fb in context_feedbacks],
+            )
+
             # Step 1: generation & rollouts (with retries):
-            generated_item, rollouts, gen_success, gen_retries, gen_latencies = self._generate_with_retries(
+            generated_item, rollouts, gen_success, gen_retries, gen_latencies = self.generate_and_rollout(
                 behavior=behavior,
                 attempt_dir=attempt_dir,
                 n_generation_retries=n_generation_retries,
@@ -354,7 +310,6 @@ class AgentGenerationPipeline(ABC):
             )
 
             # Step 2: evaluation
-            eval_elapsed = 0.0
             try:
                 eval_result, eval_elapsed = self._evaluate_policy(
                     behavior=behavior,
@@ -363,22 +318,31 @@ class AgentGenerationPipeline(ABC):
                 )
             except Exception as e:
                 eval_result = None
+                eval_elapsed = 0.0
                 evaluation_feedback = f"Evaluation failed: {e}"
                 logging.warning(f"[Attempt {attempt + 1}] {evaluation_feedback}")
                 feedbacks.append(("", evaluation_feedback))
 
             adherence = eval_result.overall_metrics["adherence"] if eval_result is not None else 0.0
-            rollout_elapsed = _latency_total(gen_latencies["rollout"])
+
             success = adherence >= adherence_threshold
+            evaluation_error = eval_result is None
             if success:
-                attempts_to_success = attempt + 1
                 logging.info(f"[Attempt {attempt + 1}] SUCCESS (adherence={adherence:.2f})")
-            elif eval_result is not None:
-                overall_feedback = combine_feedback(eval_result.instance_metrics)
+                attempts_to_success = attempt + 1
+            elif (not success) and (not evaluation_error):
                 logging.warning(f"[Attempt {attempt + 1}] FAILURE (adherence={adherence:.2f})")
+                generated_artifact = getattr(generated_item, "code", None)
+                overall_feedback = gather_feedback(
+                    eval_result.instance_metrics,
+                    code_attempt=generated_artifact,
+                    behavior=str(behavior),
+                    environment_description=self.env_module.ENVIRONMENT_DESCRIPTION,
+                    generation_type=self.policy_type,
+                    advisor_config=self.advisor,
+                )
                 logging.debug(f"Overall feedback:\n{overall_feedback}")
-                generated_artifact = getattr(generated_item, "code", "")
-                current_feedback = (generated_artifact, overall_feedback)
+                current_feedback = (generated_artifact or "", overall_feedback)
                 if adherence > best_adherence:
                     best_adherence = adherence
                     best_feedback = current_feedback
@@ -400,7 +364,7 @@ class AgentGenerationPipeline(ABC):
                 "generation_retries": gen_retries,
                 "latencies": {
                     "generation": gen_latencies["generation"],
-                    "rollout": rollout_elapsed,
+                    "rollout": sum(float(v) for v in gen_latencies["rollout"]),
                     "evaluation": eval_elapsed,
                 },
             }
@@ -417,8 +381,8 @@ class AgentGenerationPipeline(ABC):
             "attempts_to_success": attempts_to_success,
             "n_attempts": n_attempts,
             "avg_latencies": {
-                "generation": _average_latency([a["latencies"]["generation"] for a in attempt_summaries]),
-                "rollout": _average_latency([a["latencies"]["rollout"] for a in attempt_summaries]),
+                "generation": average_values([a["latencies"]["generation"] for a in attempt_summaries]),
+                "rollout": average_values([a["latencies"]["rollout"] for a in attempt_summaries]),
                 "evaluation": (sum(a["latencies"]["evaluation"] for a in attempt_summaries) / n_attempts if n_attempts else 0.0),
             },
             "total_time": total_time,
@@ -509,6 +473,7 @@ class AgentGenerationPipeline(ABC):
                     "environment_description": environment_description,
                     "rollout_states": rollout_states,
                     "rollout_images": rollout_images,
+                    "serialize_state_fn": getattr(self.env_module, "serialize_state_fn", None),
                 }
             )
 
@@ -602,7 +567,17 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
                 _, training_latency = track_time("training")(_train_once)()
             except Exception as e:
                 gen_code = e
+                gen_code = e
                 training_latency = 0.0
+
+        if not isinstance(gen_code, Exception):
+            from popgen.utils.filesystem import find_reward_checkpoints
+
+            checkpoints = find_reward_checkpoints(output_dir)
+            if not checkpoints:
+                latest_log = latest_reward_training_log(output_dir)
+                hint = f" Latest training log: {latest_log}. " if latest_log is not None else " "
+                gen_code = FileNotFoundError(f"No checkpoints produced in {output_dir}.{hint}Training likely failed before checkpointing.")
 
         return gen_code, {"save_dir": output_dir}, {"reward_generation": reward_generation_latency, "training": training_latency}
 
@@ -618,12 +593,14 @@ class LLMAgentGenerationPipeline(AgentGenerationPipeline):
         evaluator: BehaviorAdherenceEvaluator,
         env_module: Any,
         output_dir: str,
+        advisor: LitellmConfig | None = None,
     ):
         super().__init__(
             generator=None,
             evaluator=evaluator,
             env_module=env_module,
             output_dir=output_dir,
+            advisor=advisor,
         )
         self.agent_model_config = agent_model_config
 

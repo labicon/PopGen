@@ -36,6 +36,19 @@ For each output behavior you may:
 
 First, write your reasoning: survey the candidates, identify clusters of similar ideas, note quality gaps, and decide your curation plan. Then output exactly {num_items} behaviors."""
 
+RERANKER_SYSTEM_PROMPT = """You are a behavior curator. You are given {num_candidates} candidate behaviors generated for the task below.
+
+Produce a final curated list of exactly {num_items} behaviors that jointly maximize:
+1. DIVERSITY — each behavior must explore a clearly distinct strategy, playstyle, or approach; no two should be variations of the same idea.
+2. QUALITY — each behavior must be realistic (feasible in the game environment) and specific (concrete enough to implement directly, not vague).
+
+For each output behavior you may:
+- Copy a candidate verbatim if it already meets both criteria.
+- Refine a candidate to make it more specific, realistic, or clearly distinct from others.
+- Synthesize a new behavior by combining complementary aspects of two or more candidates, as long as the result is coherent.
+
+First, write your reasoning: survey the candidates, identify clusters of similar ideas, note quality gaps, and decide your curation plan. Then output exactly {num_items} behaviors."""
+
 
 class VerbalizedSamplingStrategy(GenerationStrategy):
     """Generate diverse items by asking LLM to verbalize probability distributions."""
@@ -48,13 +61,15 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
         probability_tuning: float | None = None,
         do_cot: bool = False,
         samples_per_turn: int | None = None,
-        reranker_multiplier: float = 1,
+        oversampling_ratio: float = 1,
+        independent_oversampling: bool = False,
     ):
         super().__init__(model_config, output_type, output_dir)
         self.probability_tuning = probability_tuning
         self.do_cot = do_cot
         self.samples_per_turn = samples_per_turn
-        self.reranker_multiplier = reranker_multiplier
+        self.oversampling_ratio = oversampling_ratio
+        self.independent_oversampling = independent_oversampling
         self._build_response_types()
 
     def _build_response_types(self) -> None:
@@ -78,6 +93,11 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
             reasoning=(str, ...),
             behaviors=(list[self.output_type], ...),
         )
+        self.reranker_response_type = create_model(
+            "RerankerResponse",
+            reasoning=(str, ...),
+            behaviors=(list[self.output_type], ...),
+        )
 
     def generate(self, input_prompt: str, **kwargs: Any) -> list[T]:
         """
@@ -91,14 +111,15 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
         num_items = kwargs.get("num_items", 4)
         target_words = kwargs.get("target_words", None)
 
-        num_samplings = int(num_items * self.reranker_multiplier) if self.reranker_multiplier > 1 else num_items
+        int(num_items * self.reranker_multiplier) if self.reranker_multiplier > 1 else num_items
 
         sampled_responses = self._generate_samples(
             input_prompt=input_prompt,
-            num_samplings=num_samplings,
+            num_items=num_items,
             target_words=target_words,
         )
 
+        # Save all candidates (with probabilities) before any reranking
         # Save all candidates (with probabilities) before any reranking
         if self.output_dir:
             samples_data = [{"item": r.item.model_dump(), "probability": r.probability} for r in sampled_responses]
@@ -107,7 +128,7 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
                 json.dump(samples_data, f, indent=2)
 
         # Rerank: curate/compose num_items from the larger candidate pool
-        if self.reranker_multiplier > 1 and len(sampled_responses) > num_items:
+        if self.oversampling_ratio > 1 and len(sampled_responses) > num_items:
             items = self._rerank_samples(
                 input_prompt=input_prompt,
                 candidates=sampled_responses,
@@ -123,44 +144,74 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
     def _generate_samples(
         self,
         input_prompt: str,
-        num_samplings: int,
+        num_items: int,
         target_words: int | None = None,
     ) -> list[T]:
-        """Generate sampled responses with probabilities from the LLM."""
-        if self.samples_per_turn is not None:
-            return self._generate_samples_iterative(
-                input_prompt=input_prompt,
-                num_samplings=num_samplings,
-                target_words=target_words,
-            )
+        """Generate sampled responses with probabilities from the LLM.
 
-        return self._generate_samples_single(
+        Oversampling layout:
+        - ``independent_oversampling=False``: 1 run of ``num_items * ratio`` items.
+        - ``independent_oversampling=True``: ``ratio`` independent runs of ``num_items`` items each.
+
+        Within each run, ``samples_per_turn`` controls sequential batching:
+        the run is split into ceil(n_items_per_run / k) sequential calls of k
+        items, where each call sees the items generated so far as context.
+        When ``samples_per_turn`` is not set, each run is a single call.
+        """
+        ratio = max(1, int(self.oversampling_ratio))
+
+        if self.independent_oversampling and ratio > 1:
+            from pqdm.threads import pqdm
+
+            args = [{"input_prompt": input_prompt, "n_items_per_run": num_items, "target_words": target_words} for _ in range(ratio)]
+            results = pqdm(args, self._run_single_sampling_run, n_jobs=ratio, argument_type="kwargs")
+            return [r for run in results for r in run]
+
+        # Single run with all items
+        n_items_per_run = num_items * ratio
+        return self._run_single_sampling_run(
             input_prompt=input_prompt,
-            num_samplings=num_samplings,
+            n_items_per_run=n_items_per_run,
             target_words=target_words,
         )
 
-    def _generate_samples_iterative(
+    def _run_single_sampling_run(
         self,
         input_prompt: str,
-        num_samplings: int,
+        n_items_per_run: int,
         target_words: int | None = None,
     ) -> list[T]:
-        """Generate samples in parallel independent calls of samples_per_turn each."""
-        batch_sizes: list[int] = []
-        remaining = num_samplings
+        """Execute one sampling run, optionally split into sequential batches via samples_per_turn."""
+        k = self.samples_per_turn or n_items_per_run
+
+        if k >= n_items_per_run:
+            return self._generate_samples_single(
+                input_prompt=input_prompt,
+                num_samplings=n_items_per_run,
+                target_words=target_words,
+            )
+
+        # Sequential batching: each batch sees previous generations as context
+        all_responses = []
+        remaining = n_items_per_run
         while remaining > 0:
-            batch_sizes.append(min(self.samples_per_turn, remaining))
-            remaining -= batch_sizes[-1]
+            batch_size = min(k, remaining)
 
-        from pqdm.threads import pqdm
+            if all_responses:
+                samples_list = "\n".join(f"- {r.item.model_dump_json()}" for r in all_responses)
+                batch_prompt = f"{input_prompt}\n\nGenerate {batch_size} alternative responses to the ones already generated:\n{samples_list}"
+            else:
+                batch_prompt = input_prompt
 
-        args = [
-            {"input_prompt": input_prompt, "num_samplings": bs, "target_words": target_words}
-            for bs in batch_sizes
-        ]
-        results = pqdm(args, self._generate_samples_single, n_jobs=len(batch_sizes), argument_type="kwargs")
-        return [r for batch in results for r in batch]
+            batch_responses = self._generate_samples_single(
+                input_prompt=batch_prompt,
+                num_samplings=batch_size,
+                target_words=target_words,
+            )
+            all_responses.extend(batch_responses)
+            remaining -= batch_size
+
+        return all_responses
 
     def _generate_samples_single(
         self,
@@ -241,7 +292,7 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
             # Fall back to original candidates if reranker returned too few
             if len(behaviors) < num_items:
                 fallback = [c.item for c in candidates]
-                behaviors.extend(fallback[:num_items - len(behaviors)])
+                behaviors.extend(fallback[: num_items - len(behaviors)])
 
             return behaviors
 

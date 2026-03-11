@@ -1,0 +1,5 @@
+- env=football
+- n_behaviors=4
+- behavior=verbalized_sampling
+- +behavior.reranker_multiplier=2
+- behavior.model_config.model_name=openrouter/google/gemini-3.1-pro-preview

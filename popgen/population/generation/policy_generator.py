@@ -12,6 +12,7 @@ Your task is to generate a policy script that aligns with the given behavior des
 Some important details to consider:
 - The policy should be provided as Python code that can be executed in a simulation environment.
 - The policy should define a function `policy(obs)` that takes in the current observation of the ego agent and returns an action as a torch tensor.
+- Persistent function-level state is allowed via function attributes (for example, `policy.target_idx` or `policy.wait_count`) to store information across steps within a rollout.
 - Only rely on `torch`, make sure to import it before function definition if necessary. Do not include any other imports.
 
 The observation `obs` passed to the function is a torch tensor of shape (observation_dim,).
@@ -22,6 +23,7 @@ Environment description:
 Please ensure that the generated code is clean, well-structured, and adheres to the specified action format.
 The returned action should be a torch tensor of shape (action_dim,) where action_dim is defined in the action format description.
 In example for a continuous action space with 3 dimensions, the returned action should be something like `torch.tensor([0.5, -0.2, 1.0])`.
+For discrete action spaces where actions is single-dimensional integer IDs (e.g. 0..N-1), return a SINGLE scalar action id like `torch.tensor(2)` not `torch.tensor([2])`.
 
 Output format requirements:
 - Return a valid json object.

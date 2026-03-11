@@ -12,8 +12,8 @@
     "description": "This behavior plays a balanced, transitional role, shifting dynamically between offense and defense. When the ball is in the opponent's half, it trails slightly behind the primary attacking teammate to collect rebounds, intercept loose balls, and sustain offensive pressure. When on defense, it actively tracks back into the midfield to harass opponents, disrupt their plays early, and assist in defending the goal."
   },
   {
-    "name": "Tactical Man-Marker",
-    "description": "This behavior prioritizes opponent disruption over direct ball possession or scoring. The agent continuously tracks and physically shadows the most threatening red team player, strategically positioning itself to block their movement paths, constantly harass them, and intercept potential passes. By relentlessly neutralizing one of the opponents and keeping them out of the main play, it aims to create highly favorable 1v1 situations for its teammate."
+    "name": "Ball-Side Sweeper",
+    "description": "This behavior prioritizes defensive support anchored on the ball, not on man-marking a specific opponent. When the ball is in the blue half, the agent drops between the ball and the blue goal and closes space cautiously to block direct dribbles. When the ball is in midfield or the red half, it holds a supporting lane behind or beside the teammate, ready to collect loose balls and recycle possession instead of over-committing. It uses short, controlled movements to maintain shape and quickly recover if possession is lost."
   },
   {
     "name": "Opportunistic Poacher",

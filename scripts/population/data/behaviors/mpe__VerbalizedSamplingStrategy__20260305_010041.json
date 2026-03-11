@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Direct Chaser",
+    "description": "Always moves toward the closest prey using maximum allowed force; prioritizes closing distance quickly to achieve a tag."
+  },
+  {
+    "name": "Predictive Lead",
+    "description": "Estimates the prey\u2019s velocity and position a short step ahead to intercept more efficiently, reducing chase duration."
+  },
+  {
+    "name": "Flanking Interceptor",
+    "description": "Approaches prey from the side, maintaining an offset to block escape routes and improve tagging odds without colliding with the ally."
+  },
+  {
+    "name": "Coordinated Shadow",
+    "description": "Keeps a strategic relation to the ally predator (e.g., offset behind or to the side) to create pounce-ready pressure while avoiding interference."
+  },
+  {
+    "name": "Delayed Pouncer",
+    "description": "Approaches prey in a standard chase but intentionally delays the final sprint, baiting a commitment from the prey before surging for the tag."
+  },
+  {
+    "name": "Unpredictable Drift",
+    "description": "Incorporates small, bounded random variations in heading to disrupt prey prediction and increase surprise tagging opportunities."
+  }
+]

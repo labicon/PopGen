@@ -16,41 +16,79 @@ from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
 # Path to local RL config directory
 RL_CFG_DIR = Path(__file__).parent / "rl_cfg"
 
-ENVIRONMENT_DESCRIPTION = """The environment is a football (soccer) game in a simulated environment.
-The objective of the blue team is to score a goal by getting the ball into the red team's goal area while preventing the red team from scoring in the blue team's goal area.
+ENVIRONMENT_DESCRIPTION = """The environment is a football (soccer) game in simulation.
+The objective of the blue team is to score by getting the ball into the red team's goal area while preventing the red team from scoring in the blue team's goal area.
+The blue team has 2 agents and the red team has 1 agent (2v1), and blue agents must coordinate without explicit communication.
+An episode terminates immediately when blue scores or when blue concedes.
 
-Each team consists of 2 agents.
-The agents can move around the field and kick the ball by applying forces to it.
-The agents must coordinate with their teammate to score goals and defend against the opponent team.
+There are two blue agents: Agent 0 and Agent 1.
+The ego team is on the left side wearing blue jerseys, the opponent team is on the right side wearing red jerseys.
+The ego agent is the blue football player tagged #1 (blue Agent 0).
 
-Note that the ego team is located in the left side of the football field, wearing blue jerseys,
-and the opponent team is located in the right side of the football field, wearing red jerseys.
-The ego agent is represented as the blue football player with the tag #1.
+================================================================================
+CRITICAL PHYSICS PARAMETERS - READ CAREFULLY
+================================================================================
 
-> **Observation Space**:
-Each agent observes a flattened vector describing its interaction with the ball, goal, teammate, and adversaries. All vectors are typically 2D `(x, y)`.
-- Index 0–1: `ego_agent_force` — Current force applied to the ego agent (captures intended acceleration).
-- Index 2–3: `ego_to_ball_relative_position` — Direction and distance from the ball to the agent.
-- Index 4–5: `ego_to_ball_relative_velocity` — Whether the agent is closing in on or moving away from the ball.
-- Index 6–7: `ball_to_goal_relative_position` — How far and in what direction the ball is from the goal.
-- Index 8–9: `ball_velocity` — Speed and direction of the ball's movement.
-- Index 10–11: `ball_force` — Current force affecting the ball (e.g., from recent contacts).
-- Index 12–13: `ego_to_goal_relative_position` — Agent's positioning relative to the scoring target.
-- Index 14–15: `ego_velocity` — Agent's own movement speed and direction.
+1. FIELD DIMENSIONS:
+   - Pitch size: 3.0 (x) x 1.5 (y)
+   - X-axis: -1.5 (left) to +1.5 (right)
+   - Y-axis: -0.75 (bottom) to +0.75 (top)
+   - Field center: (0.0, 0.0)
 
-*Adversaries Elements (each contributes 8 dims):*
-- Index 16–23: `adversary_0_features` — Relative position and velocity to adversary 0 plus its absolute velocity and force; helps anticipate opponent behavior.
-- Index 24–31: `adversary_1_features` — Same information for adversary 1.
+2. AGENT PHYSICS:
+   - Agent radius: 0.025
+   - Maximum speed: 0.15 units/timestep
+   - Action magnitude 1.0 corresponds to acceleration of 0.1 units/timestep^2
 
-*Teammates Elements (each contributes 8 dims):*
-- Index 32–39: `teammate_0_features` — Relative position and velocity to the teammate plus their velocity and force; useful for coordination and spacing.
+3. BALL PHYSICS:
+   - Ball radius: 0.02
+   - Ball has friction/drag and slows naturally
 
-> **Action Space**:
-The action should be a torch tensor of shape (1, 2) representing the force applied to the agent.
-The action is represented as a tuple (fx, fy) where:
-- `fx`: Horizontal force component, where -1 means full force to the left and 1 means full force to the right.
-- `fy`: Vertical force component, where -1 means full force downwards and 1 means full force upwards.
-Note that you can only move the agent, and therefore do not have direct access to kick the ball. You should move towards the ball and apply force to it in order to kick the ball towards the goal."""
+4. BALL CONTACT (VERY IMPORTANT):
+   - Contact threshold distance: 0.045 (= 0.025 + 0.02)
+   - This contact zone is very small relative to field size, so accurate positioning is required to move the ball
+
+5. GOAL POSITIONS:
+   - Blue goal to defend: (-1.5, 0.0) on LEFT
+   - Red goal to attack: (+1.51, 0.0) on RIGHT
+   - To score, move/push the ball toward +X into the right goal area
+
+================================================================================
+OBSERVATION TENSOR LAYOUT (32 dimensions in this 2v1 config)
+================================================================================
+
+Each agent observes a flattened 32-dimensional vector.
+Sign conventions matter: relative terms are written in exact order (e.g. `agent_pos - ball_pos`, not the reverse).
+
+  [0:2]   - `agent_force` (2D): current force applied to ego agent
+  [2:4]   - `agent_pos - ball_pos` (2D): relative position from ball to ego
+  [4:6]   - `agent_vel - ball_vel` (2D): relative velocity between ego and ball
+  [6:8]   - `ball_pos - red_goal_pos` (2D): ball displacement relative to scoring target
+  [8:10]  - `ball_vel` (2D): absolute ball velocity
+  [10:12] - `ball_force` (2D): current force on ball
+  [12:14] - `agent_pos - red_goal_pos` (2D): ego position relative to scoring target
+  [14:16] - `agent_vel` (2D): absolute ego velocity
+  [16:24] - adversaries (8D): 1 adversary x 8 dims
+             For each adversary: relative position, relative velocity, absolute velocity, force
+  [24:32] - teammate (8D): 1 teammate x 8 dims
+             Relative position, relative velocity, teammate absolute velocity, teammate force
+
+Adversary features help anticipate opponent pressure and interceptions.
+Teammate features help spacing and coordination.
+
+================================================================================
+ACTION OUTPUT
+================================================================================
+
+The action should be a torch tensor of shape `(1, 2)` or `(2,)` representing force `(fx, fy)`.
+- `fx` in [-1, 1]: left/right force
+- `fy` in [-1, 1]: down/up force
+- Action magnitude must be <= 1.0 (larger values can fail rollout)
+
+CRITICAL NOTE:
+- `enable_shooting` is False.
+- There is no separate kick/shoot action.
+- Ball movement is only through physical collisions, so dribbling and body positioning are key."""
 
 REWARD_API_REFERENCE = """Reward function API (authoritative):
 - Signature: `compute_reward(self, agent)`.
@@ -68,7 +106,9 @@ REWARD_API_REFERENCE = """Reward function API (authoritative):
 REWARD_EXAMPLE = """Simple reward function example for the football environment:
 
 ```python
-def reward_fn(self, agent: Agent):
+import torch
+
+def compute_reward(self, agent):
 
     reward = torch.zeros(self.world.batch_dim, device=self.world.device)
 
@@ -111,6 +151,33 @@ def reward_fn(self, agent: Agent):
     return reward
 ```"""
 
+
+def _set_done_on_goal_or_conceded(scenario) -> None:
+    """Force terminal state when either team scores."""
+    world = getattr(scenario, "world", None)
+    ball = getattr(world, "ball", None) if world is not None else None
+    if ball is None or not hasattr(ball, "state"):
+        return
+    ball_pos = getattr(ball.state, "pos", None)
+    if ball_pos is None:
+        return
+
+    over_right_line = ball_pos[:, 0] > scenario.pitch_length / 2 + scenario.ball_size / 2
+    over_left_line = ball_pos[:, 0] < -scenario.pitch_length / 2 - scenario.ball_size / 2
+    goal_mask = (ball_pos[:, 1] <= scenario.goal_size / 2) & (ball_pos[:, 1] >= -scenario.goal_size / 2)
+    blue_score = over_right_line & goal_mask
+    red_score = over_left_line & goal_mask
+    scenario._done = blue_score | red_score
+
+
+def _wrap_reward_with_goal_termination(reward_fn: callable):
+    def wrapped_reward_fn(scenario, agent):
+        reward = reward_fn(scenario, agent)
+        _set_done_on_goal_or_conceded(scenario)
+        return reward
+
+    return wrapped_reward_fn
+
 # ---------------------------------------------------------------------------- #
 #                                 Action Type                                  #
 # ---------------------------------------------------------------------------- #
@@ -139,55 +206,6 @@ class ActionType(BaseModel):
 
 
 # ---------------------------------------------------------------------------- #
-#                              State Extraction                                #
-# ---------------------------------------------------------------------------- #
-
-
-def get_state_football(env):
-    state = {}
-
-    blue_team, red_team = env.scenario.blue_agents, env.scenario.red_agents
-    goal_pos = env.scenario.right_goal_pos
-
-    def _get_agent_state(agent):
-        pos = agent.state.pos[0].cpu().numpy().tolist()
-        vel = agent.state.vel[0].cpu().numpy().tolist()
-        action = agent.action.u[0].cpu().numpy().tolist()
-        return {
-            "action": [round(x, 2) for x in action],
-            "pos": [round(x, 2) for x in pos],
-            "vel": [round(x, 2) for x in vel],
-        }
-
-    # Use nested 'agents' dict so rollout_states_to_str can print all entries
-    agents_data = {}
-
-    # Ego team agents
-    agents_data = {}
-    for agent in blue_team:
-        agents_data[agent.name] = _get_agent_state(agent)
-        agents_data[agent.name] = _get_agent_state(agent)
-
-    # Adversary team agents
-    for agent in red_team:
-        agents_data[agent.name] = _get_agent_state(agent)
-
-    state["agents"] = agents_data
-
-    # Ball and goal state (included here so they appear in logged output)
-    ball_pos = env.scenario.ball.state.pos[0].cpu().numpy().tolist()
-    ball_vel = env.scenario.ball.state.vel[0].cpu().numpy().tolist()
-    agents_data["ball"] = {
-        "pos": [round(x, 2) for x in ball_pos],
-        "vel": [round(x, 2) for x in ball_vel],
-    }
-    agents_data["goal"] = {"pos": [round(x, 2) for x in goal_pos.cpu().numpy().tolist()]}
-
-    state["agents"] = agents_data
-    return state
-
-
-# ---------------------------------------------------------------------------- #
 #                            Training & Rollout                                #
 # ---------------------------------------------------------------------------- #
 
@@ -200,6 +218,7 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
         reward_fn: Callable taking (agent, world) and returning reward tensor.
         output_dir: Directory to save results.
     """
+    reward_fn = _wrap_reward_with_goal_termination(reward_fn)
     scripted_policy = kwargs.pop("scripted_policy", None)
     if scripted_policy is None:
         temp_env = create_env(num_envs=1, seed=0, device="cpu")
@@ -226,27 +245,57 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
 def rollout_fn(policy, env=None, **kwargs):
     """
     Rollout the policy loaded from the checkpoint in save_dir.
-    Uses the experiment's test_env to ensure correct observation structure.
+    Uses rollout states extracted directly from tensordicts.
     """
     # if env is not defined, load default football environment
     if env is None:
         env = create_env(**kwargs)
 
     if "max_steps" not in kwargs:
-        kwargs["max_steps"] = 200  # Default max steps for football
-
-    # If the policy is list of policies, wrap them with MultiPolicyWrapper to create a single policy that can be used for rollout.
-    if isinstance(policy, list) and len(policy) > 1:
-        from popgen.agents.scripted_partner import MultiPolicyWrapper
-
-        policy = MultiPolicyWrapper(policies=policy)
+        # Match football task horizon from rl_cfg/football.yaml unless explicitly overridden.
+        kwargs["max_steps"] = 300
 
     return rollout_vmas_env(
         policy=policy,
         env=env,
-        get_state_fn=get_state_football,
         **kwargs,
     )
+
+
+def serialize_state_fn(rollout_data: list[dict]) -> list[dict]:
+    for step in rollout_data:
+        for team_name in ("ego_team", "opponent_team"):
+            for agent_state in step.get(team_name, {}).values():
+                raw_state = agent_state.get("state")
+                if isinstance(raw_state, list) and len(raw_state) >= 32:
+                    ego_x = 1.51 + float(raw_state[12])
+                    ego_y = float(raw_state[13])
+                    ball_x = 1.51 + float(raw_state[6])
+                    ball_y = float(raw_state[7])
+                    teammate_x = ego_x + float(raw_state[24])
+                    teammate_y = ego_y + float(raw_state[25])
+                    opponent_x = ego_x + float(raw_state[16])
+                    opponent_y = ego_y + float(raw_state[17])
+                    ego_ball_dx = float(raw_state[2])
+                    ego_ball_dy = float(raw_state[3])
+                    agent_state["serialized_state"] = {
+                        "ego_pos": [ego_x, ego_y],
+                        "ego_speed": float(torch.linalg.vector_norm(torch.tensor(raw_state[14:16], dtype=torch.float32)).item()),
+                        "ball_pos": [ball_x, ball_y],
+                        "teammate_pos": [teammate_x, teammate_y],
+                        "opponent_pos": [opponent_x, opponent_y],
+                        "red_goal_pos": [1.51, 0.0],
+                        "blue_goal_pos": [-1.5, 0.0],
+                        "distance_to_ball": float((ego_ball_dx**2 + ego_ball_dy**2) ** 0.5),
+                        "distance_to_teammate": float(((teammate_x - ego_x) ** 2 + (teammate_y - ego_y) ** 2) ** 0.5),
+                        "in_opponent_half": ego_x > 0.0,
+                        "in_final_third": ego_x > 0.5,
+                        "in_box": ego_x > 1.0,
+                        "central_lane": abs(ego_y) <= 0.2,
+                        "ball_in_final_third": ball_x > 0.5,
+                        "ball_in_box": ball_x > 1.0,
+                    }
+    return rollout_data
 
 # ---------------------------------------------------------------------------- #
 #                              Make env function                               #
@@ -276,22 +325,111 @@ def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **k
 
 
 class ScriptedPolicy(torch.nn.Module):
-    """Simple scripted football partner policy.
+    """Hybrid scripted football partner policy.
 
-    Moves toward the ball direction inferred from the observation:
-    obs[2:4] = ego_to_ball_relative_position.
+    Behavior:
+    - If teammate is closer to the ball, yield possession and run toward goal.
+    - Otherwise recover the ball and, once in control, move to pass toward teammate.
     """
 
     def __init__(self, env=None):
         super().__init__()
         self.env = env
         self.dummy_param = torch.nn.Parameter(torch.zeros(1))
+        self.pitch_length = 3.0
+        self.teammate_ball_radius = 0.16
+        self.teammate_arrival_radius = 0.20
+        self.teammate_arrival_horizon = 3.0
+        self.ball_control_radius = 0.08
+        self.teammate_support_radius = 0.35
+
+    @staticmethod
+    def _unit(direction: torch.Tensor) -> torch.Tensor:
+        norm = torch.linalg.norm(direction, dim=-1, keepdim=True) + 1e-8
+        return direction / norm
+
+    @staticmethod
+    def _teammate_rel_slice(obs_dim: int) -> slice:
+        # Observation layout:
+        # 16 base dims + (8 * n_adversaries) + 8 teammate dims
+        # teammate relative position is the first 2 dims of the teammate block.
+        n_adversaries = max(0, (obs_dim - 24) // 8)
+        start = 16 + 8 * n_adversaries
+        return slice(start, start + 2)
 
     def forward(self, obs) -> torch.Tensor:
         obs_tensor, action_key = extract_observation_and_action_key(obs)
-        # Use `...` to index the last (obs feature) dimension regardless of
-        # whether obs_tensor is [batch, obs_dim] or [batch, 1, obs_dim].
-        direction_to_ball = -obs_tensor[..., 2:4]
-        norm = torch.linalg.norm(direction_to_ball, dim=-1, keepdim=True) + 1e-8
-        action = (direction_to_ball / norm).clamp(-1, 1)
+        if obs_tensor.shape[-1] < 16:
+            # Fallback for unexpected observation schemas.
+            direction_to_ball = -obs_tensor[..., 2:4]
+            action = self._unit(direction_to_ball).clamp(-1, 1)
+            return format_action_output(obs, action_key, action)
+
+        # Core vectors from observation.
+        rel_ball = obs_tensor[..., 2:4]           # agent_pos - ball_pos
+        rel_goal = obs_tensor[..., 12:14]         # agent_pos - opponent_goal_pos
+        dir_to_ball = self._unit(-rel_ball)
+        dir_to_goal = self._unit(-rel_goal)
+
+        teammate_slice = self._teammate_rel_slice(obs_tensor.shape[-1])
+        teammate_start = teammate_slice.start
+        rel_teammate = obs_tensor[..., teammate_slice]  # agent_pos - teammate_pos
+        dir_to_teammate = self._unit(-rel_teammate)
+        teammate_vel = obs_tensor[..., teammate_start + 4 : teammate_start + 6]
+        ball_vel = obs_tensor[..., 8:10]
+
+        dist_self_ball = torch.linalg.norm(rel_ball, dim=-1, keepdim=True)
+        teammate_to_ball = rel_ball - rel_teammate
+        dist_tm_ball = torch.linalg.norm(teammate_to_ball, dim=-1, keepdim=True)
+        teammate_to_ball_vel = teammate_vel - ball_vel
+        teammate_to_ball_pred = teammate_to_ball + self.teammate_arrival_horizon * teammate_to_ball_vel
+        dist_tm_ball_pred = torch.linalg.norm(teammate_to_ball_pred, dim=-1, keepdim=True)
+
+        teammate_closer = dist_tm_ball + 0.02 < dist_self_ball
+        teammate_near_ball = dist_tm_ball < self.teammate_ball_radius
+        teammate_arriving_ball = (dist_tm_ball_pred + 0.01 < dist_tm_ball) & (
+            dist_tm_ball_pred < self.teammate_arrival_radius
+        )
+        teammate_ready_ball = teammate_near_ball | teammate_arriving_ball
+        yield_to_teammate = teammate_closer & teammate_ready_ball
+        has_ball = dist_self_ball < self.ball_control_radius
+
+        # If teammate can take possession, move into a pass-support lane:
+        # closer to teammate with mild goal bias, but avoid entering the goal mouth.
+        support_action = self._unit(0.65 * dir_to_teammate + 0.35 * dir_to_goal)
+        away_from_goal = self._unit(rel_goal)
+        too_close_to_goal = rel_goal[..., 0:1] > -0.35
+        near_goal_mouth = torch.abs(rel_goal[..., 1:2]) < 0.25
+        support_safe = torch.where(
+            too_close_to_goal & near_goal_mouth,
+            self._unit(0.85 * away_from_goal + 0.15 * dir_to_teammate),
+            support_action,
+        )
+
+        # Ball progression policy by x-field zone:
+        # 0-50%: carry forward; 50-75%: pass if teammate around/in front, else shoot; 75-100%: shoot.
+        dist_to_goal_x = -rel_goal[..., 0:1]
+        progress_x = ((self.pitch_length - dist_to_goal_x) / self.pitch_length).clamp(0.0, 1.0)
+        in_build_up_zone = progress_x < 0.50
+        in_pass_zone = (progress_x >= 0.50) & (progress_x <= 0.75)
+
+        teammate_dist = torch.linalg.norm(rel_teammate, dim=-1, keepdim=True)
+        teammate_around = teammate_dist < self.teammate_support_radius
+        teammate_in_front = rel_teammate[..., 0:1] < -0.02
+        teammate_pass_option = teammate_around | teammate_in_front
+
+        dribble_action = self._unit(0.9 * dir_to_goal + 0.1 * dir_to_teammate)
+        pass_action = self._unit(0.9 * dir_to_teammate + 0.1 * dir_to_goal)
+        shoot_action = self._unit(0.96 * dir_to_goal + 0.04 * dir_to_teammate)
+        pass_or_shoot = torch.where(teammate_pass_option, pass_action, shoot_action)
+        attack_action = torch.where(
+            in_build_up_zone,
+            dribble_action,
+            torch.where(in_pass_zone, pass_or_shoot, shoot_action),
+        )
+
+        # If teammate is not near the ball, prioritize ball recovery.
+        recover_or_attack = torch.where(has_ball, attack_action, dir_to_ball)
+        action = torch.where(yield_to_teammate, support_safe, recover_or_attack)
+        action = action.clamp(-1, 1)
         return format_action_output(obs, action_key, action)

@@ -31,6 +31,7 @@ from popgen.utils.config import LitellmConfig
 
 configure_warning_filters(force=True)
 
+logging.getLogger("absl").setLevel(logging.WARNING)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -237,6 +238,7 @@ def _build_eval_inputs(
     behavior: Behavior,
     environment_description: str,
     rollouts: list[dict[str, Any] | Exception],
+    serialize_state_fn: Any = None,
 ) -> list[dict[str, Any]]:
     inputs = []
     for result in rollouts:
@@ -258,6 +260,7 @@ def _build_eval_inputs(
                 "environment_description": environment_description,
                 "rollout_states": rollout_states,
                 "rollout_images": rollout_images,
+                "serialize_state_fn": serialize_state_fn,
             }
         )
     return inputs
@@ -353,12 +356,6 @@ def parse_args() -> argparse.Namespace:
         help="Which attempt(s) to evaluate per run (default: best).",
     )
     parser.add_argument("--judge-model", type=str, default=None, help="Optional adherence judge model override")
-    parser.add_argument(
-        "--judge-timeout-sec",
-        type=float,
-        default=120.0,
-        help="Per-request timeout (seconds) for judge model calls (default: 120).",
-    )
     parser.add_argument("--output-dir", type=str, default=None, help="Optional output directory. Default: <result_path>/eval/<timestamp>")
     parser.add_argument(
         "--skip-existing",
@@ -409,7 +406,6 @@ def main() -> None:
     logging.info(f"Runs:       {len(runs)}")
     logging.info(f"Rollouts:   {args.num_rollouts} per run")
     logging.info(f"Attempts:   {args.attempt_selection}")
-    logging.info(f"Judge timeout: {args.judge_timeout_sec}s")
     logging.info(f"Base seed:  {args.base_seed}")
     logging.info(f"Dry run:    {args.dry_run}")
     logging.info(f"Skip existing: {args.skip_existing}")
@@ -545,12 +541,12 @@ def main() -> None:
                     behavior=behavior,
                     environment_description=env_module.ENVIRONMENT_DESCRIPTION,
                     rollouts=rollouts,
+                    serialize_state_fn=getattr(env_module, "serialize_state_fn", None),
                 )
 
                 evaluator = BehaviorAdherenceEvaluator(
                     model_config=LitellmConfig(
                         model_name=judge_model,
-                        generation_kwargs={"timeout": float(args.judge_timeout_sec)},
                     ),
                     num_workers=max(1, int(args.workers)),
                 )

@@ -99,6 +99,10 @@ def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
         )
 
         generation_type = job["generation_type"]
+        advisor = None
+        if evaluation_cfg.get("advisor_model"):
+            advisor = LitellmConfig(model_name=evaluation_cfg["advisor_model"])
+
         if generation_type == "rl_reward":
             generator = RewardFnGenerator(
                 model_config=LitellmConfig(model_name=generation_cfg["model_name"])
@@ -108,6 +112,7 @@ def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
                 evaluator=evaluator,
                 env_module=env,
                 output_dir=job["output_dir"],
+                advisor=advisor,
             )
             generation_kwargs = {}
         elif generation_type == "policy_code":
@@ -119,6 +124,7 @@ def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
                 evaluator=evaluator,
                 env_module=env,
                 output_dir=job["output_dir"],
+                advisor=advisor,
             )
             generation_kwargs = {}
         elif generation_type == "llm_agent":
@@ -128,6 +134,7 @@ def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
                 evaluator=evaluator,
                 env_module=env,
                 output_dir=job["output_dir"],
+                advisor=advisor,
             )
             reserved_keys = {"type", "evaluate", "model_name", "max_evaluation_attempts", "n_generation_retries"}
             generation_kwargs = {k: v for k, v in generation_cfg.items() if k not in reserved_keys}

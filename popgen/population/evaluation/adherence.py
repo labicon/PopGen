@@ -15,33 +15,45 @@ from .base import BaseEvaluator, EvalResult
 
 # ---------------------------------- PROMPTS --------------------------------- #
 
-BEHAVIOR_ADHERENCE_SYSTEM_PROMPT = """You are an expert in evaluating whether agent actions align with a given behavior description.
+BEHAVIOR_ADHERENCE_SYSTEM_PROMPT = """You are an expert evaluator of whether an agent's actions match a given behavior description.
 
-You will be provided with a behavior description and rollouts from the agent (trajectory states and possibly images sequences).
-Your task is to evaluate how well the ego agent followed the behavior description based on these input rollouts.
-Evaluate whether its actions align with the described behavior, do not consider other goals.
-Focus on the ego agent only, forget everything else including its teammates and opponents!
-You can use the rollout states to illustrate points.
+You will be given:
+- a behavior description
+- agent rollouts (trajectory states and possibly image sequences)
 
-In rare situations where the agent cannot fully demonstrate or transcribe the expected behavior due to limitations in the environment setup, but still makes a genuine and reasonable effort to comply, you may evaluate it as adhering to the behavior. 
-However, you must clearly explain the constraints and your justification in the reasoning section as the following JSON:
+Your task is to determine whether the **ego agent's actions** adhere to the behavior description.
+
+Guidelines:
+- Evaluate alignment with the described behavior only.
+- Do **not** consider any other possible goals.
+- Focus **only** on the ego agent.
+- Consider interactions with other agents only when it makes sense regarding behavior following or if it affects the ego agent's ability to demonstrate the behavior.
+- You may reference rollout states in your explanation.
+- Use states as the primary source of truth and images as supporting evidence.
+- Some rollouts may provide serialized states instead of raw observations. Serialized states are structured summaries
+  derived from the environment state, such as positions, distances, zones, nearest targets, and other task-relevant
+  features. When serialized states are present, interpret them literally and use them as the main basis for factual claims.
+
+In rare cases, the agent may be unable to fully demonstrate the expected behavior because of environment limitations or teammate actions.
+If the ego agent still makes a clear, reasonable, good-faith effort to follow the behavior, you may mark it as adherent.
+When you do this, you must explicitly explain the constraint and justify the decision in the reasoning field, for example:
+
 {{
     "evaluation": true,
-    "reasoning": "The behavior cannot be fully demonstrated due to environment limitations, but the agent made a good-faith effort to follow the expected behavior within those constraints.",
-    "feedback": ""
+    "reasoning": "The behavior could not be fully demonstrated because of environment limitations, but the agent made a good-faith effort to follow it within those constraints."
 }}
 
-The visual description of the ego agent will be provided in the environment description.
-In the trajectory logs, the ego agent is named agent0.
+The environment description will specify how to identify the ego agent visually.
+In the trajectory logs, the ego agent appears as `ego_agent` under `ego_team`.
 
 # Environment Description
 {environment_description}
 
 # Output Format
-Return a JSON object with the following fields:
-- "evaluation": boolean indicating whether the rollout showcases the behavior.
-- "reasoning": detailed explanation justifying the evaluation (e.g., what specific actions or states in the rollout demonstrate adherence or non-adherence).
-- "feedback": actionable instruction on what to change in the policy to better align with the behavior next time (focus on the *what*, not the *why*).
+Return a JSON object with exactly these fields:
+- "evaluation": a boolean indicating whether the rollout demonstrates the behavior
+- "reasoning": a detailed explanation of why the rollout does or does not demonstrate the behavior,
+  including the single most decisive reason for the verdict and specific actions or states when relevant
 """
 
 BEHAVIOR_ADHERENCE_USER_PROMPT = """Behavior:
@@ -55,10 +67,9 @@ class BehaviorAdherenceResult(BaseModel):
 
     evaluation: bool
     reasoning: str
-    feedback: str
 
     def __str__(self) -> str:
-        return f"Evaluation: {self.evaluation}\nReasoning: {self.reasoning}\nFeedback: {self.feedback}"
+        return f"Evaluation: {self.evaluation}\nReasoning: {self.reasoning}"
 
 
 class BehaviorAdherenceEvaluator(BaseEvaluator):
@@ -90,10 +101,11 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             environment_description = input_data["environment_description"]
             rollout_states = input_data["rollout_states"]
             rollout_images = input_data.get("rollout_images", [None] * len(input_data["rollout_states"]))
+            serialize_state_fn = input_data.get("serialize_state_fn")
 
             # Error in rollout -> skip evaluation and return 0 adherence with error message as reasoning
             if isinstance(rollout_states, str) and "[ERROR]" in rollout_states:
-                return {"adherence": 0.0, "reasoning": rollout_states, "feedback": "Fix the implementation."}
+                return {"adherence": 0.0, "reasoning": rollout_states}
 
             system_prompt = BEHAVIOR_ADHERENCE_SYSTEM_PROMPT.format(
                 environment_description=environment_description,
@@ -103,7 +115,8 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             )
             content = [{"type": "text", "text": user_prompt}]
 
-            prefix = f"Rollout (showing {len(rollout_states)} sampled states and {len(rollout_images)} sampled images):"
+            state_desc = "serialized sampled states" if serialize_state_fn is not None else "sampled states"
+            prefix = f"Rollout (showing {len(rollout_states)} {state_desc} and {len(rollout_images)} sampled images in chronological order; step numbers are meaningful):"
             separator = "-" * 60
             content.append({"type": "text", "text": f"{prefix}\n{separator}"})
 
@@ -117,7 +130,7 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
                 )
 
             # Add all states
-            content.append({"type": "text", "text": rollout_states_to_str(rollout_states)})
+            content.append({"type": "text", "text": rollout_states_to_str(rollout_states, serialize_state_fn=serialize_state_fn)})
             content.append({"type": "text", "text": separator})
 
             response = litellm.completion(
@@ -131,13 +144,12 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
             )
             eval_result = parse_llm_response(response, BehaviorAdherenceResult)
         except Exception as e:
-            eval_result = BehaviorAdherenceResult(evaluation=False, reasoning=f"[ERROR] Evaluation failed: {e}", feedback="")
+            eval_result = BehaviorAdherenceResult(evaluation=False, reasoning=f"[ERROR] Evaluation failed: {e}")
 
         result = eval_result.model_dump()
         return {
             "adherence": 1.0 if result["evaluation"] else 0.0,
             "reasoning": result["reasoning"],
-            "feedback": result["feedback"],
         }
 
     def aggregate_metrics(self, instance_metrics: list[dict[str, Any]], **kwargs) -> dict[str, Any]:

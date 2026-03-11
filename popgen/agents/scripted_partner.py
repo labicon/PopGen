@@ -20,14 +20,22 @@ def _normalize_stacked_action(action) -> torch.Tensor:
         action = torch.as_tensor(action)
 
     if action.dim() == 0:
-        action = action.unsqueeze(0)
+        return action
 
     # Preserve per-policy semantics while removing singleton agent axis
     # introduced by grouped slicing (..., i:i+1, ...).
     if action.dim() >= 2 and action.shape[-2] == 1:
         action = action.squeeze(-2)
 
-    if action.dim() > 0 and action.shape[-1] == 1:
+    # Grouped single-agent slicing in discrete environments can leave a
+    # singleton 1-D tensor like [4]; collapse it back to a scalar before
+    # stacking over agents.
+    if action.dim() == 1 and action.shape[0] == 1:
+        action = action.squeeze(0)
+
+    # Keep 1D tensors (e.g. scalar-discrete batch) intact; only strip a
+    # trailing singleton feature dim when one truly exists.
+    if action.dim() > 1 and action.shape[-1] == 1:
         action = action.squeeze(-1)
 
     return action
@@ -115,10 +123,23 @@ class MultiPolicyWrapper(nn.Module):
         if policy_offset + n > len(self.policies):
             raise ValueError(f"Group '{group}' has {n} agents starting at policy index {policy_offset}, but only {len(self.policies)} policies were provided.")
 
+        grouped_keys = [key for key in input_td.keys() if isinstance(key, str) and (key, "observation") in input_td.keys(include_nested=True)]
+
         action_list = []
         for i in range(n):
+            # Preserve non-group rollout keys (e.g. is_init/reset masks) needed
+            # by recurrent policies while slicing a single agent in the target group.
+            per_agent_payload = {}
+            for key in input_td.keys():
+                if key == group:
+                    per_agent_payload[group] = full_group_td[..., i : i + 1]
+                elif key in grouped_keys:
+                    continue
+                else:
+                    per_agent_payload[key] = input_td[key]
+
             per_agent_td = TensorDict(
-                {group: full_group_td[..., i : i + 1]},
+                per_agent_payload,
                 batch_size=input_td.batch_size,
                 device=input_td.device,
             )
@@ -143,8 +164,13 @@ class MultiPolicyWrapper(nn.Module):
         action_list = []
         per_agent_batch = input_td.batch_size[:-1]
         for i in range(n_agents):
+            per_agent_payload = {"observation": obs[..., i, :]}
+            for key in input_td.keys():
+                if key == "observation":
+                    continue
+                per_agent_payload[key] = input_td[key]
             per_agent_td = TensorDict(
-                {"observation": obs[..., i, :]},
+                per_agent_payload,
                 batch_size=per_agent_batch,
                 device=input_td.device,
             )
@@ -169,15 +195,25 @@ class MultiPolicyWrapper(nn.Module):
         """
         nested_keys = input_td.keys(include_nested=True)
 
-        if ("ego", "observation") in nested_keys and ("teammate", "observation") in nested_keys:
-            n_ego = input_td["ego"]["observation"].shape[-2]
-            n_teammate = input_td["teammate"]["observation"].shape[-2]
+        grouped_observation_keys = [key for key in input_td.keys() if isinstance(key, str) and (key, "observation") in nested_keys]
+        if grouped_observation_keys:
+            # Preserve deterministic policy assignment order and keep ego first
+            # when present so policy[0] is always the ego policy.
+            if "ego" in grouped_observation_keys:
+                ordered_groups = ["ego"] + [k for k in grouped_observation_keys if k != "ego"]
+            else:
+                ordered_groups = grouped_observation_keys
 
-            if len(self.policies) != n_ego + n_teammate:
-                raise ValueError(f"Expected {n_ego + n_teammate} policies ({n_ego} ego + {n_teammate} teammate), got {len(self.policies)}.")
+            group_counts = [input_td[g]["observation"].shape[-2] for g in ordered_groups]
+            total_agents = int(sum(group_counts))
+            if len(self.policies) != total_agents:
+                counts_str = ", ".join(f"{g}:{c}" for g, c in zip(ordered_groups, group_counts))
+                raise ValueError(f"Expected {total_agents} policies for grouped layout ({counts_str}), got {len(self.policies)}.")
 
-            input_td.set(("ego", "action"), self._run_group(input_td, "ego", policy_offset=0))
-            input_td.set(("teammate", "action"), self._run_group(input_td, "teammate", policy_offset=n_ego))
+            policy_offset = 0
+            for group, n_group_agents in zip(ordered_groups, group_counts):
+                input_td.set((group, "action"), self._run_group(input_td, group, policy_offset=policy_offset))
+                policy_offset += n_group_agents
             return input_td
 
         # Flat layout used by some VMAS wrappers:
@@ -235,8 +271,12 @@ class TeammatePolicyCallback(Callback):
         ego_group = next(iter(self.trainable_group.keys())) if self.trainable_group is not None else next(iter(self.experiment.group_map.keys()))
         ego_policy = self.experiment.group_policies[ego_group]
 
-        logging.info(f"Using teammate policies {self.teammate_policies} with ego policy {ego_policy} for group '{ego_group}'.")
-        wrapped = MultiPolicyWrapper(policies=[ego_policy, *self.teammate_policies])
+        teammate_policies = self.teammate_policies
+        if isinstance(teammate_policies, nn.Module):
+            teammate_policies = [teammate_policies]
+
+        logging.info(f"Using teammate policies {teammate_policies} with ego policy {ego_policy} for group '{ego_group}'.")
+        wrapped = MultiPolicyWrapper(policies=[ego_policy, *teammate_policies])
         if hasattr(self.experiment, "collector"):
             self.experiment.collector.policy = wrapped
 

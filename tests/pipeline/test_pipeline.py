@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 from popgen.population.pipeline import AgentGenerationPipeline, RLAgentGenerationPipeline
-from popgen.population.types import Behavior
+from popgen.population.types import Behavior, CodeSnippet
 
 
 class _DummyGeneratedPolicy:
@@ -13,7 +13,7 @@ class _DummyGeneratedPolicy:
 class _DummyEvalResult:
     def __init__(self):
         self.overall_metrics = {"adherence": 1.0}
-        self.instance_metrics = [{"adherence": 1.0, "reasoning": "ok", "feedback": ""}]
+        self.instance_metrics = [{"adherence": 1.0, "reasoning": "ok"}]
         self.metadata = {}
 
 
@@ -88,6 +88,20 @@ class _EvalFailingPipeline(_DummyPipeline):
     ):
         del behavior, rollouts, behavior_dir, num_workers, kwargs
         raise RuntimeError("forced evaluation failure")
+
+
+class _ExceptionReturningPipeline(_DummyPipeline):
+    def _generate_policy(
+        self,
+        behavior: Behavior,
+        feedbacks: list[tuple[str, str]],
+        output_dir: str,
+        num_workers: int = 1,
+        **kwargs,
+    ):
+        del behavior, feedbacks, output_dir, num_workers, kwargs
+        self.generate_calls += 1
+        return RuntimeError("returned generation failure"), {"file_path": "unused.py"}, 0.01
 
 
 def test_generation_exception_is_retried_with_feedback(tmp_path):
@@ -169,7 +183,7 @@ def test_rollout_latency_is_scalar_in_summary(tmp_path):
     assert summary["avg_latencies"]["rollout"] == 0.1
 
 
-def test_generate_with_retries_defaults_do_not_share_feedback_state(tmp_path):
+def testgenerate_and_rollout_defaults_do_not_share_feedback_state(tmp_path):
     pipeline = _DummyPipeline(output_dir=str(tmp_path), fail_generate_n=1, fail_rollout_n=0)
     behavior = Behavior(name="b_defaults", description="test behavior")
 
@@ -178,14 +192,14 @@ def test_generate_with_retries_defaults_do_not_share_feedback_state(tmp_path):
     first_attempt_dir.mkdir()
     second_attempt_dir.mkdir()
 
-    pipeline._generate_with_retries(
+    pipeline.generate_and_rollout(
         behavior=behavior,
         attempt_dir=str(first_attempt_dir),
         n_generation_retries=1,
         n_rollouts=1,
         num_workers=1,
     )
-    pipeline._generate_with_retries(
+    pipeline.generate_and_rollout(
         behavior=behavior,
         attempt_dir=str(second_attempt_dir),
         n_generation_retries=0,
@@ -229,3 +243,52 @@ def test_rl_generation_receives_env_reward_api_reference(tmp_path):
     assert isinstance(generated_item, Exception)
     assert len(generator.calls) == 1
     assert generator.calls[0]["reward_api_reference"] == "reward api reference"
+
+
+def test_generate_returned_exception_is_retried_without_rollout(tmp_path):
+    pipeline = _ExceptionReturningPipeline(output_dir=str(tmp_path), fail_generate_n=0, fail_rollout_n=0)
+    behavior = Behavior(name="b_ret_exc", description="test behavior")
+
+    generated_item, _rollouts, success, _gen_retry, _latencies = pipeline.generate_and_rollout(
+        behavior=behavior,
+        attempt_dir=str(tmp_path),
+        n_generation_retries=1,
+        n_rollouts=1,
+        num_workers=1,
+    )
+
+    assert isinstance(generated_item, Exception)
+    assert success is False
+    assert pipeline.generate_calls == 2
+    assert pipeline.rollout_calls == 0
+
+
+def test_rl_generation_flags_missing_checkpoints_as_failure(tmp_path):
+    class _StaticRewardGenerator:
+        def generate(self, **kwargs):
+            del kwargs
+            return CodeSnippet(code="def compute_reward(self, agent):\n    return 0.0")
+
+    generator = _StaticRewardGenerator()
+    env_module = SimpleNamespace(
+        ENVIRONMENT_DESCRIPTION="env",
+        REWARD_EXAMPLE="example",
+        REWARD_API_REFERENCE="reward api reference",
+        train_fn=lambda *_args, **_kwargs: None,
+    )
+    pipeline = RLAgentGenerationPipeline(
+        generator=generator,
+        evaluator=SimpleNamespace(),
+        env_module=env_module,
+        output_dir=str(tmp_path),
+    )
+
+    behavior = Behavior(name="b_missing_ckpt", description="test behavior")
+    generated_item, _loading_kwargs, _latency = pipeline._generate_policy(
+        behavior=behavior,
+        feedbacks=[],
+        output_dir=str(tmp_path),
+    )
+
+    assert isinstance(generated_item, Exception)
+    assert "No checkpoints produced" in str(generated_item)

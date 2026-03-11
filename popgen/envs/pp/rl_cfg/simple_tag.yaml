@@ -1,0 +1,18 @@
+defaults:
+  - vmas_simple_tag_config
+  - _self_
+
+max_steps: 50
+num_good_agents: 5
+num_adversaries: 2
+ai_good_agents: true
+num_landmarks: 2
+shape_agent_rew: false
+shape_adversary_rew: false
+agents_share_rew: false
+adversaries_share_rew: true
+observe_same_team: true
+observe_pos: true
+observe_vel: true
+bound: 1.0
+respawn_at_catch: false

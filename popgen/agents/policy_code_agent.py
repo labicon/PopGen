@@ -14,7 +14,7 @@ class PolicyCodeAgent(nn.Module):
         self.act_fn = act_fn
 
     def _normalize_action(self, action, obs_dtype: torch.dtype, obs_device: torch.device) -> torch.Tensor:
-        """Coerce a single-slot action from act_fn into a 1-D torch.Tensor.
+        """Coerce a single-slot action from act_fn into a scalar or 1-D torch.Tensor.
 
         act_fn is LLM-generated and may return a Python scalar (int/float),
         a list, a NumPy array, or a torch.Tensor of any rank.  This method
@@ -30,7 +30,8 @@ class PolicyCodeAgent(nn.Module):
                 here to avoid cross-device stack errors.
 
         Returns:
-            A 1-D torch.Tensor on obs_device with obs_dtype.
+            A scalar tensor for discrete actions or a 1-D tensor for vector actions,
+            always on obs_device.
 
         Raises:
             ValueError: If action has more than one element along its first
@@ -43,15 +44,9 @@ class PolicyCodeAgent(nn.Module):
             action = torch.as_tensor(action, dtype=obs_dtype, device=obs_device)
         else:
             # NOTE: only the device is moved here; dtype is not enforced for
-            # tensor inputs.  If act_fn returns a float64 tensor but
-            # obs_dtype is float32, the mismatch will surface at torch.stack.
+            # tensor inputs. If act_fn returns a float64 tensor but obs_dtype
+            # is float32, the mismatch will surface at torch.stack.
             action = action.to(device=obs_device)
-
-        if action.dim() == 0:
-            # Scalar tensor (e.g. torch.tensor(2)) — promote to 1-D so that
-            # downstream code can treat discrete and continuous actions
-            # uniformly as 1-D vectors.
-            action = action.unsqueeze(0)
 
         if action.dim() > 1:
             # act_fn returned a 2-D+ tensor.  The only tolerated case is a
@@ -85,6 +80,10 @@ class PolicyCodeAgent(nn.Module):
             actions.append(slot_action)
 
         action_flat = torch.stack(actions)
-        action_tensor = action_flat.reshape(*leading_shape, action_flat.shape[-1])
+        if action_flat.dim() == 1:
+            # Discrete scalar actions should keep shape (...), not (..., 1).
+            action_tensor = action_flat[0] if len(leading_shape) == 0 else action_flat.reshape(*leading_shape)
+        else:
+            action_tensor = action_flat.reshape(*leading_shape, action_flat.shape[-1])
 
         return format_action_output(input_td, action_key, action_tensor)

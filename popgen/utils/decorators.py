@@ -12,7 +12,6 @@ def track_time(label: str):
             start = time.time()
             result = func(*args, **kwargs)
             elapsed = time.time() - start
-            # logging.info(f"{label} completed in {elapsed:.2f}s")
             return result, elapsed
 
         return wrapper

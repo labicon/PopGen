@@ -1,0 +1,22 @@
+[
+  {
+    "name": "Direct Pursuer",
+    "description": "Immediately accelerates toward the nearest prey and prioritizes shortest-time interception. It ignores long-term positioning and continuously updates heading to close distance as quickly as possible."
+  },
+  {
+    "name": "Boundary Herder",
+    "description": "Positions itself to push prey toward arena boundaries and corners where escape options are limited. It values angle control over direct collision attempts, trying to reduce prey maneuvering room before committing to a tag."
+  },
+  {
+    "name": "Landmark Ambusher",
+    "description": "Uses landmarks as blocking structures, circling around obstacles to predict prey escape lanes. It favors interception points near landmarks where prey pathing becomes constrained."
+  },
+  {
+    "name": "Teammate Shadow",
+    "description": "Maintains compact formation with nearby predators to create multi-direction pressure. It sacrifices some direct chasing speed to preserve coordinated coverage and reduce gaps in containment."
+  },
+  {
+    "name": "Patience-and-Pounce",
+    "description": "Starts with controlled movement to observe prey trajectory, then commits in short aggressive bursts when the prey overextends or turns sharply. It alternates between tracking and explosive closing speed."
+  }
+]

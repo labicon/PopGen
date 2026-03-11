@@ -6,6 +6,7 @@ defaults:
 max_steps: 100
 num_good_agents: 1
 num_adversaries: 3
+ai_good_agents: False
 num_landmarks: 2
 shape_agent_rew: False
 shape_adversary_rew: False

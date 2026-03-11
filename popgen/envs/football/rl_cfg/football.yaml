@@ -3,11 +3,11 @@ defaults:
   - _self_
 
 
-max_steps: 500
+max_steps: 300
 
 # Agents config
 n_blue_agents: 2
-n_red_agents: 2
+n_red_agents: 1
 ai_red_agents: True  # What agents should be learning and what controlled by the heuristic (ai)
 
 # When you have 5 blue agents, physical differences can be introduced:
@@ -39,7 +39,7 @@ ball_mass: 0.25
 ball_size: 0.02
 
 # Actions
-u_multiplier: 0.1
+u_multiplier: 0.12
 
 # Actions shooting
 enable_shooting: False  # Whether to enable an extra 2 actions (for rotation and shooting). Only available for non-ai agents
@@ -49,7 +49,7 @@ shooting_radius: 0.08
 shooting_angle: 1.5708
 
 # Speeds
-max_speed: 0.15
+max_speed: 0.18
 ball_max_speed: 0.3
 
 # Rewards

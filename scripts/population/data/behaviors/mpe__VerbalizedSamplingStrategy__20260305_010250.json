@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Predictive Interceptor",
+    "description": "Avoids chasing directly behind the faster prey. Instead, it uses the prey's absolute velocity observations to calculate an interception point, applying force to cut off angles and arrive ahead of the prey's current trajectory."
+  },
+  {
+    "name": "Opposite Flanker",
+    "description": "Actively monitors the teammate predator's relative position and maneuvers to approach the target prey from the opposite angle. This creates a pincer movement designed to trap the faster prey between both predators."
+  },
+  {
+    "name": "Boundary Herder",
+    "description": "Prioritizes keeping its position closer to the map center than the target prey. By applying force to stay inside, it purposefully herds the prey toward the map boundaries or corners to limit the prey's maneuverability and neutralize its speed advantage."
+  },
+  {
+    "name": "Center Squatter",
+    "description": "Navigates to the map's center (0,0) and remains relatively passive, conserving momentum while acting as a barricade to cut the map in half. It only lunges aggressively at maximum force when a prey carelessly attempts to cross the center line."
+  },
+  {
+    "name": "Landmark Trapper",
+    "description": "Uses the fixed landmarks as strategic obstacles. It specifically zeroes in on prey that pass closely to a landmark, applying maximum forward thrust to pin the prey against the object and drastically reduce its viable escape angles."
+  },
+  {
+    "name": "Opportunistic Switcher",
+    "description": "Relentlessly pursues the prey currently closest to it, but rapidly and continuously re-evaluates distance metrics. If the initial target successfully evades or the other prey suddenly becomes closer due to a map bounce or mistake, it instantly snaps its trajectory to engage the new nearest prey."
+  }
+]

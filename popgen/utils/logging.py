@@ -1,5 +1,6 @@
 import json
 import os
+from copy import deepcopy
 from typing import Any
 
 import numpy as np
@@ -70,7 +71,6 @@ def _save_rollout_data(rollout_data, save_path):
             f.write(f"{json.dumps(state)}\n")
 
 
-# TODO: check this
 def save_rollout(rollout_data, images, save_path):
     # Ensure the folder exists
     os.makedirs(save_path, exist_ok=True)
@@ -171,27 +171,42 @@ def encode_images_to_base64(images: list[np.ndarray]) -> list[str]:
 
 def _format_value(value: Any) -> str:
     """Format a single state value for LLM consumption."""
+
+    def _normalize(value: Any) -> Any:
+        if isinstance(value, np.ndarray):
+            value = value.tolist()
+        elif isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, float):
+            return round(value, 4)
+        if isinstance(value, list):
+            return [_normalize(v) for v in value]
+        if isinstance(value, dict):
+            return {str(k): _normalize(v) for k, v in value.items()}
+        return value
+
     if isinstance(value, np.ndarray):
         value = value.tolist()
     elif isinstance(value, np.generic):
         value = value.item()
     if isinstance(value, float):
         return f"{value:.4f}"
+    if isinstance(value, dict):
+        return json.dumps(_normalize(value), sort_keys=True)
     if isinstance(value, list) and all(isinstance(v, (int, float)) for v in value):
         return "[" + ", ".join(f"{v:.4f}" if isinstance(v, float) else str(v) for v in value) + "]"
+    if isinstance(value, list):
+        return json.dumps(_normalize(value), sort_keys=True)
     return str(value)
 
 
-def rollout_states_to_str(rollout_data: list[dict[str, Any]]) -> str:
+def rollout_states_to_str(rollout_data: list[dict[str, Any]], serialize_state_fn=None) -> str:
     """
     Encode rollout into a string format suitable for LLM consumption.
 
-    Each state dict must have:
-      - "agents": dict mapping agent name → dict of agent fields
-      - "env":    dict mapping env-level field name → value
-
     Args:
-        rollout_data: List of state dictionaries.
+        rollout_data: List of grouped state dictionaries, e.g.
+            {"ego_team": {...}, "opponent_team": {...}, "step": ..., "env": {...}}.
 
     Returns:
         A formatted string representation of all rollout states.
@@ -199,15 +214,34 @@ def rollout_states_to_str(rollout_data: list[dict[str, Any]]) -> str:
     if not rollout_data:
         return "Empty rollout"
 
+    if serialize_state_fn is not None:
+        rollout_data = serialize_state_fn(deepcopy(rollout_data))
+
+    def _is_agent_payload(value: Any) -> bool:
+        return isinstance(value, dict) and {"state", "action", "reward"}.issubset(set(value.keys()))
+
+    def _iter_agent_entries(state: dict[str, Any]):
+        for group_name, group_agents in state.items():
+            if group_name in {"step", "env"} or not isinstance(group_agents, dict):
+                continue
+            for agent_name, agent_state in group_agents.items():
+                if _is_agent_payload(agent_state):
+                    yield f"{group_name}.{agent_name}", agent_state
+
+    def _agent_keys(agent_state: dict[str, Any]) -> list[str]:
+        state_key = "serialized_state" if "serialized_state" in agent_state else "state"
+        keys = [state_key]
+        keys.extend(key for key in ("action", "reward") if key in agent_state)
+        return keys
+
     all_lines = []
     for state in rollout_data:
-        state_idx = state.pop("step", "N/A")
+        state_idx = state.get("step", "N/A")
         state_parts = []
 
-        # Agents section
-        for agent_name, agent_state in state.get("agents", {}).items():
-            for key, value in agent_state.items():
-                state_parts.append(f"{agent_name}.{key}={_format_value(value)}")
+        for agent_prefix, agent_state in _iter_agent_entries(state):
+            for key in _agent_keys(agent_state):
+                state_parts.append(f"{agent_prefix}.{key}={_format_value(agent_state[key])}")
 
         # Env section
         for key, value in state.get("env", {}).items():

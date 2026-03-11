@@ -1,10 +1,8 @@
 import os
 import time
 from collections.abc import Callable
-from typing import Any
 
 import torch
-from popgen.agents.scripted_partner import MultiPolicyWrapper
 
 
 def parse_single_scripted_policy(
@@ -28,37 +26,6 @@ def parse_single_scripted_policy(
     if not callable(scripted_fn):
         raise TypeError("scripted_policy value must be callable.")
     return teammate_idx, scripted_fn
-
-
-def compose_rollout_policy(policy_or_policies: Any):
-    """Normalize rollout input to a single policy module.
-
-    Accepts:
-        - single policy module
-        - [ego_policy]
-        - [ego_policy, teammate_policy] -> wrapped into MultiPolicyWrapper
-    """
-    if isinstance(policy_or_policies, (list, tuple)):
-        if len(policy_or_policies) == 1:
-            policy = policy_or_policies[0]
-        elif len(policy_or_policies) == 2:
-            policy = MultiPolicyWrapper(
-                ego=(0, policy_or_policies[0]),
-                teammate=(1, policy_or_policies[1]),
-            )
-        else:
-            raise ValueError(
-                f"Expected 1 or 2 policies for rollout, got {len(policy_or_policies)}."
-            )
-    else:
-        policy = policy_or_policies
-
-    if not hasattr(policy, "eval"):
-        raise TypeError(
-            f"Policy must be nn.Module-like with eval(), got {type(policy).__name__}."
-        )
-
-    return policy
 
 
 def apply_rollout_seed(env, seed: int | None = None) -> None:

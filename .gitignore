@@ -3,6 +3,9 @@ experiments/
 scripts/reward_generation/results
 scripts/behavior_policy/results
 
+# AI Agents
+.claude/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

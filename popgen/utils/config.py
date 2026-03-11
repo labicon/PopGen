@@ -39,7 +39,7 @@ class LitellmConfig(BaseModel):
 
     model_name: str = Field(description="Model identifier for LiteLLM (e.g., 'openai/gpt-4')")
     api_base: str | None = Field(default=None, description="Custom API base URL")
-    generation_kwargs: dict[str, Any] = Field(default_factory=dict, description="Additional kwargs for litellm.completion() (temperature, top_p, etc.)")
+    generation_kwargs: dict[str, Any] = Field(default_factory=dict, description="Additional kwargs for litellm.completion() (temperature, top_p, max_tokens, timeout, etc.)")
 
     def __post_init__(self):
         """Post-initialization to validate generation_kwargs."""
@@ -53,7 +53,9 @@ class LitellmConfig(BaseModel):
         Returns:
             Dictionary with model, api_key, api_base, and generation_kwargs merged.
         """
-        kwargs = self.generation_kwargs.copy()
+        # Apply a sane global default timeout unless explicitly overridden.
+        kwargs = {"timeout": 120}
+        kwargs.update(self.generation_kwargs)
         if overrides:
             kwargs.update(overrides)
 

@@ -1,6 +1,7 @@
 import logging
 
 import litellm
+
 from popgen.utils.warnings import configure_warning_filters
 
 # Suppress LiteLLM INFO logs
