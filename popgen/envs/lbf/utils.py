@@ -163,37 +163,51 @@ REWARD_API_REFERENCE = """Reward function API (authoritative):
 - Accessible state:
   - `self.players`: list of all players.
   - `self.field`: 2D numpy array grid. Cells with value > 0 are foods, and the value is food level.
-  - For each player `p` in `self.players`: `p.position`, `p.level`, `p.reward`, `p.score`.
+  - For each player `p` in `self.players`: `p.position`, `p.level`, `p.reward`, `p.score`, `p.action`.
   - Current agent is `agent` (same attributes as above).
+- Important limitations:
+  - Use `self.field`, `self.players`, and player attributes to access to states.
+  - Do not assume access to history; history-dependent logic is possible only if you explicitly persist state yourself.
 - Return value:
   - Return a scalar reward for this single agent at the current step (Python `float` recommended; scalar torch is also accepted)."""
 
 REWARD_EXAMPLE = """
-Behavior: agent stays close to food
+Behavior: move to the nearest food, load it if adjacent, and avoid idling
 ```python
 import torch
 
 def compute_reward(self, agent):
-    # You are designing reward for 'agent' in the environment.
-    # self is the environment instance (ForagingEnv).
-    # self.players gives list of all players.
-    # self.field gives grid status.
-
-    # Calculate custom reward
     reward = 0.0
 
-    y, x = agent.position
-    min_dist = float('inf')
+    # Current agent position and chosen discrete action for this step.
+    row, col = agent.position
+    action = agent.action
+
+    # Find the nearest remaining food from the current grid state.
+    nearest_dist = float("inf")
     rows, cols = self.field.shape
     for r in range(rows):
         for c in range(cols):
-            if self.field[r, c] > 0: # If there is food
-                dist = abs(r - y) + abs(c - x)
-                if dist < min_dist:
-                    min_dist = dist
+            if self.field[r, c] > 0:
+                dist = abs(r - row) + abs(c - col)
+                if dist < nearest_dist:
+                    nearest_dist = dist
 
-    if min_dist < float('inf'):
-       reward += 1.0 / (min_dist + 1)
+    if nearest_dist < float("inf"):
+        # Dense shaping toward the nearest food.
+        reward += 1.0 / (nearest_dist + 1.0)
+
+        # Encourage LOAD when already in a valid loading position.
+        if nearest_dist == 1 and action == 5:
+            reward += 2.0
+
+    # Reinforce successful collection from the environment's score signal.
+    if agent.reward > 0 or agent.score > 0:
+        reward += 5.0
+
+    # Small penalty for doing nothing when not adjacent to food.
+    if action == 0 and nearest_dist > 1:
+        reward -= 0.05
 
     return reward
 ```
@@ -570,8 +584,23 @@ def train_lbf_env(
             }
 
         def custom_step(self, tensordict):
-            out_td = original_step(self, tensordict)
             base_env = self.env.unwrapped
+            if desired_group_map:
+                action_list = [None] * len(base_env.players)
+                for gname, names in desired_group_map.items():
+                    g_action = tensordict.get((gname, "action"))
+                    for local_i, aname in enumerate(names):
+                        global_idx = int(aname.split("_")[1])
+                        action_list[global_idx] = int(g_action[local_i].item())
+            else:
+                action_tensor = tensordict.get(("agents", "action"))
+                if action_tensor.ndim > 1 and action_tensor.shape[-1] > 1:
+                    action_idx = action_tensor.argmax(dim=-1)
+                else:
+                    action_idx = action_tensor
+                action_list = action_idx.detach().cpu().numpy().tolist()
+
+            out_td = original_step(self, tensordict)
 
             new_rewards = []
             for i, player in enumerate(base_env.players):
@@ -580,6 +609,7 @@ def train_lbf_env(
                     player.obs = out_td[gname, "observation"][local_i].cpu().numpy()
                 else:
                     player.obs = out_td["agents", "observation"][i].cpu().numpy()
+                player.action = int(action_list[i])
                 r = reward_fn(base_env, player)
                 if isinstance(r, torch.Tensor):
                     r = r.item()

@@ -32,28 +32,41 @@ from pathlib import Path
 # Discovery helpers
 # ---------------------------------------------------------------------------
 
-def load_behaviors(results_path: Path) -> list[dict]:
-    """Load behaviors.json from results_path/metadata/<timestamp>/behaviors.json."""
-    candidates = sorted(results_path.glob("metadata/*/behaviors.json"))
+def _find_experiment_dirs(results_path: Path) -> list[Path]:
+    """Detect experiment directories.
+
+    Supports two layouts:
+    - Direct experiment: results_path itself has metadata/ and agents/
+    - Env-level folder: results_path/<gen_type>/ each has metadata/ and agents/
+    """
+    if (results_path / "metadata").is_dir() and (results_path / "agents").is_dir():
+        return [results_path]
+
+    experiment_dirs = []
+    for child in sorted(results_path.iterdir()):
+        if child.is_dir() and (child / "metadata").is_dir():
+            experiment_dirs.append(child)
+    return experiment_dirs
+
+
+def load_behaviors(experiment_dir: Path) -> list[dict]:
+    """Load behaviors.json from experiment_dir/metadata/<timestamp>/behaviors.json."""
+    candidates = sorted(experiment_dir.glob("metadata/*/behaviors.json"))
     if not candidates:
-        sys.exit(f"Error: behaviors.json not found under {results_path}/metadata/")
+        return []
     return json.loads(candidates[-1].read_text())
 
 
-def discover_rollouts(results_path: Path, behaviors: list[dict]) -> list[dict]:
-    """Walk results_path/agents/ and collect every rollout with its metadata.
-
-    Layout: agents/behavior_<i>/<trial_timestamp>/attempt_<j>/rollouts/rollout_<k>/rollout.gif
-
-    Returns a list of dicts, each containing:
-        behavior_idx, behavior_name, behavior_description,
-        attempt_idx, rollout_idx, gif_rel (relative to results_path)
-    """
+def _collect_rollouts_from_tree(
+    root: Path,
+    behaviors: list[dict],
+    results_path: Path,
+    gen_type: str,
+    source: str,
+) -> list[dict]:
+    """Walk a behavior_*/trial/attempt/rollouts tree and collect rollout entries."""
     rollouts: list[dict] = []
-    agents_dir = results_path / "agents"
-    if not agents_dir.is_dir():
-        sys.exit(f"Error: agents/ directory not found in {results_path}")
-    for behavior_dir in sorted(agents_dir.glob("behavior_*")):
+    for behavior_dir in sorted(root.glob("behavior_*")):
         behavior_idx = int(behavior_dir.name.split("_")[1])
         if behavior_idx >= len(behaviors):
             continue
@@ -78,9 +91,47 @@ def discover_rollouts(results_path: Path, behaviors: list[dict]) -> list[dict]:
                             "behavior_description": behavior["description"],
                             "attempt_idx": attempt_idx,
                             "rollout_idx": rollout_idx,
+                            "gen_type": gen_type,
+                            "source": source,
                             "gif_rel": str(gif.relative_to(results_path)),
                         }
                     )
+    return rollouts
+
+
+def discover_rollouts(results_path: Path) -> list[dict]:
+    """Walk results_path and collect every rollout with its metadata.
+
+    Supports:
+    - Direct experiment: results_path/agents/behavior_*/...
+    - Env-level folder: results_path/<gen_type>/agents/behavior_*/...
+      Also discovers eval rollouts under <gen_type>/eval/*/runs/behavior_*/...
+
+    Returns a list of dicts, each containing:
+        behavior_idx, behavior_name, behavior_description,
+        attempt_idx, rollout_idx, gen_type, source, gif_rel
+    """
+    experiment_dirs = _find_experiment_dirs(results_path)
+    if not experiment_dirs:
+        sys.exit(f"Error: no experiment directories found in {results_path}")
+
+    rollouts: list[dict] = []
+    for exp_dir in experiment_dirs:
+        gen_type = exp_dir.name if exp_dir != results_path else ""
+        behaviors = load_behaviors(exp_dir)
+        if not behaviors:
+            continue
+
+        # Evaluation-time rollouts: eval/*/runs/behavior_*/...
+        eval_dir = exp_dir / "eval"
+        if eval_dir.is_dir():
+            for eval_run in sorted(eval_dir.iterdir()):
+                runs_dir = eval_run / "runs"
+                if runs_dir.is_dir():
+                    rollouts.extend(
+                        _collect_rollouts_from_tree(runs_dir, behaviors, results_path, gen_type, "eval")
+                    )
+
     return rollouts
 
 
@@ -195,7 +246,7 @@ document.addEventListener('keydown', function(e) {{
   {"<a href='/?idx="+str(idx+1)+"'>Next &rarr;</a>" if idx < total - 1 else ""}
 </div>
 <div class="card">
-  <div class="meta">Behavior {rollout['behavior_idx']} &middot; Attempt {rollout['attempt_idx']} &middot; Rollout {rollout['rollout_idx']}</div>
+  <div class="meta">{"" if not rollout.get('gen_type') else _esc(rollout['gen_type']) + " &middot; "}{rollout.get('source', 'agents')} &middot; Behavior {rollout['behavior_idx']} &middot; Attempt {rollout['attempt_idx']} &middot; Rollout {rollout['rollout_idx']}</div>
   <div class="behavior-name">{_esc(rollout['behavior_name'])}</div>
   <div class="behavior-desc">{_esc(rollout['behavior_description'])}</div>
 </div>
@@ -403,8 +454,7 @@ def main():
     if not results_path.is_dir():
         sys.exit(f"Error: {results_path} is not a directory")
 
-    behaviors = load_behaviors(results_path)
-    rollouts = discover_rollouts(results_path, behaviors)
+    rollouts = discover_rollouts(results_path)
     random.shuffle(rollouts)
     if not rollouts:
         sys.exit(f"Error: no rollouts found in {results_path}")
@@ -417,7 +467,8 @@ def main():
     AnnotationHandler.annotations = annotations
 
     n_annotated = len(annotations)
-    print(f"Found {len(rollouts)} rollouts across {len(behaviors)} behaviors")
+    n_behaviors = len({r["behavior_name"] for r in rollouts})
+    print(f"Found {len(rollouts)} rollouts across {n_behaviors} behaviors")
     if n_annotated:
         print(f"Resuming: {n_annotated}/{len(rollouts)} already annotated")
     print(f"Serving on http://{args.host}:{args.port}")

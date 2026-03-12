@@ -385,7 +385,7 @@ def _collect_rows_for_attempt_dirs(
 
 
 def _gather_experiment_eval_layout(experiment_dir: Path) -> list[dict]:
-    """Gather latest eval result for each (behavior_id, trial_id)."""
+    """Gather eval results by scanning evaluation.json files on disk."""
     experiment_id = experiment_dir.name
     run_name = experiment_dir.name
     rows = []
@@ -394,64 +394,47 @@ def _gather_experiment_eval_layout(experiment_dir: Path) -> list[dict]:
     if not eval_root.is_dir():
         return rows
 
-    eval_dirs = sorted([d for d in eval_root.iterdir() if d.is_dir()], key=lambda d: d.name)
-    if not eval_dirs:
-        return rows
+    # Read experiment-level metadata for env/generation info
+    metadata_root = experiment_dir / "metadata"
+    env = ""
+    generation_type = ""
+    generation_model = experiment_dir.name
+    seed = 0
+    if metadata_root.is_dir():
+        meta_dirs = sorted([d for d in metadata_root.iterdir() if d.is_dir()], key=lambda d: d.name)
+        if meta_dirs:
+            summary_path = meta_dirs[-1] / "summary.json"
+            if summary_path.exists():
+                meta = _load_json(summary_path)
+                env = meta.get("env", "")
+                generation_type = meta.get("generation_type", "")
+                generation_model = meta.get("generation_model", experiment_dir.name)
 
-    latest_trial_runs: dict[tuple[int, str], dict[str, Any]] = {}
-    for eval_dir in eval_dirs:
-        summary_path = eval_dir / "summary.json"
-        if not summary_path.exists():
-            continue
-        summary_data = _load_json(summary_path)
+    # Scan all evaluation.json files across all eval dirs
+    for eval_path in sorted(eval_root.glob("**/evaluation.json")):
+        # Path: eval/<ts>/runs/behavior_{idx}/trial_{id}/attempt_{idx}/evaluation.json
+        attempt_dir = eval_path.parent
+        trial_dir = attempt_dir.parent
+        behavior_dir = trial_dir.parent
+        eval_dir = behavior_dir.parent.parent  # up past "runs"
 
-        env = summary_data.get("env", "")
-        generation_type = summary_data.get("generation_type", "")
-        generation_model = summary_data.get("generation_model", experiment_dir.name)
+        behavior_id = _parse_idx(behavior_dir.name)
+        trial_id = trial_dir.name.split("_", 1)[1]
         run_group_id = eval_dir.name
 
-        for run in summary_data.get("runs", []):
-            if run.get("status") != "ok":
-                continue
-
-            behavior_id = int(run.get("behavior_idx", 0))
-            trial_id = str(run.get("trial_id", run.get("run_timestamp", "")))
-            attempt_idx = int(run.get("selected_attempt_idx", 0))
-
-            output_attempt_dir = Path(run.get("output_attempt_dir", ""))
-            if not output_attempt_dir.exists():
-                output_attempt_dir = eval_dir / "runs" / f"behavior_{behavior_id}" / f"trial_{trial_id}" / f"attempt_{attempt_idx}"
-            if not output_attempt_dir.exists():
-                continue
-            key = (behavior_id, trial_id)
-
-            latest_trial_runs[key] = {
-                "experiment_id": experiment_id,
-                "run_name": run_name,
-                "run_id": run_group_id,
-                "env": env,
-                "seed": int(run.get("base_seed", run.get("seed", 0))),
-                "generation_type": run.get("generation_type", generation_type),
-                "generation_model": generation_model,
-                "trial_id": trial_id,
-                "behavior_id": behavior_id,
-                "attempt_dir": output_attempt_dir,
-            }
-
-    for _, selected_run in sorted(latest_trial_runs.items(), key=lambda kv: kv[0]):
         rows.extend(
-                _collect_single_attempt_rows(
-                    experiment_id=selected_run["experiment_id"],
-                    run_name=selected_run["run_name"],
-                    run_id=selected_run["run_id"],
-                    split="eval",
-                env=selected_run["env"],
-                seed=selected_run["seed"],
-                generation_type=selected_run["generation_type"],
-                generation_model=selected_run["generation_model"],
-                trial_id=selected_run["trial_id"],
-                behavior_id=selected_run["behavior_id"],
-                attempt_dir=selected_run["attempt_dir"],
+            _collect_single_attempt_rows(
+                experiment_id=experiment_id,
+                run_name=run_name,
+                run_id=run_group_id,
+                split="eval",
+                env=env,
+                seed=seed,
+                generation_type=generation_type,
+                generation_model=generation_model,
+                trial_id=trial_id,
+                behavior_id=behavior_id,
+                attempt_dir=attempt_dir,
             )
         )
     return rows

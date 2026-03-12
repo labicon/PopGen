@@ -96,6 +96,18 @@ def _latest_metadata_dir(result_path: Path) -> Path:
     return dirs[-1]
 
 
+def _all_metadata_dirs(result_path: Path) -> list[Path]:
+    """Return all metadata dirs (sorted oldest→newest)."""
+    metadata_root = result_path / "metadata"
+    if not metadata_root.is_dir():
+        raise FileNotFoundError(f"metadata/ not found under {result_path}")
+
+    dirs = sorted([d for d in metadata_root.iterdir() if d.is_dir() and (d / "summary.json").exists()], key=lambda d: d.name)
+    if not dirs:
+        raise FileNotFoundError(f"No metadata run with summary.json found under {metadata_root}")
+    return dirs
+
+
 def _resolve_run_output_dir(result_path: Path, run: dict[str, Any]) -> Path:
     output_dir = Path(str(run.get("output_dir", "")))
     if output_dir.exists():
@@ -152,6 +164,11 @@ def _select_attempt_dirs(run_output_dir: Path, selection: str) -> list[tuple[Pat
     attempts = _sorted_attempt_dirs(run_output_dir)
     if not attempts:
         raise FileNotFoundError(f"No attempt_* directories in {run_output_dir}")
+
+    if selection == "first":
+        first_attempt = attempts[0]
+        first_idx = _parse_suffix_int(first_attempt.name, "attempt_")
+        return [(first_attempt, first_idx, "first_attempt")]
 
     if selection == "last":
         last_attempt = attempts[-1]
@@ -312,6 +329,57 @@ def _load_existing_attempt_eval(out_attempt_dir: Path) -> tuple[dict[str, Any], 
     return run_summary, evaluation_payload
 
 
+def _rebuild_merged_summary(output_root: Path) -> None:
+    """Rebuild merged summary.json and runs.csv by scanning on-disk evaluation.json files."""
+    runs_root = output_root / "runs"
+    if not runs_root.is_dir():
+        return
+
+    rows: list[dict[str, Any]] = []
+    for eval_path in sorted(runs_root.glob("**/evaluation.json")):
+        # Path: runs/behavior_{idx}/trial_{id}/attempt_{idx}/evaluation.json
+        attempt_dir = eval_path.parent
+        trial_dir = attempt_dir.parent
+        behavior_dir = trial_dir.parent
+
+        behavior_idx = int(behavior_dir.name.split("_", 1)[1])
+        trial_id = trial_dir.name.split("_", 1)[1]
+        attempt_idx = int(attempt_dir.name.split("_", 1)[1])
+
+        evaluation = _load_json(eval_path)
+        metrics = evaluation.get("overall_metrics", {})
+        metadata = evaluation.get("metadata", {})
+
+        rows.append({
+            "behavior_idx": behavior_idx,
+            "trial_id": trial_id,
+            "selected_attempt_idx": attempt_idx,
+            "status": "ok",
+            "adherence": _safe_float(metrics.get("adherence"), None),
+            "adjusted_adherence": _safe_float(metrics.get("adjusted_adherence"), None),
+            "n_evaluated": _safe_int(metrics.get("n_evaluated"), None),
+            "n_errors": _safe_int(metrics.get("n_errors"), None),
+            "judge_model": metadata.get("judge_model"),
+            "num_rollouts": metadata.get("num_rollouts"),
+            "output_dir": str(attempt_dir),
+        })
+
+    if not rows:
+        return
+
+    _write_runs_csv(output_root / "runs.csv", rows)
+
+    avg_adh = (
+        sum(float(r["adherence"]) for r in rows if r.get("adherence") is not None) / len(rows)
+        if rows else 0.0
+    )
+
+    _write_json(output_root / "summary.json", {
+        "num_attempt_evals": len(rows),
+        "average_adherence": avg_adh,
+    })
+
+
 def _write_runs_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -351,7 +419,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-k", "--num-rollouts", type=int, required=True, help="Number of rollouts per selected run")
     parser.add_argument(
         "--attempt-selection",
-        choices=["best", "all", "last"],
+        choices=["best", "first", "last", "all"],
         default="best",
         help="Which attempt(s) to evaluate per run (default: best).",
     )
@@ -374,24 +442,34 @@ def main() -> None:
     if not result_path.exists():
         raise FileNotFoundError(f"Result path does not exist: {result_path}")
 
-    metadata_dir = _latest_metadata_dir(result_path)
-    summary_path = metadata_dir / "summary.json"
-    behaviors_path = metadata_dir / "behaviors.json"
+    metadata_dirs = _all_metadata_dirs(result_path)
 
+    # Use latest metadata dir for behaviors and env info
+    latest_metadata_dir = metadata_dirs[-1]
+    behaviors_path = latest_metadata_dir / "behaviors.json"
     if not behaviors_path.exists():
         raise FileNotFoundError(f"Missing behaviors file in selected metadata dir: {behaviors_path}")
 
-    summary = _load_json(summary_path)
+    latest_summary = _load_json(latest_metadata_dir / "summary.json")
     behaviors_data = _load_json(behaviors_path)
     behaviors = [Behavior.model_validate(b) for b in behaviors_data]
 
-    runs = list(summary.get("runs", []))
+    # Collect runs from all metadata dirs, dedup by (behavior_idx, run_timestamp)
+    seen_runs: dict[tuple[int, str], dict[str, Any]] = {}
+    summary = latest_summary  # for env/generation_type/model fields
+    for md in metadata_dirs:
+        md_summary = _load_json(md / "summary.json")
+        for run in md_summary.get("runs", []):
+            key = (int(run.get("behavior_idx", 0)), str(run.get("run_timestamp", "")))
+            seen_runs[key] = run
+    runs = list(seen_runs.values())
+
     if args.max_runs is not None:
         runs = runs[: int(args.max_runs)]
 
     env_name = str(summary.get("env"))
     if not env_name:
-        raise ValueError(f"Could not resolve environment from {summary_path}")
+        raise ValueError(f"Could not resolve environment from metadata")
     env_module = importlib.import_module(f"popgen.envs.{env_name}")
 
     output_root = _resolve_output_root(result_path, args.output_dir, args.skip_existing)
@@ -401,7 +479,7 @@ def main() -> None:
     logging.info("RE-EVAL RUNNER")
     logging.info("=" * 60)
     logging.info(f"Experiment: {result_path}")
-    logging.info(f"Metadata:   {metadata_dir.name}")
+    logging.info(f"Metadata:   {len(metadata_dirs)} dir(s): {[d.name for d in metadata_dirs]}")
     logging.info(f"Env:        {env_name}")
     logging.info(f"Runs:       {len(runs)}")
     logging.info(f"Rollouts:   {args.num_rollouts} per run")
@@ -624,7 +702,7 @@ def main() -> None:
 
     final_summary = {
         "source_experiment_path": str(result_path),
-        "source_metadata_timestamp": metadata_dir.name,
+        "source_metadata_timestamp": [d.name for d in metadata_dirs],
         "env": env_name,
         "generation_type": summary.get("generation_type"),
         "generation_model": summary.get("generation_model"),
@@ -648,16 +726,19 @@ def main() -> None:
         "runs": run_records,
     }
 
-    _write_json(output_root / "summary.json", final_summary)
-    _write_runs_csv(output_root / "runs.csv", rows)
+    # Write per-run summary (timestamped log of this eval run)
+    run_ts = _timestamp()
+    _write_json(output_root / f"summary_{run_ts}.json", final_summary)
+
+    # Rebuild merged summary.json and runs.csv from on-disk evaluation.json files
+    _rebuild_merged_summary(output_root)
 
     logging.info("=" * 60)
     logging.info("RE-EVAL COMPLETE")
     logging.info("=" * 60)
     logging.info(f"Succeeded: {len(counted_success_rows)}/{len(rows)}")
     logging.info(f"Average adherence: {avg_adherence:.4f}")
-    logging.info(f"Summary: {output_root / 'summary.json'}")
-    logging.info(f"CSV:     {output_root / 'runs.csv'}")
+    logging.info(f"Summary: {output_root / f'summary_{run_ts}.json'}")
 
 
 if __name__ == "__main__":
