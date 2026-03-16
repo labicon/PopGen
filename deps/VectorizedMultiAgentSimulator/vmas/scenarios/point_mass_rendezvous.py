@@ -111,25 +111,22 @@ class Scenario(BaseScenario):
                 landmark.set_pos(pos, batch_index=env_index)
 
     def reward(self, agent: Agent):
-        is_first = agent == self.world.agents[0]
+        self.rew = torch.zeros(self.world.batch_dim, device=self.world.device)
 
-        if is_first:
-            self.rew = torch.zeros(self.world.batch_dim, device=self.world.device)
+        for landmark in self.world.landmarks:
+            # Check if all agents are on this landmark
+            agents_on_landmark = torch.stack(
+                [
+                    torch.linalg.vector_norm(
+                        a.state.pos - landmark.state.pos, dim=1
+                    )
+                    < a.shape.radius + landmark.shape.radius
+                    for a in self.world.agents
+                ],
+                dim=1,
+            ).all(dim=1)
 
-            for landmark in self.world.landmarks:
-                # Check if all agents are on this landmark
-                agents_on_landmark = torch.stack(
-                    [
-                        torch.linalg.vector_norm(
-                            a.state.pos - landmark.state.pos, dim=1
-                        )
-                        < a.shape.radius + landmark.shape.radius
-                        for a in self.world.agents
-                    ],
-                    dim=1,
-                ).all(dim=1)
-
-                self.rew[agents_on_landmark] += 1.0
+            self.rew[agents_on_landmark] += 1.0
 
         return self.rew
 

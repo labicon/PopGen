@@ -24,10 +24,18 @@ logging.basicConfig(
 )
 
 
-def run_behavior_generation(cfg: DictConfig) -> None:
+def _resolve_behavior_file_path(cfg: DictConfig) -> str:
+    explicit_path = cfg.get("behavior_path", None)
+    if explicit_path:
+        return str(explicit_path)
+
     import time
     time_ = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-    behavior_file_path = os.path.join("data", "behaviors", f"{cfg.env}__{cfg.behavior._target_.split('.')[-1]}__{time_}.json")
+    return os.path.join("data", "behaviors", f"{cfg.env}__{cfg.behavior._target_.split('.')[-1]}__{time_}.json")
+
+
+def run_behavior_generation(cfg: DictConfig) -> None:
+    behavior_file_path = _resolve_behavior_file_path(cfg)
     os.makedirs(os.path.dirname(behavior_file_path), exist_ok=True)
 
     logging.info("=" * 60)

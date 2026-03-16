@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import litellm
 import numpy as np
 from rouge_score import rouge_scorer
 

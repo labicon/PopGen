@@ -3,7 +3,7 @@ name = "popgen"
 version = "0.1.0"
 description = "Population generation for multi-agent reinforcement learning"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "dotenv>=0.9.9",
     "hydra-core>=1.3.0",
@@ -24,6 +24,7 @@ dependencies = [
     "benchmarl",
     "vmas",
     "lbforaging",
+    "smacv2",
     "gymnasium>=0.29.0",
 ]
 
@@ -37,6 +38,7 @@ dev = [
 benchmarl = { path = "deps/BenchMARL", editable = true }
 vmas = { path = "deps/VectorizedMultiAgentSimulator", editable = true }
 lbforaging = { path = "deps/lb-foraging", editable = true }
+smacv2 = { git = "https://github.com/oxwhirl/smacv2.git" }
 
 [build-system]
 requires = ["hatchling"]

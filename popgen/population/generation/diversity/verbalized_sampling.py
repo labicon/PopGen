@@ -157,10 +157,7 @@ class VerbalizedSamplingStrategy(GenerationStrategy):
         if self.independent_multiturns:
             from pqdm.threads import pqdm
 
-            args = [
-                {"input_prompt": input_prompt, "num_samplings": bs, "target_words": target_words}
-                for bs in batch_sizes
-            ]
+            args = [{"input_prompt": input_prompt, "num_samplings": bs, "target_words": target_words} for bs in batch_sizes]
             results = pqdm(args, self._generate_samples_single, n_jobs=min(n_batches, self.independent_workers), argument_type="kwargs", disable=True)
             return [r for batch in results for r in batch]
 

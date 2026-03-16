@@ -25,6 +25,8 @@ def find_observation_group(tensordict: TensorDictBase) -> str:
     nested_keys = tensordict.keys(include_nested=True, leaves_only=True)
     if ("agents", "observation") in nested_keys:
         return "agents"
+    if ("ego", "observation") in nested_keys:
+        return "ego"
     observation_keys = [key for key in nested_keys if isinstance(key, tuple) and len(key) == 2 and key[1] == "observation"]
     groups = list({key[0] for key in observation_keys})
     if len(groups) != 1:

@@ -14,29 +14,86 @@ from .utils import find_observation_group
 logging.basicConfig(level=logging.INFO)
 
 
-def _normalize_stacked_action(action) -> torch.Tensor:
-    """Normalize action shape before stacking per-agent outputs."""
+def _filter_invalid_masked_actions(action: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
+    """Replace invalid masked actions with safe defaults (dead->0, otherwise 1)."""
+    mask = action_mask
+    if not isinstance(mask, torch.Tensor):
+        mask = torch.as_tensor(mask, device=action.device)
+    else:
+        mask = mask.to(action.device)
+
+    # Per-agent slices often include a singleton agent axis: [..., 1, n_actions].
+    if mask.dim() >= 2 and mask.shape[-2] == 1:
+        mask = mask.squeeze(-2)
+    if mask.dim() == 1:
+        mask = mask.unsqueeze(0)
+
+    action_idx = action.to(dtype=torch.long)
+    flat_action = action_idx.reshape(-1)
+    if flat_action.numel() == 0:
+        return action_idx
+
+    n_actions = int(mask.shape[-1]) if mask.dim() > 0 else 0
+    if n_actions <= 0:
+        return torch.full_like(action_idx, 1)
+
+    flat_mask = mask.reshape(-1, n_actions)
+    if flat_mask.shape[0] != flat_action.numel():
+        if flat_mask.shape[0] == 1:
+            flat_mask = flat_mask.expand(flat_action.numel(), n_actions)
+        elif flat_action.numel() == 1:
+            flat_mask = flat_mask[:1]
+        else:
+            # Ambiguous batch alignment; fail closed to stop action.
+            return torch.full_like(action_idx, 1)
+
+    # Default fallback is stop (1), except dead-agent rows where only action 0 is valid.
+    fallback = torch.full_like(flat_action, 1)
+    if n_actions >= 1:
+        dead_rows = flat_mask[:, 0] > 0
+        if n_actions > 1:
+            dead_rows = dead_rows & (flat_mask[:, 1:] <= 0).all(dim=1)
+        fallback = torch.where(dead_rows, torch.zeros_like(fallback), fallback)
+
+    sanitized = fallback.clone()
+    in_range = (flat_action >= 0) & (flat_action < n_actions)
+    if in_range.any():
+        row_ids = torch.arange(flat_action.numel(), device=flat_action.device)[in_range]
+        chosen = flat_action[in_range]
+        valid = flat_mask[row_ids, chosen] > 0
+        sanitized[in_range] = torch.where(valid, chosen, fallback[in_range])
+
+    return sanitized.reshape(action_idx.shape)
+
+
+def _normalize_stacked_action(action, action_mask: torch.Tensor | None = None) -> torch.Tensor:
+    """Normalize action shape before stacking per-agent outputs.
+
+    If ``action_mask`` is provided, invalid actions are replaced with a safe
+    default (stop=1, or 0 for dead agents).
+    """
     if not isinstance(action, torch.Tensor):
         action = torch.as_tensor(action)
 
     if action.dim() == 0:
-        return action
+        action = action.unsqueeze(0)
 
     # Preserve per-policy semantics while removing singleton agent axis
     # introduced by grouped slicing (..., i:i+1, ...).
     if action.dim() >= 2 and action.shape[-2] == 1:
         action = action.squeeze(-2)
 
-    # Grouped single-agent slicing in discrete environments can leave a
-    # singleton 1-D tensor like [4]; collapse it back to a scalar before
-    # stacking over agents.
-    if action.dim() == 1 and action.shape[0] == 1:
-        action = action.squeeze(0)
-
     # Keep 1D tensors (e.g. scalar-discrete batch) intact; only strip a
     # trailing singleton feature dim when one truly exists.
     if action.dim() > 1 and action.shape[-1] == 1:
         action = action.squeeze(-1)
+
+    if action_mask is not None:
+        action = _filter_invalid_masked_actions(action, action_mask)
+
+    # Keep at least one dimension so torch.stack never sees 0-D tensors.
+    if action.dim() == 0:
+        action = action.unsqueeze(0)
 
     return action
 
@@ -104,6 +161,31 @@ class MultiPolicyWrapper(nn.Module):
         super().__init__()
         self.policies = policies
 
+    @staticmethod
+    def _get_policy_device(policy: nn.Module) -> torch.device:
+        """Return the device of *policy*'s first parameter, falling back to CPU."""
+        try:
+            return next(policy.parameters()).device
+        except StopIteration:
+            return torch.device("cpu")
+
+    @staticmethod
+    def _normalize_group_td(input_td: TensorDict, group_td: TensorDict) -> TensorDict:
+        """Ensure grouped observations have an explicit agent axis.
+
+        BenchMARL can omit the trailing singleton agent dimension for groups
+        with a single agent, yielding group batch size equal to the parent
+        batch size.  Normalise those groups to ``[*batch, 1]`` so grouped
+        policies always receive ``[..., n_agents, obs_dim]`` inputs.
+        """
+        if len(group_td.batch_size) == len(input_td.batch_size):
+            return group_td.unsqueeze(-1)
+        return group_td
+
+    def _group_agent_count(self, input_td: TensorDict, group: str) -> int:
+        """Return the number of agents in *group* after singleton normalisation."""
+        return int(self._normalize_group_td(input_td, input_td[group]).batch_size[-1])
+
     def _run_group(self, input_td: TensorDict, group: str, policy_offset: int) -> torch.Tensor:
         """Slice each agent in *group*, run its policy, return the assembled action tensor.
 
@@ -116,37 +198,58 @@ class MultiPolicyWrapper(nn.Module):
             Action tensor shaped ``[*batch, n_agents_in_group, action_dim]`` or
             ``[*batch, n_agents_in_group]`` for scalar actions.
         """
-        full_group_td = input_td[group]
+        grouped_keys = [key for key in input_td.keys() if isinstance(key, str) and (key, "observation") in input_td.keys(include_nested=True)]
+        normalized_group_tds = {key: self._normalize_group_td(input_td, input_td[key]) for key in grouped_keys}
+
+        full_group_td = normalized_group_tds[group]
         obs = full_group_td["observation"]
-        n = obs.shape[-2]
+        n = int(full_group_td.batch_size[-1])
 
         if policy_offset + n > len(self.policies):
             raise ValueError(f"Group '{group}' has {n} agents starting at policy index {policy_offset}, but only {len(self.policies)} policies were provided.")
 
-        grouped_keys = [key for key in input_td.keys() if isinstance(key, str) and (key, "observation") in input_td.keys(include_nested=True)]
+        input_device = obs.device
 
         action_list = []
         for i in range(n):
             # Preserve non-group rollout keys (e.g. is_init/reset masks) needed
-            # by recurrent policies while slicing a single agent in the target group.
+            # by recurrent policies while slicing a single agent in the target
+            # group. Keep the other grouped entries intact so per-group
+            # BenchMARL policies still see the rollout layout they expect.
             per_agent_payload = {}
             for key in input_td.keys():
-                if key == group:
-                    per_agent_payload[group] = full_group_td[..., i : i + 1]
-                elif key in grouped_keys:
-                    continue
+                if key in normalized_group_tds:
+                    if key == group:
+                        per_agent_payload[key] = normalized_group_tds[key][..., i : i + 1]
+                    else:
+                        per_agent_payload[key] = normalized_group_tds[key]
                 else:
                     per_agent_payload[key] = input_td[key]
 
+            per_agent_action_mask = per_agent_payload[group].get("action_mask", None)
             per_agent_td = TensorDict(
                 per_agent_payload,
                 batch_size=input_td.batch_size,
                 device=input_td.device,
             )
-            action = _extract_action(self.policies[policy_offset + i](per_agent_td), group=group)
-            action_list.append(_normalize_stacked_action(action))
+            policy = self.policies[policy_offset + i]
+            per_agent_td = per_agent_td.to(self._get_policy_device(policy))
+            out_td = policy(per_agent_td)
+            action = _extract_action(out_td, group=group)
+            action_list.append(_normalize_stacked_action(action, action_mask=per_agent_action_mask).to(input_device))
 
-        return torch.stack(action_list, dim=obs.dim() - 2)
+            # Propagate hidden-state updates written to ("next", group) back to
+            # input_td so TorchRL's rollout can carry them into the next step.
+            next_group_td = out_td.get(("next", group), None)
+            if next_group_td is not None:
+                input_td.set(("next", group), next_group_td.to(input_td.device))
+
+        stacked = torch.stack(action_list, dim=obs.dim() - 2)
+        # SMACv2 expects per-agent discrete action ids as [n_agents] for
+        # unbatched rollouts; generated policies can otherwise yield [n_agents, 1].
+        if len(input_td.batch_size) == 0 and stacked.dim() >= 2 and stacked.shape[-1] == 1:
+            stacked = stacked.squeeze(-1)
+        return stacked
 
     def _run_flat_observation(self, input_td: TensorDict) -> torch.Tensor:
         """Run per-agent policies for flat TensorDict layout with top-level observation.
@@ -156,12 +259,14 @@ class MultiPolicyWrapper(nn.Module):
         - agent axis is the ``-2`` dimension.
         """
         obs = input_td["observation"]
+        input_device = obs.device
         n_agents = obs.shape[-2]
 
         if len(self.policies) != n_agents:
             raise ValueError(f"Expected {n_agents} policies for flat observation layout, got {len(self.policies)}.")
 
         action_list = []
+        action_mask = input_td.get("action_mask", None)
         per_agent_batch = input_td.batch_size[:-1]
         for i in range(n_agents):
             per_agent_payload = {"observation": obs[..., i, :]}
@@ -169,15 +274,26 @@ class MultiPolicyWrapper(nn.Module):
                 if key == "observation":
                     continue
                 per_agent_payload[key] = input_td[key]
+            per_agent_action_mask = None
+            if action_mask is not None:
+                if action_mask.dim() >= 2 and action_mask.shape[-2] == n_agents:
+                    per_agent_action_mask = action_mask[..., i, :]
+                else:
+                    per_agent_action_mask = action_mask
             per_agent_td = TensorDict(
                 per_agent_payload,
                 batch_size=per_agent_batch,
                 device=input_td.device,
             )
-            action = _extract_action(self.policies[i](per_agent_td), group=None)
-            action_list.append(_normalize_stacked_action(action))
+            policy = self.policies[i]
+            per_agent_td = per_agent_td.to(self._get_policy_device(policy))
+            action = _extract_action(policy(per_agent_td), group=None)
+            action_list.append(_normalize_stacked_action(action, action_mask=per_agent_action_mask).to(input_device))
 
-        return torch.stack(action_list, dim=obs.dim() - 2)
+        stacked = torch.stack(action_list, dim=obs.dim() - 2)
+        if len(input_td.batch_size) == 0 and stacked.dim() >= 2 and stacked.shape[-1] == 1:
+            stacked = stacked.squeeze(-1)
+        return stacked
 
     def forward(self, input_td: TensorDict):
         """Run all per-agent policies and write actions into *input_td*.
@@ -204,7 +320,7 @@ class MultiPolicyWrapper(nn.Module):
             else:
                 ordered_groups = grouped_observation_keys
 
-            group_counts = [input_td[g]["observation"].shape[-2] for g in ordered_groups]
+            group_counts = [self._group_agent_count(input_td, g) for g in ordered_groups]
             total_agents = int(sum(group_counts))
             if len(self.policies) != total_agents:
                 counts_str = ", ".join(f"{g}:{c}" for g, c in zip(ordered_groups, group_counts))
@@ -224,7 +340,7 @@ class MultiPolicyWrapper(nn.Module):
 
         # Single shared group: policy index == agent index.
         group = find_observation_group(input_td)
-        n_agents = input_td[group]["observation"].shape[-2]
+        n_agents = self._group_agent_count(input_td, group)
 
         if len(self.policies) != n_agents:
             raise ValueError(f"Expected {n_agents} policies for group '{group}', got {len(self.policies)}.")

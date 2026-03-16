@@ -54,10 +54,7 @@ class DirectStrategy(GenerationStrategy):
         if self.independent_multiturns:
             from pqdm.threads import pqdm
 
-            args = [
-                {"input_prompt": input_prompt, "num_items": bs}
-                for bs in batch_sizes
-            ]
+            args = [{"input_prompt": input_prompt, "num_items": bs} for bs in batch_sizes]
             results = pqdm(args, self._generate_single, n_jobs=min(n_batches, self.independent_workers), argument_type="kwargs", disable=True)
             items = [item for batch in results for item in batch]
         else:

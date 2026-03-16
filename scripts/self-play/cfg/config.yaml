@@ -1,0 +1,42 @@
+env: point_mass_rendezvous
+
+self_play:
+  # Seeds to train; if null, use range(n_seeds)
+  seeds: null
+  n_seeds: 4
+
+  # Number of parallel workers (set >1 only with multiple GPUs)
+  n_workers: 4
+
+  output_dir: ./results/${env}/self_play
+  run_name: ${now:%Y-%m-%d_%H-%M-%S}
+
+  # Forwarded as kwargs to self-play MAPPO training
+  train_kwargs: {}
+
+cooperator:
+  # For standalone cooperator runs; if null, defaults to current self_play run.
+  self_play_results_dir: null
+  output_subdir: cooperator
+  run_name: ${now:%Y-%m-%d_%H-%M-%S}
+
+  # Forwarded as kwargs to env_module.train_fn(...).
+  # Do not set `run_name` here: it is computed by the training pipeline.
+  train_kwargs: {}
+
+evaluation:
+  # For standalone evaluation; if null, defaults to cooperator/self_play fallback.
+  run_dir: null
+  n_eval_rollouts: 50
+  seed: null
+
+pipeline:
+  # Full pipeline only: run evaluation after cooperator training.
+  run_evaluation: false
+
+hydra:
+  run:
+    dir: ${self_play.output_dir}/${self_play.run_name}
+  sweep:
+    dir: ${self_play.output_dir}/${self_play.run_name}
+    subdir: ${hydra.job.num}

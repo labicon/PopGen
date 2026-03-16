@@ -99,7 +99,7 @@ if [[ ! -d "$output_dir" ]]; then
     log "WARNING: output_dir '$output_dir' not found, skipping gather_results" >&2
 else
     csv_path="$output_dir/results.csv"
-    python gather_results.py "$output_dir" -o "$csv_path"
+    python "${SCRIPT_DIR}/../gather_results.py" "$output_dir" -o "$csv_path"
     log "Results saved to $csv_path"
 fi
 

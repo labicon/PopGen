@@ -1,0 +1,72 @@
+defaults:
+  - experiment_config
+  - _self_
+
+# The device for collection (e.g. cuda)
+sampling_device: "cpu"
+# The device for training (e.g. cuda)
+train_device: "cuda"
+# The device for the replay buffer of off-policy algorithms (e.g. cuda).
+buffer_device: "cpu"
+
+# Whether to share the parameters of the policy within agent groups
+share_policy_params: True
+# If an algorithm and an env support both continuous and discrete actions, what should be preferred
+prefer_continuous_actions: False
+collect_with_grad: False
+parallel_collection: False
+
+gamma: 0.99
+lr: 0.00005
+adam_eps: 0.000001
+adam_extra_kwargs: {}
+clip_grad_norm: True
+clip_grad_val: 5
+
+soft_target_update: True
+polyak_tau: 0.005
+hard_target_update_frequency: 5
+
+exploration_eps_init: 0.8
+exploration_eps_end: 0.01
+exploration_anneal_frames: 1_000_000
+
+max_n_iters: null
+max_n_frames: 200_000
+
+on_policy_collected_frames_per_batch: 6000
+on_policy_n_envs_per_worker: 10
+on_policy_n_minibatch_iters: 45
+on_policy_minibatch_size: 400
+
+off_policy_collected_frames_per_batch: 6000
+off_policy_n_envs_per_worker: 10
+off_policy_n_optimizer_steps: 100
+off_policy_train_batch_size: 100
+off_policy_memory_size: 1_000_000
+off_policy_init_random_frames: 0
+off_policy_use_prioritized_replay_buffer: False
+off_policy_prb_alpha: 0.6
+off_policy_prb_beta: 0.4
+
+
+evaluation: True
+# SMACv2 rendering requires a StarCraft II display; disable for headless training
+render: False
+evaluation_interval: 60000
+evaluation_episodes: 10
+evaluation_deterministic_actions: True
+evaluation_static: False
+
+loggers: [wandb]
+project_name: "benchmarl"
+wandb_extra_kwargs: {}
+create_json: False
+
+save_folder: null
+restore_file: null
+restore_map_location: null
+checkpoint_interval: 120_000
+checkpoint_at_end: True
+keep_checkpoints_num: 3
+exclude_buffer_from_checkpoint: True

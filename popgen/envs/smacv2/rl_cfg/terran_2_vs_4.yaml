@@ -1,0 +1,141 @@
+# Whether to keep episodes alive after hitting the map time limit.
+continuing_episode: False
+
+# Built-in StarCraft II bot difficulty ("1".."A"); "7" is hard.
+difficulty: "4"
+
+# Specific SC2 game version to force; null uses the installed default.
+game_version: null
+
+# SMACv2 generated-map family used for this task.
+map_name: "10gen_terran"
+
+# Distance (in world units) moved per move action.
+move_amount: 2
+
+# Include health info for allies/enemies in local observations.
+obs_all_health: True
+
+# If True, use local observations as global state; False keeps separate state.
+obs_instead_of_state: False
+
+# Include teammate last-action one-hot in observation.
+obs_last_action: False
+
+# Include own health in observation.
+obs_own_health: True
+
+# Include local pathing grid channels in movement features.
+obs_pathing_grid: False
+
+# Include local terrain-height channels in movement features.
+obs_terrain_height: False
+
+# Append normalized timestep to observation.
+obs_timestep_number: False
+
+# Reward added when an enemy unit is killed.
+reward_death_value: 10
+
+# Reward given when the team loses the battle.
+reward_defeat: 0
+
+# Scaling factor for negative reward components.
+reward_negative_scale: 0.5
+
+# If True, keep rewards non-negative (clip/reshape negatives).
+reward_only_positive: True
+
+# Enable reward normalization/scaling by max map reward.
+reward_scale: True
+
+# Target scale used when reward_scale is enabled.
+reward_scale_rate: 20
+
+# Use sparse terminal reward only (win/loss), instead of dense shaping.
+reward_sparse: False
+
+# Reward given when the team wins the battle.
+reward_win: 200
+
+# Directory to write SC2 replay files.
+replay_dir: ""
+
+# Replay filename prefix.
+replay_prefix: ""
+
+# Enable conic field-of-view observations and turning actions.
+conic_fov: False
+
+# Include own normalized (x, y) position in observation.
+obs_own_pos: True
+
+# Use unit-specific attack/sight ranges instead of fixed defaults.
+use_unit_ranges: True
+
+# Lower bound on attack range, applied with unit-specific ranges.
+min_attack_range: 2
+
+# Number of FOV-direction actions when conic_fov=True.
+num_fov_actions: 12
+
+# Capability/randomization config for generated teams and starts.
+capability_config:
+  # Number of allied controllable units.
+  n_units: 2
+
+  # Number of enemy units.
+  n_enemies: 4
+
+  # Team composition generator configuration.
+  team_gen:
+    # Team sampling strategy.
+    dist_type: "weighted_teams"
+
+    # Candidate unit types for team generation.
+    unit_types:
+      - "marine"
+
+    # Sampling weights aligned with unit_types.
+    weights:
+      - 1.0
+
+    # Whether generated teammate type information is observable.
+    observe: True
+
+  # Spawn/start-position generator configuration.
+  start_positions:
+    # Start-position sampling strategy.
+    dist_type: "surrounded_and_reflect"
+
+    # Strategy parameter for surrounded_and_reflect placement.
+    p: 0.5
+
+    # Map width used by the start-position generator.
+    map_x: 32
+
+    # Map height used by the start-position generator.
+    map_y: 32
+
+# Include last-action one-hot in global state.
+state_last_action: True
+
+# Append normalized timestep to global state.
+state_timestep_number: False
+
+# Number of SC2 game frames per environment step.
+step_mul: 8
+
+# Use built-in scripted heuristic policy for agents.
+heuristic_ai: False
+
+# Enable verbose debug logs from SMACv2 internals.
+debug: False
+
+# Probability an observed enemy is shared to other allies' observations.
+prob_obs_enemy: 1.0
+
+# Attack-action masking mode:
+# False -> attack actions may be "available" for alive enemies even out of range;
+#          non-executable commands are skipped by the env.
+action_mask: False

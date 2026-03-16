@@ -129,6 +129,7 @@ def train_vmas_env(
     teammate_policy: list[nn.Module | Callable] | None = None,
     scenario_kwargs: dict | None = None,
     task_yaml_name=None,
+    mappo_yaml_name="mappo.yaml",
     ippo_yaml_name="ippo.yaml",
     experiment_yaml_name="base_experiment.yaml",
     mlp_yaml_name="mlp.yaml",
@@ -203,13 +204,12 @@ def train_vmas_env(
             )
 
         # 5. Configure Algorithm & Experiment
+        mappo_path = rl_cfg_dir / mappo_yaml_name
         ippo_path = rl_cfg_dir / ippo_yaml_name
         if ippo_path.exists():
             algorithm_config = IppoConfig.get_from_yaml(path=str(ippo_path))
-        elif (rl_cfg_dir / "ippo.yaml").exists():
-            algorithm_config = IppoConfig.get_from_yaml(path=str(rl_cfg_dir / "ippo.yaml"))
         else:
-            algorithm_config = MappoConfig.get_from_yaml()
+            algorithm_config = MappoConfig.get_from_yaml(path=str(mappo_path))
 
         experiment_config = ExperimentConfig.get_from_yaml(path=str(rl_cfg_dir / experiment_yaml_name))
         model_config = MlpConfig.get_from_yaml(path=str(rl_cfg_dir / mlp_yaml_name))
@@ -484,7 +484,7 @@ def rollout_vmas_env(policy, env, seed: int | None = None, **kwargs):
             policy=policy,
             callback=render_callback,
             auto_cast_to_device=True,
-            break_when_any_done=True,
+            break_when_all_done=True,
             trust_policy=True,
             **rollout_kwargs,
         )

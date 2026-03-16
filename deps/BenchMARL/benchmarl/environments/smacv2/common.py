@@ -103,6 +103,7 @@ class Smacv2Task(Task):
     PROTOSS_20_VS_20 = None
     PROTOSS_20_VS_23 = None
     TERRAN_5_VS_5 = None
+    TERRAN_2_VS_4 = None
     TERRAN_10_VS_10 = None
     TERRAN_10_VS_11 = None
     TERRAN_20_VS_20 = None

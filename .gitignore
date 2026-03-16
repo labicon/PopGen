@@ -1,7 +1,14 @@
 # Project specific
 experiments/
-scripts/reward_generation/results
-scripts/behavior_policy/results
+scripts/population/behavior_reward/results
+scripts/population/behavior_policy/results
+scripts/llm_agent/results
+scripts/cooperator/results
+scripts/self-play/results
+
+# Stacraft 2 dependencies
+deps/StarCraftII
+deps/StarCraftII/Battle.net
 
 # AI Agents
 .claude/

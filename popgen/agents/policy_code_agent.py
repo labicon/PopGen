@@ -71,7 +71,15 @@ class PolicyCodeAgent(nn.Module):
 
         actions = []
         for slot_obs in flat_obs:
-            slot_action = self.act_fn(slot_obs)
+            try:
+                slot_action = self.act_fn(slot_obs)
+            except RuntimeError as exc:
+                # Generated policies sometimes construct CPU tensors explicitly
+                # (for example torch.tensor([...])) while obs is on CUDA.
+                # Retry on CPU and move result back in _normalize_action.
+                if "same device" not in str(exc):
+                    raise
+                slot_action = self.act_fn(slot_obs.cpu())
             slot_action = self._normalize_action(
                 slot_action,
                 obs_dtype=obs_tensor.dtype,
