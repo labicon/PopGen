@@ -1,10 +1,10 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from popgen.population.generation.diversity import (
     GenerationStrategy,
-    InContextStrategy,
+    DirectStrategy,
     StratifiedStrategy,
 )
 from popgen.utils.config import LitellmConfig
@@ -14,6 +14,9 @@ class SampleItem(BaseModel):
     """A sample item for generation testing."""
     name: str
     description: str
+
+
+_SampleItemList = create_model("SampleItemList", items=(list[SampleItem], ...))
 
 
 def _mock_item_response(name: str, description: str) -> MagicMock:
@@ -30,10 +33,7 @@ def _mock_item_list_response(items: list[SampleItem]) -> MagicMock:
     """Helper to create a mock LLM response with JSON content for a list of SampleItems."""
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
-    # Create dynamic list model
-    from pydantic import create_model
-    list_model = create_model("SampleItemList", items=(list[SampleItem], ...))
-    mock_response.choices[0].message.content = list_model(items=items).model_dump_json()
+    mock_response.choices[0].message.content = _SampleItemList(items=items).model_dump_json()
     return mock_response
 
 
@@ -113,73 +113,96 @@ class TestGenerationStrategy:
         assert strategy.generated_items == []
 
 
-class TestInContextStrategy:
+class TestDirectStrategy:
     @pytest.fixture
     def mock_completion(self):
-        with patch("popgen.population.generation.diversity.in_context.litellm.completion") as mock:
+        with patch("popgen.population.generation.diversity.direct.litellm.completion") as mock:
             yield mock
 
     def test_init_custom_model(self):
         config = LitellmConfig(model_name="gpt-4-turbo")
-        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
+        strategy = DirectStrategy(model_config=config, output_type=SampleItem)
         assert strategy.model_config.model_name == "gpt-4-turbo"
 
     def test_init_output_type(self):
         config = LitellmConfig(model_name="openai/gpt-4")
-        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
+        strategy = DirectStrategy(model_config=config, output_type=SampleItem)
         assert strategy.output_type == SampleItem
 
-    def test_generate_single_success(self, mock_completion):
-        mock_completion.return_value = _mock_item_response("Test", "Test description")
+    def test_generate_single_call(self, mock_completion):
+        items = [SampleItem(name=f"Item{i}", description=f"Desc {i}") for i in range(4)]
+        mock_completion.return_value = _mock_item_list_response(items)
 
         config = LitellmConfig(model_name="openai/gpt-4")
-        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
-        result = strategy._generate_single("Test environment")
+        strategy = DirectStrategy(model_config=config, output_type=SampleItem)
+        result = strategy.generate("Test environment", num_items=4)
 
-        assert result.name == "Test"
-        assert result.description == "Test description"
-        # _generate_single doesn't add to generated_items; only generate() does
-        assert len(strategy.generated_items) == 0
-        mock_completion.assert_called_once()
+        assert len(result) == 4
+        assert mock_completion.call_count == 1
+        for i, item in enumerate(result):
+            assert item.name == f"Item{i}"
 
-    def test_generate_multiple_items(self, mock_completion):
+    def test_generate_default_num_items(self, mock_completion):
+        items = [SampleItem(name=f"Item{i}", description=f"Desc {i}") for i in range(4)]
+        mock_completion.return_value = _mock_item_list_response(items)
+
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = DirectStrategy(model_config=config, output_type=SampleItem)
+        result = strategy.generate("Test environment")
+
+        assert len(result) == 4
+        assert mock_completion.call_count == 1
+
+    def test_multiturn_sequential(self, mock_completion):
+        """samples_per_turn=1, independent=False: 4 sequential calls with context."""
         mock_completion.side_effect = [
-            _mock_item_response(f"Item{i}", f"Description {i}")
-            for i in range(3)
+            _mock_item_list_response([SampleItem(name=f"Item{i}", description=f"Desc {i}")])
+            for i in range(4)
         ]
 
         config = LitellmConfig(model_name="openai/gpt-4")
-        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
-        results = strategy.generate("Test environment", num_items=3)
+        strategy = DirectStrategy(
+            model_config=config, output_type=SampleItem,
+            samples_per_turn=1, independent_multiturns=False,
+        )
+        result = strategy.generate("Test environment", num_items=4)
 
-        assert len(results) == 3
-        assert mock_completion.call_count == 3
-        for i, result in enumerate(results):
-            assert result.name == f"Item{i}"
-
-    def test_generate_default_num_items(self, mock_completion):
-        mock_completion.return_value = _mock_item_response("Test", "Test")
-
-        config = LitellmConfig(model_name="openai/gpt-4")
-        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
-        results = strategy.generate("Test environment")
-
-        assert len(results) == 4
+        assert len(result) == 4
         assert mock_completion.call_count == 4
+        # Second call should include context from first item
+        second_call_messages = mock_completion.call_args_list[1].kwargs["messages"]
+        assert "Item0" in second_call_messages[1]["content"]
 
-    def test_previous_items_included_in_prompt(self, mock_completion):
-        mock_completion.return_value = _mock_item_response("New", "New item")
+    def test_multiturn_independent(self, mock_completion):
+        """samples_per_turn=1, independent=True: 4 parallel calls without context."""
+        mock_completion.side_effect = [
+            _mock_item_list_response([SampleItem(name=f"Item{i}", description=f"Desc {i}")])
+            for i in range(4)
+        ]
 
         config = LitellmConfig(model_name="openai/gpt-4")
-        strategy = InContextStrategy(model_config=config, output_type=SampleItem)
-        existing_items = [SampleItem(name="Existing", description="Already generated")]
+        strategy = DirectStrategy(
+            model_config=config, output_type=SampleItem,
+            samples_per_turn=1, independent_multiturns=True,
+        )
+        result = strategy.generate("Test environment", num_items=4)
 
-        strategy._generate_single("Test environment", previous_items=existing_items)
+        assert len(result) == 4
+        assert mock_completion.call_count == 4
+        # All calls should have the same base prompt (no context from previous items)
+        for call in mock_completion.call_args_list:
+            user_msg = call.kwargs["messages"][1]["content"]
+            assert user_msg == "Test environment"
 
-        call_args = mock_completion.call_args
-        messages = call_args.kwargs["messages"]
-        # Previous items are in user prompt (messages[1]), not system prompt (messages[0])
-        assert "Existing" in messages[1]["content"]
+    def test_generated_items_tracked(self, mock_completion):
+        items = [SampleItem(name="A", description="a"), SampleItem(name="B", description="b")]
+        mock_completion.return_value = _mock_item_list_response(items)
+
+        config = LitellmConfig(model_name="openai/gpt-4")
+        strategy = DirectStrategy(model_config=config, output_type=SampleItem)
+        strategy.generate("Test", num_items=2)
+
+        assert len(strategy.generated_items) == 2
 
 
 class TestStratifiedStrategy:

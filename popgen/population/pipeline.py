@@ -600,7 +600,7 @@ class LLMAgentGenerationPipeline(AgentGenerationPipeline):
             evaluator=evaluator,
             env_module=env_module,
             output_dir=output_dir,
-            advisor=advisor,
+            advisor=None,  # LLM Agents use rollout reasoning directly, no advisor
         )
         self.agent_model_config = agent_model_config
 

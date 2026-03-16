@@ -2,15 +2,62 @@
 
 from __future__ import annotations
 
+import warnings
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
+from scipy.stats import norm as sp_norm
+from scipy.stats.qmc import Sobol
 
 from popgen.population.encode import Encoder, TextEncoder
 from popgen.utils.config import LitellmConfig
 
 from .base import BaseEvaluator, EvalResult, calculate_stats
 from .similarity import dot_product
+
+
+@lru_cache(maxsize=32)
+def _calibrate_radius(
+    n_population: int,
+    dim: int,
+    n_reference_points: int,
+    n_calibration_rounds: int,
+    calibration_target: float,
+    seed: int,
+) -> float:
+    """Calibrate coverage radius using Sobol quasi-random reference populations.
+
+    For each round, generates a synthetic population of size *n_population* on
+    the unit hypersphere via a scrambled Sobol sequence, then finds the smallest
+    Euclidean radius k such that *calibration_target* fraction of the reference
+    points are within distance k of at least one synthetic point.  The final
+    radius is the average across all rounds.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Reference points on the unit sphere (reused across rounds)
+    ref = rng.normal(size=(n_reference_points, dim))
+    ref /= np.clip(np.linalg.norm(ref, axis=1, keepdims=True), 1e-12, None)
+
+    radii = np.empty(n_calibration_rounds)
+    for i in range(n_calibration_rounds):
+        sobol = Sobol(d=dim, scramble=True, seed=seed + i + 1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)  # non-power-of-2 n
+            pts = sobol.random(n_population)  # (n_population, dim) in [0, 1]^dim
+        pts = np.clip(pts, 1e-6, 1.0 - 1e-6)
+        gauss = sp_norm.ppf(pts)
+        gauss /= np.clip(np.linalg.norm(gauss, axis=1, keepdims=True), 1e-12, None)
+
+        # Euclidean distances for L2-normalised vectors: d = sqrt(2(1 - cos))
+        sims = ref @ gauss.T  # (n_reference_points, n_population)
+        dists = np.sqrt(np.clip(2.0 * (1.0 - np.clip(sims, -1.0, 1.0)), 0.0, None))
+        min_dists = np.min(dists, axis=1)
+
+        radii[i] = float(np.percentile(min_dists, calibration_target * 100))
+
+    return float(np.mean(radii))
 
 
 class EmbeddingDiversityEvaluator(BaseEvaluator):
@@ -36,8 +83,9 @@ class EmbeddingDiversityEvaluator(BaseEvaluator):
         encoder: Encoder,
         num_workers: int = 1,
         dot_product_norm: bool = True,
-        coverage_samples: int = 512,
-        coverage_threshold: float = 0.8,
+        coverage_samples: int = 1_000,
+        calibration_rounds: int = 1_000,
+        calibration_target: float = 0.99,
         monte_carlo_seed: int = 0,
         volume_eps: float = 1e-8,
         save_path: str | None = None,
@@ -46,7 +94,8 @@ class EmbeddingDiversityEvaluator(BaseEvaluator):
         self.encoder = encoder
         self.dot_product_norm = bool(dot_product_norm)
         self.coverage_samples = int(coverage_samples)
-        self.coverage_threshold = float(coverage_threshold)
+        self.calibration_rounds = int(calibration_rounds)
+        self.calibration_target = float(calibration_target)
         self.monte_carlo_seed = int(monte_carlo_seed)
         self.volume_eps = float(volume_eps)
         self.save_path = save_path
@@ -89,15 +138,25 @@ class EmbeddingDiversityEvaluator(BaseEvaluator):
 
         rng = np.random.default_rng(self.monte_carlo_seed)
         samples = rng.normal(size=(self.coverage_samples, dim))
-        norms = np.linalg.norm(samples, axis=1, keepdims=True)
-        samples = samples / np.clip(norms, 1e-12, None)
+        samples /= np.clip(np.linalg.norm(samples, axis=1, keepdims=True), 1e-12, None)
 
+        # Euclidean distances for L2-normalised vectors: d = sqrt(2(1 - cos))
         sims = dot_product(samples, embeddings, norm=self.dot_product_norm)
-        max_sim = np.max(sims, axis=1)
-        coverage = float(np.mean(max_sim >= self.coverage_threshold))
+        dists = np.sqrt(np.clip(2.0 * (1.0 - np.clip(sims, -1.0, 1.0)), 0.0, None))
+        min_dists = np.min(dists, axis=1)
 
-        min_dist = np.min(np.sqrt(np.clip(2.0 * (1.0 - np.clip(sims, -1.0, 1.0)), 0.0, None)), axis=1)
-        dispersion = float(np.max(min_dist))
+        # Adaptive radius calibrated via Sobol reference populations
+        k = _calibrate_radius(
+            n_population=n,
+            dim=dim,
+            n_reference_points=10_000,
+            n_calibration_rounds=self.calibration_rounds,
+            calibration_target=self.calibration_target,
+            seed=self.monte_carlo_seed,
+        )
+
+        coverage = float(np.mean(min_dists <= k))
+        dispersion = float(np.max(min_dists))
         return coverage, dispersion
 
     def compute_instance_metric(self, input_data: dict[str, Any]) -> dict[str, Any]:
@@ -166,7 +225,8 @@ class EmbeddingDiversityEvaluator(BaseEvaluator):
                 "encoder": type(self.encoder).__name__,
                 "dot_product_norm": self.dot_product_norm,
                 "coverage_samples": self.coverage_samples,
-                "coverage_threshold": self.coverage_threshold,
+                "calibration_rounds": self.calibration_rounds,
+                "calibration_target": self.calibration_target,
             }
         )
 

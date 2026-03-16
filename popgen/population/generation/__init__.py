@@ -1,6 +1,6 @@
 from .base import BaseGenerator
 from .diversity import (
-    InContextStrategy,
+    DirectStrategy,
     StratifiedStrategy,
     VerbalizedSamplingStrategy,
     load_strategy,
@@ -12,7 +12,7 @@ from .trajectory_generator import Trajectory, TrajectoryGenerator
 
 __all__ = [
     "BaseGenerator",
-    "InContextStrategy",
+    "DirectStrategy",
     "StratifiedStrategy",
     "VerbalizedSamplingStrategy",
     "load_strategy",

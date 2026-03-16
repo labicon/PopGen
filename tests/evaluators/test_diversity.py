@@ -21,7 +21,7 @@ def test_embedding_diversity_pairwise_metrics_identity_embeddings():
         encoder=_IdentityEncoder(),
         dot_product_norm=True,
         coverage_samples=128,
-        coverage_threshold=0.2,
+        calibration_rounds=10,
         monte_carlo_seed=0,
     )
     metrics = evaluator.compute_instance_metric(

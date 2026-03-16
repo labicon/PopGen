@@ -28,11 +28,12 @@ class Encoder(ABC):
 class TextEncoder(Encoder):
     """Text embedder backed by LiteLLM embedding endpoints."""
 
-    def __init__(self, embedding_model: str | LitellmConfig, batch_size: int = 32):
+    def __init__(self, embedding_model: str | LitellmConfig, batch_size: int = 32, num_workers: int = 8):
         if isinstance(embedding_model, str):
             embedding_model = LitellmConfig(model_name=embedding_model)
         self.embedding_config = embedding_model
         self.batch_size = int(batch_size)
+        self.num_workers = int(num_workers)
 
     def _to_text(self, item: Any) -> str:
         if isinstance(item, str):
@@ -45,21 +46,30 @@ class TextEncoder(Encoder):
         embeddings = self.batch_encoder([input])
         return embeddings[0]
 
+    def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        response = litellm.embedding(
+            model=self.embedding_config.model_name,
+            input=batch,
+            **self.embedding_config.get_completion_kwargs(),
+        )
+        return [item["embedding"] if isinstance(item, dict) else item.embedding for item in response.data]
+
     def batch_encoder(self, inputs: list[Any]) -> np.ndarray:
         if len(inputs) == 0:
             return np.zeros((0, 0), dtype=float)
 
         texts = [self._to_text(item) for item in inputs]
-        all_embeddings: list[list[float]] = []
+        batches = [texts[i : i + self.batch_size] for i in range(0, len(texts), self.batch_size)]
 
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
-            response = litellm.embedding(
-                model=self.embedding_config.model_name,
-                input=batch,
-                **self.embedding_config.get_completion_kwargs(),
-            )
-            all_embeddings.extend(item["embedding"] if isinstance(item, dict) else item.embedding for item in response.data)
+        if len(batches) <= 1 or self.num_workers <= 1:
+            all_embeddings: list[list[float]] = []
+            for batch in batches:
+                all_embeddings.extend(self._embed_batch(batch))
+        else:
+            from pqdm.threads import pqdm
+
+            results = pqdm(batches, self._embed_batch, n_jobs=min(len(batches), self.num_workers), disable=True)
+            all_embeddings = [emb for batch_embs in results for emb in batch_embs]
 
         return np.asarray(all_embeddings, dtype=float)
 

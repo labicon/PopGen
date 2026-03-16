@@ -26,13 +26,13 @@ Your task is to evaluate the quality of the behavior across three rubrics:
    - 4: Highly relevant, clearly designed for this environment with appropriate context
    - 5: Perfectly relevant, deeply tied to the environment's unique characteristics and objectives
 
-2. **Realism** (0-5): Is the behavior realistic and achievable?
-   - 0: Physically impossible or violates fundamental constraints of the environment
-   - 1: Highly unrealistic, would require capabilities far beyond what agents possess
-   - 2: Questionable realism, might be achievable under ideal conditions only
-   - 3: Moderately realistic, achievable but with significant challenges or assumptions
-   - 4: Realistic, clearly achievable by a competent agent with reasonable effort
-   - 5: Highly realistic, straightforward to execute with well-understood mechanics
+2. **Realism** (0-5): Could a real player plausibly play this way, given the environment's constraints?
+   - 0: Violates hard environment constraints (e.g., impossible actions, broken physics)
+   - 1: Technically allowed but contradicts the environment so fundamentally that no human would ever play this way
+   - 2: Extremely unlikely — requires bizarre intent or misunderstanding, but not strictly impossible
+   - 3: Unusual but conceivable — a small fraction of players (even 0.01%) might genuinely adopt this style
+   - 4: Plausible — an uncommon but recognizable play style that some players would intentionally choose
+   - 5: Natural — a common or intuitive way to play that many players would independently arrive at
 
 3. **Specificity** (0-5): Is the behavior specific enough to be actionable?
    - 0: Extremely vague, no actionable guidance (e.g., "play well")
