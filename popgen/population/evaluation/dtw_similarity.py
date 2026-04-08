@@ -70,7 +70,7 @@ class DTWSimilarityEvaluator(BaseEvaluator):
             if group_name == "ego_team":
                 candidate_group_names.extend(["ego", "agents", "agent_blue"])
             elif group_name == "opponent_team":
-                candidate_group_names.extend(["opponent", "agent_red"])
+                candidate_group_names.extend(["opponent", "opponents", "agent_red"])
 
         agents = step.get("agents")
         if isinstance(agents, dict):

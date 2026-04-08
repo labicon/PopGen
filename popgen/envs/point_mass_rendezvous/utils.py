@@ -10,8 +10,7 @@ from pydantic import BaseModel, Field
 from vmas import make_env
 from vmas.scenarios import point_mass_rendezvous as point_mass_rendezvous_scenario
 
-from popgen.agents.utils import extract_observation_and_action_key, format_action_output
-from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
+from popgen.envs.vmas_common import default_trainable_group, rollout_vmas_env, train_vmas_env
 
 # ---------------------------------------------------------------------------- #
 #                              Environment Config                              #
@@ -124,6 +123,31 @@ class ActionType(BaseModel):
 # ---------------------------------------------------------------------------- #
 
 
+def build_group_map(task_cfg: dict) -> dict[str, list[str]]:
+    raw_group_map = task_cfg.get("group_map")
+    if raw_group_map:
+        seen: set[str] = set()
+        agent_names: list[str] = []
+        for grouped_agents in raw_group_map.values():
+            for name in grouped_agents:
+                if name not in seen:
+                    seen.add(name)
+                    agent_names.append(name)
+    else:
+        n_agents = task_cfg.get("n_agents")
+        if n_agents is None:
+            raise ValueError(f"Could not infer point-mass agent names from task config {task_cfg}.")
+        agent_names = [f"agent_{i}" for i in range(int(n_agents))]
+
+    if not agent_names:
+        raise ValueError("Point-mass group_map must contain at least one controlled agent.")
+
+    group_map = {"ego": [agent_names[0]]}
+    if len(agent_names) > 1:
+        group_map["teammate"] = agent_names[1:]
+    return group_map
+
+
 def train_fn(reward_fn: Callable | None = None, output_dir: str = None, **kwargs):
     """
     Trains agents using BenchMARL with a custom reward function.
@@ -146,6 +170,9 @@ def train_fn(reward_fn: Callable | None = None, output_dir: str = None, **kwargs
         finally:
             temp_env.close()
 
+    task = VmasTask.POINT_MASS_RENDEZVOUS.get_from_yaml(path=str(RL_CFG_DIR / "point_mass_rendezvous.yaml"))
+    group_map = build_group_map(task.config)
+
     return train_vmas_env(
         reward_fn=reward_fn,
         output_dir=output_dir,
@@ -153,6 +180,8 @@ def train_fn(reward_fn: Callable | None = None, output_dir: str = None, **kwargs
         scenario_name="point_mass_rendezvous",
         vmas_task=VmasTask.POINT_MASS_RENDEZVOUS,
         rl_cfg_dir=RL_CFG_DIR,
+        group_map=group_map,
+        trainable_group=default_trainable_group(group_map),
         teammate_policy=teammate_policy,
         **kwargs,
     )
@@ -233,7 +262,9 @@ def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **k
     Returns:
         An instance of the point mass rendezvous environment.
     """
-    return VmasTask.POINT_MASS_RENDEZVOUS.get_from_yaml(path=str(RL_CFG_DIR / "point_mass_rendezvous.yaml")).get_env_fun(
+    task = VmasTask.POINT_MASS_RENDEZVOUS.get_from_yaml(path=str(RL_CFG_DIR / "point_mass_rendezvous.yaml"))
+    task.config["group_map"] = build_group_map(task.config)
+    return task.get_env_fun(
         num_envs=num_envs,
         continuous_actions=continuous_actions,
         seed=seed,
@@ -265,13 +296,13 @@ class ScriptedPolicy(torch.nn.Module):
         self.target_landmark_idx = torch.tensor([_rng.randrange(self.num_landmarks) for _ in range(self.num_envs)])
         self.dummy_param = torch.nn.Parameter(torch.zeros(1))  # Dummy parameter to make this a valid nn.Module
 
-    def forward(self, obs):
-        obs_tensor, action_key = extract_observation_and_action_key(obs)
-
-        # Squeeze agent dim if present: [batch, 1, obs_dim] → [batch, obs_dim]
-        had_agent_dim = obs_tensor.ndim == 3 and obs_tensor.shape[-2] == 1
-        if had_agent_dim:
-            obs_tensor = obs_tensor.squeeze(-2)
+    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
+        if not isinstance(obs_tensor, torch.Tensor):
+            raise TypeError(f"PointMass ScriptedPolicy expected torch.Tensor observation, got {type(obs_tensor).__name__}.")
+        if obs_tensor.dim() != 2:
+            raise ValueError(
+                f"PointMass ScriptedPolicy expects observation tensor with shape (batch, obs_dim), got {tuple(obs_tensor.shape)}."
+            )
 
         batch_size = obs_tensor.shape[0]
         landmark_relative_positions = obs_tensor[:, 4:4 + self.num_landmarks * 2].view(batch_size, self.num_landmarks, 2)
@@ -283,7 +314,4 @@ class ScriptedPolicy(torch.nn.Module):
         action = direction_to_landmark / (torch.linalg.norm(direction_to_landmark, dim=-1, keepdim=True) + 1e-8)
         action = action.clamp(-1, 1)
 
-        if had_agent_dim:
-            action = action.unsqueeze(-2)  # [batch, 1, action_dim]
-
-        return format_action_output(obs, action_key, action)
+        return action

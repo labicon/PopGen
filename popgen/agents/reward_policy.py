@@ -8,7 +8,7 @@ from pathlib import Path
 import vmas
 from benchmarl.experiment import Experiment
 
-from popgen.agents.scripted_partner import MultiPolicyWrapper
+from popgen.agents.router import MultiPolicyRouter
 from popgen.envs.pp import semdiv_simple_tag
 from popgen.utils.filesystem import find_reward_checkpoints
 
@@ -65,8 +65,9 @@ def load_reward_rollout_artifacts(save_dir: str | Path, scripted_policy_fn=None)
             },
         )
 
-    ego_group = "ego" if "ego" in experiment.group_policies else "agents"
-    ego_policy = experiment.group_policies[ego_group]
+    if "ego" not in experiment.group_policies:
+        raise KeyError(f"Expected semantic 'ego' policy group in reloaded experiment, got {list(experiment.group_policies.keys())}.")
+    ego_policy = experiment.group_policies["ego"]
     try:
         ego_policy = ego_policy.to("cpu")
     except Exception:
@@ -84,7 +85,7 @@ def load_reward_rollout_artifacts(save_dir: str | Path, scripted_policy_fn=None)
 
     teammate_policy = scripted_policy_fn(env)
     if isinstance(teammate_policy, (list, tuple)):
-        policies = [ego_policy, *teammate_policy]
+        teammate_policies = list(teammate_policy)
     else:
-        policies = [ego_policy, teammate_policy]
-    return env, MultiPolicyWrapper(policies=policies)
+        teammate_policies = [teammate_policy]
+    return env, MultiPolicyRouter(policies={"ego": ego_policy, "teammate": teammate_policies})

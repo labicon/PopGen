@@ -10,113 +10,15 @@ from benchmarl.algorithms import IppoConfig, MappoConfig
 from benchmarl.experiment import Experiment, ExperimentConfig
 from benchmarl.models.mlp import MlpConfig
 
-from popgen.envs.utils import apply_rollout_seed, parse_single_scripted_policy
+from popgen.envs.utils import apply_rollout_seed
 
 
-def _build_vmas_train_group_map(
-    task_config: dict,
-) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    """Split the agents in ``task_config["group_map"]`` into ego and teammate groups.
-
-    Two layouts are supported:
-
-    **Football layout** – ``group_map`` contains both ``"agent_blue"`` (our
-    team) and ``"agent_red"`` (opponent).  ``"agent_red"`` is left untouched;
-    ``"agent_blue"`` is split so the first blue agent becomes ``"ego"`` and
-    the remaining blue agents become ``"teammate"``.
-
-    **General layout** – all agents are flattened across groups in insertion
-    order; the first agent becomes ``"ego"`` and the rest become
-    ``"teammate"``.
-
-    Args:
-        task_config: BenchMARL task configuration dict.  Must contain a
-            non-empty ``"group_map"`` with at least two agents in the
-            trainable group.
-
-    Returns:
-        A ``(group_map, trainable_group)`` tuple where:
-
-        - *group_map* – new group map with ``"ego"``, ``"teammate"``, and
-          (football only) ``"agent_red"`` entries.
-        - *trainable_group* – ``{"ego": [first_agent]}``, the subset whose
-          parameters are updated during training.
-
-    Raises:
-        ValueError: If ``"group_map"`` is absent/empty or the trainable team
-            contains fewer than two agents.
-    """
-    original_group_map = task_config.get("group_map")
-
-    # Football layout: "agent_blue" (our team) vs "agent_red" (opponent, unchanged).
-    if original_group_map and "agent_blue" in original_group_map and "agent_red" in original_group_map:
-        blue_agents = list(original_group_map["agent_blue"])
-        if len(blue_agents) < 2:
-            raise ValueError(
-                f"Need at least 2 blue agents to form ego/teammate split; got {blue_agents}."
-            )
-        group_map = {
-            "ego": [blue_agents[0]],
-            "teammate": blue_agents[1:],
-            "agent_red": list(original_group_map["agent_red"]),
-        }
-        trainable_group = {"ego": [blue_agents[0]]}
-        return group_map, trainable_group
-
-    # simple_tag layout: keep adversaries/prey in separate groups because their
-    # observation vectors can differ in size.
-    if {"num_adversaries", "num_good_agents"} <= set(task_config.keys()):
-        num_adversaries = int(task_config["num_adversaries"])
-        if num_adversaries < 1:
-            raise ValueError("Need at least 1 adversary to define an ego agent.")
-
-        ego_group = ["adversary_0"]
-        teammate_group = [f"adversary_{i}" for i in range(1, num_adversaries)]
-        ai_good_agents = bool(task_config.get("ai_good_agents", False))
-
-        group_map = {"ego": ego_group}
-        if teammate_group:
-            group_map["teammate"] = teammate_group
-        if not ai_good_agents:
-            num_good_agents = int(task_config["num_good_agents"])
-            opponent_group = [f"agent_{i}" for i in range(num_good_agents)]
-            group_map["opponent"] = opponent_group
-
-        trainable_group = {"ego": ego_group}
-        return group_map, trainable_group
-
-    # General layout:
-    # 1) if group_map exists, flatten all agents across groups, first -> ego, rest -> teammate.
-    # 2) otherwise infer agent names from known count fields.
-    if original_group_map:
-        seen: set[str] = set()
-        agent_names: list[str] = []
-        for grouped_agents in original_group_map.values():
-            for name in grouped_agents:
-                if name not in seen:
-                    seen.add(name)
-                    agent_names.append(name)
-    else:
-        n_agents = task_config.get("n_agents")
-        if n_agents is not None:
-            agent_names = [f"agent_{i}" for i in range(n_agents)]
-        elif n_agents is None and {"n_blue_agents", "n_red_agents"} <= set(task_config.keys()):
-            n_agents = task_config["n_blue_agents"]
-            agent_names = [f"agent_blue_{i}" for i in range(n_agents)]
-        else:
-            raise ValueError("Could not infer number of agents to build VMAS group_map.")
-
-    if len(agent_names) < 2:
-        raise ValueError(
-            f"Need at least 2 agents to form ego/teammate split; got {agent_names}."
-        )
-
-    ego_group = [agent_names[0]]
-    teammate_group = agent_names[1:]
-
-    group_map = {"ego": ego_group, "teammate": teammate_group}
-    trainable_group = {"ego": ego_group}
-    return group_map, trainable_group
+def default_trainable_group(group_map: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Mark only the semantic ``ego`` group as trainable."""
+    ego_group = list(group_map.get("ego", []))
+    if not ego_group:
+        raise ValueError(f"Expected semantic group_map with non-empty 'ego', got {group_map}.")
+    return {"ego": ego_group}
 
 
 def train_vmas_env(
@@ -126,6 +28,8 @@ def train_vmas_env(
     scenario_name,
     vmas_task,
     rl_cfg_dir,
+    group_map: dict[str, list[str]] | None = None,
+    trainable_group: dict[str, list[str]] | None = None,
     teammate_policy: list[nn.Module | Callable] | None = None,
     scenario_kwargs: dict | None = None,
     task_yaml_name=None,
@@ -188,13 +92,22 @@ def train_vmas_env(
         if scenario_kwargs:
             task.config.update(scenario_kwargs)
 
-        group_map, trainable_group = _build_vmas_train_group_map(task_config=task.config)
+        if group_map is None:
+            configured_group_map = task.config.get("group_map")
+            if not configured_group_map:
+                raise ValueError(
+                    "train_vmas_env requires an explicit semantic group_map or task.config['group_map']."
+                )
+            group_map = {name: list(agent_names) for name, agent_names in configured_group_map.items()}
+        if trainable_group is None:
+            trainable_group = default_trainable_group(group_map)
+
         task.config["group_map"] = group_map
 
         callbacks = list(callbacks or [])
 
         if teammate_policy:
-            from popgen.agents.scripted_partner import TeammatePolicyCallback
+            from popgen.agents.callback import TeammatePolicyCallback
 
             callbacks.append(
                 TeammatePolicyCallback(
@@ -285,30 +198,6 @@ def train_vmas_env(
     return experiment
 
 
-def _group_to_team(group_name: str, all_groups: list[str]) -> str:
-    """Map env-specific group names to canonical team buckets."""
-    group = str(group_name).lower()
-    lower_groups = {str(g).lower() for g in all_groups}
-
-    if group in {"ego", "teammate", "agents", "agent_blue", "blue"}:
-        return "ego"
-    if group in {"opponent", "opponents", "agent_red", "red", "enemy", "enemies"}:
-        return "opponent"
-
-    # If ego/teammate split exists, anything else is treated as opponent-side.
-    if "ego" in lower_groups or "teammate" in lower_groups:
-        return "opponent" if group not in {"ego", "teammate"} else "ego"
-
-    # Football-like split.
-    if "agent_blue" in lower_groups or "agent_red" in lower_groups:
-        return "opponent" if group == "agent_red" else "ego"
-
-    # Fallback heuristic.
-    if any(tok in group for tok in ("opponent", "enemy", "red")):
-        return "opponent"
-    return "ego"
-
-
 def _collect_step_state(td) -> dict:
     """Extract canonical rollout teams:
     {"ego_team": {...}, "opponent_team": {...}}.
@@ -346,7 +235,7 @@ def _collect_step_state(td) -> dict:
         act_2d = act.reshape(num_agents, -1) if act is not None else None
         rew_2d = rew.reshape(num_agents, -1) if rew is not None else None
 
-        team = _group_to_team(group_name=group, all_groups=groups)
+        team = "ego" if group in ("ego", "teammate") else "opponent"
         for i in range(num_agents):
             action_val = None
             if act_2d is not None:
@@ -434,7 +323,7 @@ def _attach_rewards_from_rollout(states: list[dict[str, dict]], rollout_td) -> N
         opp_vals: list[float] = []
         for g in reward_groups:
             vals = _extract_step_group_rewards(rollout_td=rollout_td, group=g, step_idx=step_idx, num_steps=num_steps)
-            team = _group_to_team(group_name=g, all_groups=reward_groups)
+            team = "ego" if g in ("ego", "teammate") else "opponent"
             if team == "ego":
                 ego_vals.extend(vals)
             else:

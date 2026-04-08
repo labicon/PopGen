@@ -127,7 +127,7 @@ class TrajectoryEncoder(Encoder):
             if self.group_name == "ego_team":
                 candidate_group_names.extend(["ego", "agents", "agent_blue"])
             elif self.group_name == "opponent_team":
-                candidate_group_names.extend(["opponent", "agent_red"])
+                candidate_group_names.extend(["opponent", "opponents", "agent_red"])
 
         agents = step.get("agents")
         if isinstance(agents, dict):

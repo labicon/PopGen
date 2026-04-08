@@ -12,8 +12,6 @@ from pydantic import BaseModel, Field, create_model, model_validator
 from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import parse_llm_response
 
-from .utils import extract_observation_and_action_key, flatten_obs, format_action_output
-
 LOGGER = logging.getLogger(__name__)
 
 
@@ -109,59 +107,33 @@ class LLMAgent(nn.Module):
     Attributes:
         model_config: LiteLLM configuration for the LLM model.
         environment_description: Description of the environment and task.
-        action_description: Description of what the action output represents.
-        action_type: Type of action space - "Discrete" or "Continuous".
+        action_type: Pydantic BaseModel subclass defining the action schema for a single step.
+            Its docstring is injected into the LLM system prompt as the action description.
         behavior: Optional description of the desired playing style/behavior.
         horizon_length: Number of steps to plan ahead (default: 1).
         include_trajectory_history: Whether to include previous trajectory in context (default: False).
 
     Example:
+        >>> from pydantic import BaseModel, Field
         >>> from popgen.agents import LLMAgent
         >>> from popgen.utils.config import LitellmConfig
         >>>
-        >>> # Create an LLM agent with single-step planning
-        >>> env_desc = "You are playing football in a 2v2 game. Your goal is to score."
-        >>> action_desc = "Actions are forces [fx, fy] where fx controls horizontal movement (-1=left, 1=right) and fy controls vertical movement (-1=down, 1=up)."
-        >>> model_config = LitellmConfig(model_name="gpt-4", generation_kwargs={"temperature": 0.7, "max_tokens": 100})
-        >>> agent = LLMAgent(
-        ...     model_config=model_config,
-        ...     environment_description=env_desc,
-        ...     action_description=action_desc,
-        ...     action_type="Continuous",
-        ...     behavior="Play aggressively and always try to shoot at goal"
-        ... )
+        >>> class MyAction(BaseModel):
+        ...     "Choose action: 0=none, 1=north, 2=south, 3=east, 4=west, 5=load"
+        ...     action: int = Field(ge=0, le=5)
         >>>
-        >>> # Create an LLM agent with 5-step planning horizon
         >>> model_config = LitellmConfig(model_name="gpt-4", generation_kwargs={"temperature": 0.7})
-        >>> agent_multistep = LLMAgent(
+        >>> agent = LLMAgent(
+        ...     behavior="Collect food cooperatively",
         ...     model_config=model_config,
-        ...     environment_description=env_desc,
-        ...     action_description=action_desc,
-        ...     action_type="Continuous",
-        ...     horizon_length=5  # Plans 5 steps ahead
+        ...     environment_description="Grid-world where agents collect food items.",
+        ...     action_type=MyAction,
+        ...     horizon_length=5,
         ... )
         >>>
-        >>> # Create an LLM agent with trajectory history
-        >>> agent_with_history = LLMAgent(
-        ...     model_config=model_config,
-        ...     environment_description=env_desc,
-        ...     action_description=action_desc,
-        ...     action_type="Continuous",
-        ...     horizon_length=3,
-        ...     include_trajectory_history=True  # Include previous trajectory in context
-        ... )
-        >>>
-        >>> # Create a discrete action LLM agent
-        >>> agent_discrete = LLMAgent(
-        ...     model_config=model_config,
-        ...     environment_description=env_desc,
-        ...     action_description="Choose action index: 0=up, 1=down, 2=left, 3=right",
-        ...     action_type="Discrete"
-        ... )
-        >>>
-        >>> # Use in rollout
-        >>> obs = {"observation": torch.randn(1, 2, 20)}  # (batch, agents, obs_dim)
-        >>> actions = agent(obs)  # Returns (1, 2, 2) tensor
+        >>> # Use in rollout via MultiPolicyRouter; forward() receives (batch, obs_dim)
+        >>> obs = torch.randn(1, 20)  # (batch, obs_dim) for a single agent
+        >>> action = agent(obs)  # Returns shape (batch,) tensor
     """
 
     def __init__(
@@ -183,13 +155,14 @@ class LLMAgent(nn.Module):
             behavior: Optional behavior description to guide the agent's playing style.
             model_config: LiteLLM configuration for the LLM model.
             environment_description: Description of the environment, task, and observation format.
-            action_description: Description of what the action output represents and how it affects the environment.
-            action_type: Pydantic BaseModel class defining the schema for a single action.
+            action_type: Pydantic BaseModel subclass defining the schema for a single action.
+                Its docstring is injected into the LLM system prompt as the action description.
                 The horizon model (actions: list[action_type]) is built automatically.
             horizon_length: Number of steps to plan ahead. The LLM generates actions for this many steps at once. Default is 1 (single-step planning).
             include_trajectory_history: Whether to include the previous trajectory in the context when generating new ones. Default is False.
             script_other_agents: If True, non-ego agents (index > 0) take random actions instead of using the LLM. Default is False.
             num_actions: Size of the discrete action space for random scripted agents. Default is 6 (LBF action space).
+            feedbacks: Optional list of (trajectory, reasoning) pairs from prior attempts, injected into the system prompt to guide correction.
         """
         super().__init__()
         self.behavior = behavior
@@ -316,7 +289,7 @@ class LLMAgent(nn.Module):
 
         return trajectory
 
-    def forward(self, input_td):
+    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
         """
         Forward pass that generates actions using the LLM.
 
@@ -325,21 +298,18 @@ class LLMAgent(nn.Module):
         the number of LLM API calls.
 
         Args:
-            input_td: Input observation container (TensorDict preferred).
+            obs_tensor: Input observation tensor.
 
         Returns:
-            TensorDict with action when input is TensorDict, otherwise action tensor.
+            Action tensor.
         """
-        obs_tensor, action_key = extract_observation_and_action_key(input_td)
         if not isinstance(obs_tensor, torch.Tensor):
             raise TypeError(f"LLMAgent expected a torch.Tensor observation, got {type(obs_tensor).__name__}.")
 
-        if obs_tensor.dim() == 0:
-            raise ValueError("LLMAgent expects observation tensor with at least 1 dimension.")
+        if obs_tensor.dim() != 2:
+            raise ValueError(f"LLMAgent expects observation tensor with shape (batch, obs_dim), got {tuple(obs_tensor.shape)}.")
 
-        flat_obs, leading_shape = flatten_obs(obs_tensor)
-
-        n_obs_slots = flat_obs.shape[0]
+        n_obs_slots = obs_tensor.shape[0]
 
         # Check if we need to generate new trajectories
         if self._step_counter == 0 or self._step_counter >= self.horizon_length or len(self._cached_trajectories) != n_obs_slots:
@@ -347,16 +317,13 @@ class LLMAgent(nn.Module):
             self._step_counter = 0
             self._cached_trajectories = []
 
-            for agent_idx, agent_obs in enumerate(flat_obs):
+            for agent_idx, agent_obs in enumerate(obs_tensor):
                 trajectory = self._act(agent_obs, agent_idx)
                 self._cached_trajectories.append(trajectory)
 
         # Extract current step's action from cached trajectories
         action_flat = torch.stack(self._cached_trajectories)[:, self._step_counter]
-        if len(leading_shape) == 0:
-            action_tensor = action_flat[0]
-        else:
-            action_tensor = action_flat.reshape(*leading_shape, *action_flat.shape[1:])
+        action_tensor = action_flat.reshape(obs_tensor.shape[0], *action_flat.shape[1:])
 
         # Increment step counter
         self._step_counter += 1
@@ -365,4 +332,4 @@ class LLMAgent(nn.Module):
         if self.include_trajectory_history and self._step_counter >= self.horizon_length:
             self._previous_trajectories = copy.deepcopy(self._cached_trajectories)
 
-        return format_action_output(input_td, action_key, action_tensor)
+        return action_tensor

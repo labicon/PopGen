@@ -74,40 +74,10 @@ from torchrl.data import Composite, Unbounded
 from torchrl.envs.libs.smacv2 import SMACv2Env
 from torchrl.envs.utils import ACTION_MASK_ERROR
 
-from popgen.agents.utils import (
-    extract_observation_and_action_key,
-    find_observation_group,
-    flatten_obs,
-    format_action_output,
-)
-from popgen.agents.scripted_partner import MultiPolicyWrapper
 from popgen.envs.utils import resolve_rollout_seed
 
 
 _ACTIVE_SMACV2_REWARD_FN: Callable | None = None
-
-def compose_rollout_policy(policy_or_policies):
-    """Normalize rollout input to a single policy module."""
-    if isinstance(policy_or_policies, (list, tuple)):
-        if len(policy_or_policies) == 1:
-            policy = policy_or_policies[0]
-        elif len(policy_or_policies) == 2:
-            policy = MultiPolicyWrapper(
-                policies=[policy_or_policies[0], policy_or_policies[1]],
-            )
-        else:
-            raise ValueError(
-                f"Expected 1 or 2 policies for rollout, got {len(policy_or_policies)}."
-            )
-    else:
-        policy = policy_or_policies
-
-    if not hasattr(policy, "eval"):
-        raise TypeError(
-            f"Policy must be nn.Module-like with eval(), got {type(policy).__name__}."
-        )
-
-    return policy
 
 
 def _normalize_nested_key(key) -> tuple[str, ...]:
@@ -388,17 +358,6 @@ class ActionType(BaseModel):
 # ---------------------------------------------------------------------------- #
 #                            Training & Rollout                                #
 # ---------------------------------------------------------------------------- #
-
-
-class _FixedGroupMap:
-    """Picklable callable that returns a fixed group_map regardless of env."""
-
-    def __init__(self, group_map: dict):
-        self._group_map = group_map
-
-    def __call__(self, env):
-        return self._group_map
-
 
 def _previous_unit_health(previous_units: dict | None, unit_id: int, current_unit) -> float:
     """Return the prior-step health for a SMAC unit, falling back to current health."""
@@ -860,78 +819,6 @@ def _patch_smacv2_env(env, *, group_map: dict[str, list[str]] | None = None):
     return env
 
 
-class _RemappedActionSpec:
-    """Callable that remaps SMACv2's flat 'agents' action spec to ego/teammate groups.
-
-    SMACv2's ``env.full_action_spec`` is structured as::
-
-        Composite({'agents': Composite({'action': spec}, shape=(n_agents,))})
-
-    BenchMARL's ``_check_specs`` requires ``action_spec[group]`` to exist for
-    every key in ``group_map``.  This callable rebuilds the spec so that each
-    split group ('ego', 'teammate', …) gets its own per-agent Composite whose
-    'action' sub-spec has batch shape ``(len(group_agents),)``.
-    """
-
-    def __init__(self, group_map: dict):
-        self._group_map = group_map  # e.g. {'ego': ['0'], 'teammate': ['1']}
-
-    def __call__(self, env) -> "Composite":
-        from torchrl.data import Composite
-        # action spec shape: (n_agents,) — slice per group
-        action_spec = env.full_action_spec["agents"]["action"]
-        offset = 0
-        result = {}
-        for group, agent_names in self._group_map.items():
-            n = len(agent_names)
-            group_action = action_spec[offset : offset + n]
-            result[group] = Composite({"action": group_action}, shape=(n,))
-            offset += n
-        return Composite(result)
-
-
-class _RemappedObservationSpec:
-    """Expose per-group observation specs for a split SMACv2 team."""
-
-    def __init__(self, group_map: dict):
-        self._group_map = group_map
-
-    def __call__(self, env) -> "Composite":
-        from torchrl.data import Composite
-
-        agents_spec = env.observation_spec["agents"]
-        observation_spec = agents_spec["observation"]
-        offset = 0
-        result = {}
-        for group, agent_names in self._group_map.items():
-            n = len(agent_names)
-            group_observation = observation_spec[offset : offset + n]
-            result[group] = Composite({"observation": group_observation}, shape=(n,))
-            offset += n
-        return Composite(result)
-
-
-class _RemappedActionMaskSpec:
-    """Expose per-group action-mask specs for a split SMACv2 team."""
-
-    def __init__(self, group_map: dict):
-        self._group_map = group_map
-
-    def __call__(self, env) -> "Composite":
-        from torchrl.data import Composite
-
-        agents_spec = env.observation_spec["agents"]
-        action_mask_spec = agents_spec["action_mask"]
-        offset = 0
-        result = {}
-        for group, agent_names in self._group_map.items():
-            n = len(agent_names)
-            group_mask = action_mask_spec[offset : offset + n]
-            result[group] = Composite({"action_mask": group_mask}, shape=(n,))
-            offset += n
-        return Composite(result)
-
-
 def _build_smacv2_train_group_map(
     task_config: dict,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
@@ -957,26 +844,6 @@ def _build_smacv2_train_group_map(
     trainable_group = {"ego": [agent_names[0]]}
     return group_map, trainable_group
 
-
-def _group_to_team(group_name: str, all_groups: list[str]) -> str:
-    """Map env-specific group names to canonical team buckets."""
-    group = str(group_name).lower()
-    lower_groups = {str(g).lower() for g in all_groups}
-
-    if group in {"ego", "teammate", "agents", "agent_blue", "blue"}:
-        return "ego"
-    if group in {"opponent", "opponents", "agent_red", "red", "enemy", "enemies"}:
-        return "opponent"
-
-    if "ego" in lower_groups or "teammate" in lower_groups:
-        return "opponent" if group not in {"ego", "teammate"} else "ego"
-
-    if "agent_blue" in lower_groups or "agent_red" in lower_groups:
-        return "opponent" if group == "agent_red" else "ego"
-
-    if any(tok in group for tok in ("opponent", "enemy", "red")):
-        return "opponent"
-    return "ego"
 
 
 def _collect_step_state(td) -> dict:
@@ -1025,7 +892,7 @@ def _collect_step_state(td) -> dict:
         rew_2d = rew.reshape(num_agents, -1) if rew is not None else None
         mask_2d = mask.reshape(num_agents, -1) if mask is not None else None
 
-        team = _group_to_team(group_name=group, all_groups=groups)
+        team = "ego" if group in ("ego", "teammate") else "opponent"
         for i in range(num_agents):
             action_val = None
             if act_2d is not None:
@@ -1132,7 +999,7 @@ def _attach_rewards_from_rollout(states: list[dict], rollout_td) -> None:
             vals = _extract_step_group_rewards(
                 rollout_td=rollout_td, group=g, step_idx=step_idx, num_steps=num_steps
             )
-            team = _group_to_team(group_name=g, all_groups=reward_groups)
+            team = "ego" if g in ("ego", "teammate") else "opponent"
             if team == "ego":
                 ego_vals.extend(vals)
             else:
@@ -1194,206 +1061,58 @@ def serialize_state_fn(rollout_data: list[dict]) -> list[dict]:
     return rollout_data
 
 
-def _raise_smacv2_rollout_seed_error(env, *, reason: str | None = None):
-    message = (
-        "SMACv2 rollout seed could not be applied to the provided env. "
-        "Use an env created through this project's SMAC create_env / TorchRL "
-        "SMACv2Env, or call rollout_fn with env=None."
-    )
-    if reason:
-        message = f"{message} {reason}"
-    raise RuntimeError(message)
-
-
-def _clone_smacv2_transform_for_seed(transform, env):
-    if transform is None:
-        return None
-
-    if hasattr(transform, "clone"):
-        try:
-            return transform.clone()
-        except Exception:
-            pass
-
-    try:
-        return deepcopy(transform)
-    except Exception as err:
-        _raise_smacv2_rollout_seed_error(
-            env,
-            reason=f"Failed to clone env transforms for a seeded temporary clone: {err}",
-        )
-
-
-def _clone_smacv2_env_for_seed(env, effective_seed: int):
-    base_env = getattr(env, "base_env", None)
-    transform = getattr(env, "transform", None)
-    if base_env is not None and transform is not None:
-        cloned_base_env = _clone_smacv2_env_for_seed(base_env, effective_seed)
-        transform_clone = _clone_smacv2_transform_for_seed(transform, env)
-        clone_kwargs = {
-            "base_env": cloned_base_env,
-            "transform": transform_clone,
-            "cache_specs": getattr(env, "cache_specs", True),
-            "auto_unwrap": False,
-        }
-        env_device = getattr(env, "device", None)
-        if env_device is not None:
-            clone_kwargs["device"] = env_device
-
-        try:
-            return type(env)(**clone_kwargs)
-        except Exception:
-            try:
-                return type(env)(
-                    cloned_base_env,
-                    transform_clone,
-                    cache_specs=getattr(env, "cache_specs", True),
-                    auto_unwrap=False,
-                    device=env_device,
-                )
-            except Exception as err:
-                try:
-                    cloned_base_env.close()
-                except Exception:
-                    pass
-                _raise_smacv2_rollout_seed_error(
-                    env,
-                    reason=f"Failed to create a seeded temporary clone: {err}",
-                )
-
-    constructor_kwargs = getattr(env, "_constructor_kwargs", None)
-    if not isinstance(constructor_kwargs, dict):
-        _raise_smacv2_rollout_seed_error(
-            env,
-            reason=(
-                f"Missing _constructor_kwargs on {type(env).__name__}, so a seeded "
-                "temporary clone could not be created."
-            ),
-        )
-
-    try:
-        clone_kwargs = deepcopy(constructor_kwargs)
-    except Exception:
-        clone_kwargs = dict(constructor_kwargs)
-
-    clone_kwargs["seed"] = effective_seed
-    if "device" not in clone_kwargs:
-        env_device = getattr(env, "device", None)
-        if env_device is not None:
-            clone_kwargs["device"] = env_device
-
-    try:
-        return type(env)(**clone_kwargs)
-    except Exception as err:
-        _raise_smacv2_rollout_seed_error(
-            env,
-            reason=f"Failed to create a seeded temporary clone: {err}",
-        )
-
-
-def _prepare_smacv2_rollout_env(
-    env,
-    *,
-    seed: int | None = None,
-    create_env_kwargs: dict | None = None,
-):
-    """Resolve the concrete rollout seed and return an env ready for rollout."""
-    effective_seed = resolve_rollout_seed(seed)
-    torch.manual_seed(effective_seed)
-
-    if env is None:
-        env_kwargs = dict(create_env_kwargs or {})
-        env_kwargs["seed"] = effective_seed
-        return create_env(**env_kwargs), effective_seed, True
-
-    if hasattr(env, "set_seed"):
-        try:
-            env.set_seed(effective_seed)
-            return env, effective_seed, False
-        except NotImplementedError:
-            pass
-
-    rollout_env = _clone_smacv2_env_for_seed(env, effective_seed)
-    # Re-apply ego/teammate grouping patch if the original env was patched.
-    if hasattr(env, "_popgen_group_map"):
-        rollout_env = _patch_smacv2_env(rollout_env, group_map=env._popgen_group_map)
-    return rollout_env, effective_seed, True
-
-
 def rollout_smacv2_env(
     policy,
     env,
     max_steps: int = 200,
-    seed: int | None = None,
     return_info: bool = False,
     **kwargs,
 ):
-    """Rollout one policy (or policy pair) and optionally return reward metadata.
-
-    The rollout always resolves one concrete seed. If the provided SMAC env
-    cannot be reseeded after construction, this function creates a temporary
-    seeded clone for the rollout and leaves the caller-owned env untouched.
+    """Rollout one policy in one already-created SMACv2 env.
 
     Backward compatibility:
     - default ``return_info=False`` returns ``(states, images, error)``
     - ``return_info=True`` returns ``(states, images, error, rollout_info)``
     """
-    policy = compose_rollout_policy(policy)
     policy.eval()
 
     states = []
     images = []
-    create_env_kwargs = kwargs.pop("_create_env_kwargs", None)
-    rollout_env = None
-    close_rollout_env = False
 
-    try:
-        rollout_env, _, close_rollout_env = _prepare_smacv2_rollout_env(
-            env,
-            seed=seed,
-            create_env_kwargs=create_env_kwargs,
+    def state_callback(env_inner, td):
+        try:
+            frame = env_inner.render(mode="rgb_array")
+            if frame is not None:
+                import numpy as np
+                if isinstance(frame, np.ndarray):
+                    images.append(frame)
+        except Exception:
+            pass
+        states.append(_collect_step_state(td))
+
+    rollout_sig = inspect.signature(env.rollout)
+    supported_args = set(rollout_sig.parameters.keys())
+    rollout_kwargs = {k: v for k, v in kwargs.items() if k in supported_args}
+    if "max_steps" in supported_args and "max_steps" not in rollout_kwargs:
+        rollout_kwargs["max_steps"] = max_steps
+
+    with torch.no_grad():
+        rollout_td = env.rollout(
+            policy=policy,
+            callback=state_callback,
+            auto_cast_to_device=True,
+            break_when_all_done=True,
+            trust_policy=True,
+            **rollout_kwargs,
         )
 
-        def state_callback(env_inner, td):
-            try:
-                frame = env_inner.render(mode="rgb_array")
-                if frame is not None:
-                    import numpy as np
-                    if isinstance(frame, np.ndarray):
-                        images.append(frame)
-            except Exception:
-                pass
-            states.append(_collect_step_state(td))
+    _attach_rewards_from_rollout(states, rollout_td)
 
-        rollout_sig = inspect.signature(rollout_env.rollout)
-        supported_args = set(rollout_sig.parameters.keys())
-        rollout_kwargs = {k: v for k, v in kwargs.items() if k in supported_args}
-        if "max_steps" in supported_args and "max_steps" not in rollout_kwargs:
-            rollout_kwargs["max_steps"] = max_steps
+    if return_info:
+        rollout_info = extract_reward_rollout_info(rollout_td)
+        return states, images, None, rollout_info
 
-        with torch.no_grad():
-            rollout_td = rollout_env.rollout(
-                policy=policy,
-                callback=state_callback,
-                auto_cast_to_device=True,
-                break_when_all_done=True,
-                trust_policy=True,
-                **rollout_kwargs,
-            )
-
-        _attach_rewards_from_rollout(states, rollout_td)
-
-        if return_info:
-            rollout_info = extract_reward_rollout_info(rollout_td)
-            return states, images, None, rollout_info
-
-        return states, images, None
-    finally:
-        if close_rollout_env and rollout_env is not None and hasattr(rollout_env, "close"):
-            try:
-                rollout_env.close()
-            except Exception:
-                pass
+    return states, images, None
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -1575,7 +1294,7 @@ def train_smacv2_env(
 
             teammate_flat = teammate_policy
 
-            from popgen.agents.scripted_partner import TeammatePolicyCallback
+            from popgen.agents.callback import TeammatePolicyCallback
             callbacks.append(
                 TeammatePolicyCallback(
                     teammate_policies=teammate_flat,
@@ -1619,13 +1338,13 @@ def rollout_fn(policy, env=None, **kwargs):
     """Rollout the policy in a SMACv2 environment.
 
     Args:
-        policy: A trained policy module or list of policies [ego, teammate].
-        env: An existing SMACv2 environment. When omitted, create_env-compatible
-            kwargs are used to build one before rollout.
-        **kwargs: Forwarded to rollout_smacv2_env (e.g. max_steps, seed). If
-            ``env is None``, create_env-compatible kwargs such as ``task_name``,
-            ``seed``, ``device``, ``quiet_absl``, and
-            ``suppress_sc2_process_output`` are consumed during env creation.
+        policy: A trained, already-resolved policy module.
+        env: Unused for SMACv2 rollout. A fresh env is always created so the
+            rollout seed is applied at construction time.
+        **kwargs: Forwarded to rollout_smacv2_env after consuming
+            create_env-compatible kwargs such as ``task_name``, ``seed``,
+            ``device``, ``quiet_absl``, and
+            ``suppress_sc2_process_output`` during env creation.
 
     Returns:
         (states, images, error) or (states, images, error, rollout_info) when
@@ -1640,21 +1359,13 @@ def rollout_fn(policy, env=None, **kwargs):
     for key in list(rollout_kwargs):
         if key in create_env_params:
             create_env_kwargs[key] = rollout_kwargs.pop(key)
+    effective_seed = resolve_rollout_seed(create_env_kwargs.get("seed"))
+    torch.manual_seed(effective_seed)
+    create_env_kwargs["seed"] = effective_seed
     env = create_env(**create_env_kwargs)
 
     if "max_steps" not in rollout_kwargs:
         rollout_kwargs["max_steps"] = 200
-
-
-    if isinstance(policy, list) and len(policy) > 1:
-        policy = MultiPolicyWrapper(policies=policy)
-    elif (
-        not isinstance(policy, MultiPolicyWrapper)
-        and hasattr(env, "group_map")
-        and "teammate" in env.group_map
-    ):
-        # Ego-only policy with split ego/teammate env — add a scripted teammate.
-        policy = MultiPolicyWrapper(policies=[policy, ScriptedPolicy(env)])
 
     return rollout_smacv2_env(policy=policy, env=env, **rollout_kwargs)
 
@@ -1672,7 +1383,7 @@ def train_fn(
         output_dir: Directory to save results.
         run_name: Experiment name (required, non-empty).
         **kwargs: Forwarded to train_smacv2_env. Notable keys:
-            - teammate_policy: list of nn.Module (or list of lists for population).
+            - teammate_policy: flat list of nn.Module.
               If omitted, SMACv2 defaults to a single scripted teammate.
             - seed: int (default 0).
     """
@@ -1818,73 +1529,33 @@ class ScriptedPolicy(nn.Module):
 
         return self._first_valid_action(mask_row)
 
-    @staticmethod
-    def _resolve_grouped_obs_key(obs: TensorDictBase) -> str:
-        """Pick the observation group this scripted policy should control.
-
-        In split-group training / rollout wrappers the teammate policy can
-        receive the full ``ego`` + ``teammate`` TensorDict so that the trainable
-        policy keeps its original grouped context. In that case the scripted
-        partner should explicitly act on the teammate slice instead of calling
-        :func:`find_observation_group`, which expects only one observation
-        group to be present.
-        """
-        nested_keys = set(obs.keys(include_nested=True, leaves_only=True))
-        if ("teammate", "observation") in nested_keys:
-            return "teammate"
-        return find_observation_group(obs)
-
-    def forward(self, obs) -> "torch.Tensor | TensorDictBase":
+    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
         """Select nearest-enemy attack/chase actions for each observation.
 
         Args:
-            obs: TensorDict (with ``action_mask``) or plain tensor.
+            obs_tensor: Observation tensor with shape ``(batch, obs_dim)``.
 
         Returns:
-            Action tensor or TensorDict with action key set.
+            Action tensor with shape ``(batch,)``.
         """
-        action_mask = None
-        action_key = None
-
-        if isinstance(obs, TensorDictBase):
-            # Flat layout: {"observation": ..., "action_mask": ...}
-            if "action_mask" in obs.keys():
-                action_mask = obs["action_mask"]
-                obs_tensor, action_key = extract_observation_and_action_key(obs)
-            else:
-                # Grouped layout: {group: {"observation": ..., "action_mask": ...}}
-                group = self._resolve_grouped_obs_key(obs)
-                action_mask = obs[group, "action_mask"]
-                obs_tensor = obs[group, "observation"]
-                action_key = (group, "action")
-        else:
-            obs_tensor = obs
-
-        flat_obs, leading_shape = flatten_obs(
-            obs_tensor if isinstance(obs_tensor, torch.Tensor) else obs_tensor
-        )
-        batch_size = flat_obs.shape[0]
-        device = flat_obs.device
+        if not isinstance(obs_tensor, torch.Tensor):
+            raise TypeError(f"SMACv2 ScriptedPolicy expected torch.Tensor observation, got {type(obs_tensor).__name__}.")
+        if obs_tensor.dim() != 2:
+            raise ValueError(
+                f"SMACv2 ScriptedPolicy expects observation tensor with shape (batch, obs_dim), got {tuple(obs_tensor.shape)}."
+            )
+        batch_size = obs_tensor.shape[0]
+        device = obs_tensor.device
 
         actions = torch.full((batch_size,), self.STOP, dtype=torch.long, device=device)
-        flat_mask = None
-
-        if action_mask is not None:
-            if action_mask.dim() == 1:
-                action_mask = action_mask.unsqueeze(0)
-            flat_mask = action_mask.reshape(batch_size, -1)
 
         for b in range(batch_size):
-            mask_row = flat_mask[b] if flat_mask is not None else None
+            mask_row = None
             n_enemies = self._n_enemies
-            if mask_row is not None and mask_row.numel() > self._attack_action_start:
-                n_attack_slots = int(mask_row.numel() - self._attack_action_start)
-                if n_attack_slots > 0:
-                    n_enemies = min(n_enemies, n_attack_slots)
 
             enemy_block_size = n_enemies * self._enemy_feat_size
             enemy_start = self._move_feat_size
-            obs_row = flat_obs[b]
+            obs_row = obs_tensor[b]
 
             if enemy_block_size <= 0 or obs_row.numel() < enemy_start + enemy_block_size:
                 actions[b] = self._first_valid_action(mask_row) if mask_row is not None else self.STOP
@@ -1935,12 +1606,7 @@ class ScriptedPolicy(nn.Module):
                 mask_row=mask_row,
             )
 
-        if len(leading_shape) == 0:
-            actions = actions.squeeze(0)
-        else:
-            actions = actions.reshape(*leading_shape)
-
-        return format_action_output(obs, action_key, actions)
+        return actions
 
 
 # ---------------------------------------------------------------------------- #

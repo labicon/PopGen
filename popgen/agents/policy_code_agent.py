@@ -3,8 +3,6 @@
 import torch
 import torch.nn as nn
 
-from .utils import extract_observation_and_action_key, flatten_obs, format_action_output
-
 
 class PolicyCodeAgent(nn.Module):
     """Takes a deterministic function from observations to actions."""
@@ -59,18 +57,15 @@ class PolicyCodeAgent(nn.Module):
 
         return action
 
-    def forward(self, input_td):
-        """Forward pass with TensorDict-in/TensorDict-out and tensor fallback."""
-        obs_tensor, action_key = extract_observation_and_action_key(input_td)
+    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
+        """Forward pass on an observation tensor."""
         if not isinstance(obs_tensor, torch.Tensor):
             raise TypeError(f"PolicyCodeAgent expected torch.Tensor observation, got {type(obs_tensor).__name__}.")
-        if obs_tensor.dim() == 0:
-            raise ValueError("PolicyCodeAgent expects observation tensor with at least 1 dimension.")
-
-        flat_obs, leading_shape = flatten_obs(obs_tensor)
+        if obs_tensor.dim() != 2:
+            raise ValueError(f"PolicyCodeAgent expects observation tensor with shape (batch, obs_dim), got {tuple(obs_tensor.shape)}.")
 
         actions = []
-        for slot_obs in flat_obs:
+        for slot_obs in obs_tensor:
             try:
                 slot_action = self.act_fn(slot_obs)
             except RuntimeError as exc:
@@ -89,9 +84,8 @@ class PolicyCodeAgent(nn.Module):
 
         action_flat = torch.stack(actions)
         if action_flat.dim() == 1:
-            # Discrete scalar actions should keep shape (...), not (..., 1).
-            action_tensor = action_flat[0] if len(leading_shape) == 0 else action_flat.reshape(*leading_shape)
+            action_tensor = action_flat
         else:
-            action_tensor = action_flat.reshape(*leading_shape, action_flat.shape[-1])
+            action_tensor = action_flat.reshape(obs_tensor.shape[0], action_flat.shape[-1])
 
-        return format_action_output(input_td, action_key, action_tensor)
+        return action_tensor

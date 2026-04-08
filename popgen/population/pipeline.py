@@ -10,7 +10,7 @@ from typing import Any
 
 from pqdm.processes import pqdm
 
-from popgen.agents import MultiPolicyWrapper
+from popgen.agents import MultiPolicyRouter
 from popgen.agents.reward_policy import (
     latest_reward_training_log,
     load_reward_rollout_artifacts,
@@ -76,11 +76,8 @@ def _load_policy_and_env(policy_type: str, create_env_fn: callable, scripted_pol
     # If a scripted policy is provided, load it and wrap with the ego policy for rollouts.
     if scripted_policy_fn is not None:
         teammate_policy = scripted_policy_fn(env)
-        if isinstance(teammate_policy, (list, tuple)):
-            policies = [ego_policy, *teammate_policy]
-        else:
-            policies = [ego_policy, teammate_policy]
-        policy = MultiPolicyWrapper(policies=policies)
+        teammate_policies = list(teammate_policy) if isinstance(teammate_policy, (list, tuple)) else [teammate_policy]
+        policy = MultiPolicyRouter(policies={"ego": [ego_policy], "teammate": teammate_policies})
     else:
         policy = ego_policy
 

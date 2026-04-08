@@ -6,8 +6,7 @@ from benchmarl.environments import VmasTask
 from pydantic import BaseModel, Field
 from vmas.scenarios import football as football_scenario
 
-from popgen.agents.utils import extract_observation_and_action_key, format_action_output
-from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
+from popgen.envs.vmas_common import default_trainable_group, rollout_vmas_env, train_vmas_env
 
 # ---------------------------------------------------------------------------- #
 #                              Environment Config                              #
@@ -210,6 +209,36 @@ class ActionType(BaseModel):
 # ---------------------------------------------------------------------------- #
 
 
+def build_group_map(task_cfg: dict) -> dict[str, list[str]]:
+    raw_group_map = task_cfg.get("group_map")
+    if not raw_group_map:
+        # Derive from n_blue_agents / n_red_agents when group_map isn't explicitly set.
+        n_blue = task_cfg.get("n_blue_agents", 0)
+        if not n_blue:
+            raise ValueError("Football task config must define either 'group_map' or 'n_blue_agents'.")
+        raw_group_map = {"agent_blue": [f"agent_blue_{i}" for i in range(n_blue)]}
+        if not task_cfg.get("ai_red_agents", True):
+            n_red = task_cfg.get("n_red_agents", 0)
+            if n_red:
+                raw_group_map["agent_red"] = [f"agent_red_{i}" for i in range(n_red)]
+    if "agent_blue" not in raw_group_map:
+        raise ValueError(f"Football task config must define 'agent_blue' in group_map, got {raw_group_map}.")
+
+    blue_agents = list(raw_group_map["agent_blue"])
+    if not blue_agents:
+        raise ValueError("Football group_map must contain at least one blue agent.")
+
+    group_map = {"ego": [blue_agents[0]]}
+    if len(blue_agents) > 1:
+        group_map["teammate"] = blue_agents[1:]
+
+    red_agents = list(raw_group_map.get("agent_red", []))
+    if red_agents:
+        group_map["opponents"] = red_agents
+
+    return group_map
+
+
 def train_fn(reward_fn: callable, output_dir: str, **kwargs):
     """
     Trains agents using BenchMARL with a custom reward function.
@@ -230,6 +259,9 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
         # remains picklable when BenchMARL sends it to data-collector workers.
         scripted_policy.env = None
 
+    task = VmasTask.FOOTBALL.get_from_yaml(path=str(RL_CFG_DIR / "football.yaml"))
+    group_map = build_group_map(task.config)
+
     return train_vmas_env(
         reward_fn=reward_fn,
         output_dir=output_dir,
@@ -237,6 +269,8 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
         scenario_name="football",
         vmas_task=VmasTask.FOOTBALL,
         rl_cfg_dir=RL_CFG_DIR,
+        group_map=group_map,
+        trainable_group=default_trainable_group(group_map),
         teammate_policy=[scripted_policy],
         **kwargs,
     )
@@ -312,7 +346,9 @@ def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **k
     Returns:
         An instance of the football environment.
     """
-    return VmasTask.FOOTBALL.get_from_yaml(path=str(RL_CFG_DIR / "football.yaml")).get_env_fun(
+    task = VmasTask.FOOTBALL.get_from_yaml(path=str(RL_CFG_DIR / "football.yaml"))
+    task.config["group_map"] = build_group_map(task.config)
+    return task.get_env_fun(
         num_envs=num_envs,
         continuous_actions=continuous_actions,
         seed=seed,
@@ -357,26 +393,32 @@ class ScriptedPolicy(torch.nn.Module):
         start = 16 + 8 * n_adversaries
         return slice(start, start + 2)
 
-    def forward(self, obs) -> torch.Tensor:
-        obs_tensor, action_key = extract_observation_and_action_key(obs)
+    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
+        if not isinstance(obs_tensor, torch.Tensor):
+            raise TypeError(f"Football ScriptedPolicy expected torch.Tensor observation, got {type(obs_tensor).__name__}.")
+        if obs_tensor.dim() != 2:
+            raise ValueError(
+                f"Football ScriptedPolicy expects observation tensor with shape (batch, obs_dim), got {tuple(obs_tensor.shape)}."
+            )
+
         if obs_tensor.shape[-1] < 16:
             # Fallback for unexpected observation schemas.
-            direction_to_ball = -obs_tensor[..., 2:4]
+            direction_to_ball = -obs_tensor[:, 2:4]
             action = self._unit(direction_to_ball).clamp(-1, 1)
-            return format_action_output(obs, action_key, action)
+            return action
 
         # Core vectors from observation.
-        rel_ball = obs_tensor[..., 2:4]           # agent_pos - ball_pos
-        rel_goal = obs_tensor[..., 12:14]         # agent_pos - opponent_goal_pos
+        rel_ball = obs_tensor[:, 2:4]           # agent_pos - ball_pos
+        rel_goal = obs_tensor[:, 12:14]         # agent_pos - opponent_goal_pos
         dir_to_ball = self._unit(-rel_ball)
         dir_to_goal = self._unit(-rel_goal)
 
         teammate_slice = self._teammate_rel_slice(obs_tensor.shape[-1])
         teammate_start = teammate_slice.start
-        rel_teammate = obs_tensor[..., teammate_slice]  # agent_pos - teammate_pos
+        rel_teammate = obs_tensor[:, teammate_slice]  # agent_pos - teammate_pos
         dir_to_teammate = self._unit(-rel_teammate)
-        teammate_vel = obs_tensor[..., teammate_start + 4 : teammate_start + 6]
-        ball_vel = obs_tensor[..., 8:10]
+        teammate_vel = obs_tensor[:, teammate_start + 4 : teammate_start + 6]
+        ball_vel = obs_tensor[:, 8:10]
 
         dist_self_ball = torch.linalg.norm(rel_ball, dim=-1, keepdim=True)
         teammate_to_ball = rel_ball - rel_teammate
@@ -408,14 +450,14 @@ class ScriptedPolicy(torch.nn.Module):
 
         # Ball progression policy by x-field zone:
         # 0-50%: carry forward; 50-75%: pass if teammate around/in front, else shoot; 75-100%: shoot.
-        dist_to_goal_x = -rel_goal[..., 0:1]
+        dist_to_goal_x = -rel_goal[:, 0:1]
         progress_x = ((self.pitch_length - dist_to_goal_x) / self.pitch_length).clamp(0.0, 1.0)
         in_build_up_zone = progress_x < 0.50
         in_pass_zone = (progress_x >= 0.50) & (progress_x <= 0.75)
 
         teammate_dist = torch.linalg.norm(rel_teammate, dim=-1, keepdim=True)
         teammate_around = teammate_dist < self.teammate_support_radius
-        teammate_in_front = rel_teammate[..., 0:1] < -0.02
+        teammate_in_front = rel_teammate[:, 0:1] < -0.02
         teammate_pass_option = teammate_around | teammate_in_front
 
         dribble_action = self._unit(0.9 * dir_to_goal + 0.1 * dir_to_teammate)
@@ -432,4 +474,4 @@ class ScriptedPolicy(torch.nn.Module):
         recover_or_attack = torch.where(has_ball, attack_action, dir_to_ball)
         action = torch.where(yield_to_teammate, support_safe, recover_or_attack)
         action = action.clamp(-1, 1)
-        return format_action_output(obs, action_key, action)
+        return action

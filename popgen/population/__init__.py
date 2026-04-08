@@ -1,4 +1,4 @@
-from popgen.agents import LLMAgent, MultiPolicyWrapper, PolicyCodeAgent, TeammatePolicyCallback
+from popgen.agents import LLMAgent, MultiPolicyRouter, PolicyCodeAgent, TeammatePolicyCallback
 
 from .encode import *
 from .evaluation import *

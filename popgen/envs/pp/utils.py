@@ -7,8 +7,7 @@ from pydantic import BaseModel, Field
 from torchrl.envs.libs.vmas import VmasEnv
 
 from . import semdiv_simple_tag as simple_tag_scenario
-from popgen.agents.utils import extract_observation_and_action_key, flatten_obs, format_action_output
-from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
+from popgen.envs.vmas_common import default_trainable_group, rollout_vmas_env, train_vmas_env
 
 # ---------------------------------------------------------------------------- #
 #                              Environment Config                              #
@@ -205,7 +204,7 @@ def _resolve_semdiv_config(overrides: dict, task_cfg: dict) -> dict:
         "rabbits_to_end": int(cfg.get("rabbits_to_end", 2)),
     }
 
-def _build_group_map(task_cfg: dict) -> dict[str, list[str]]:
+def build_group_map(task_cfg: dict) -> dict[str, list[str]]:
     num_adversaries = int(task_cfg.get("num_adversaries", 1))
     ai_good_agents = bool(task_cfg.get("ai_good_agents", True))
     num_good_agents = int(task_cfg.get("num_good_agents", 1))
@@ -217,7 +216,7 @@ def _build_group_map(task_cfg: dict) -> dict[str, list[str]]:
     if len(adversaries) > 1:
         group_map["teammate"] = adversaries[1:]
     if not ai_good_agents:
-        group_map["opponent"] = [f"agent_{i}" for i in range(num_good_agents)]
+        group_map["opponents"] = [f"agent_{i}" for i in range(num_good_agents)]
     return group_map
 
 
@@ -242,6 +241,10 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
     for key in semdiv_config:
         kwargs.pop(key, None)
 
+    effective_task_cfg = dict(task_cfg)
+    effective_task_cfg.update(semdiv_config)
+    group_map = build_group_map(effective_task_cfg)
+
     if scripted_policy is None:
         scripted_policy = ScriptedPolicy(
             num_landmarks=int(task_cfg.get("num_landmarks", 2)),
@@ -261,6 +264,8 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
         scenario_name="simple_tag",
         vmas_task=VmasTask.SIMPLE_TAG,
         rl_cfg_dir=RL_CFG_DIR,
+        group_map=group_map,
+        trainable_group=default_trainable_group(group_map),
         teammate_policy=scripted_policy,
         scenario_kwargs=semdiv_config,
         **kwargs,
@@ -387,14 +392,11 @@ def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **k
     semdiv_config = _resolve_semdiv_config(overrides=kwargs, task_cfg=task_cfg)
     num_good_agents = int(semdiv_config["num_good_agents"])
 
-    task_cfg = dict(task_cfg)
-    task_cfg["num_good_agents"] = num_good_agents
-
     task = VmasTask.SIMPLE_TAG.get_from_yaml(path=str(RL_CFG_DIR / "simple_tag.yaml"))
     config = dict(task.config)
     config["num_good_agents"] = num_good_agents
-    config["group_map"] = _build_group_map(task_cfg)
     config.update(semdiv_config)
+    config["group_map"] = build_group_map(config)
 
     env = VmasEnv(
         scenario=simple_tag_scenario.Scenario(),
@@ -443,32 +445,32 @@ class ScriptedPolicy(torch.nn.Module):
         self.num_stags = max(0, min(num_stags, self.num_good_agents))
         self.dummy_param = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, obs):
-        obs_tensor, action_key = extract_observation_and_action_key(obs)
-        flat_obs, leading_shape = flatten_obs(obs_tensor)
+    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
+        if not isinstance(obs_tensor, torch.Tensor):
+            raise TypeError(f"PP ScriptedPolicy expected torch.Tensor observation, got {type(obs_tensor).__name__}.")
+        if obs_tensor.dim() != 2:
+            raise ValueError(
+                f"PP ScriptedPolicy expects observation tensor with shape (batch, obs_dim), got {tuple(obs_tensor.shape)}."
+            )
 
-        batch_size = flat_obs.shape[0]
-        obs_dim = flat_obs.shape[-1]
+        batch_size = obs_tensor.shape[0]
+        obs_dim = obs_tensor.shape[-1]
 
         start = 4 + 2 * self.num_landmarks
         n_other_pos = (self.num_adversaries - 1) + self.num_good_agents
         end = start + 2 * n_other_pos
 
-        action = torch.zeros(batch_size, 2, device=flat_obs.device, dtype=torch.float32)
+        action = torch.zeros(batch_size, 2, device=obs_tensor.device, dtype=torch.float32)
         if obs_dim < end or n_other_pos <= 0 or self.num_good_agents <= 0:
-            if len(leading_shape) > 0:
-                action = action.reshape(*leading_shape, 2)
-            else:
-                action = action.squeeze(0)
-            return format_action_output(obs, action_key, action)
+            return action
 
-        landmark_flat = flat_obs[:, 4:start]
+        landmark_flat = obs_tensor[:, 4:start]
         landmarks = (
             landmark_flat.reshape(batch_size, self.num_landmarks, 2)
             if landmark_flat.shape[-1] >= 2
             else None
         )
-        other_pos = flat_obs[:, start:end].reshape(batch_size, n_other_pos, 2)
+        other_pos = obs_tensor[:, start:end].reshape(batch_size, n_other_pos, 2)
 
         teammate_count = max(0, self.num_adversaries - 1)
         teammate_pos = other_pos[:, :teammate_count] if teammate_count > 0 else None
@@ -487,7 +489,7 @@ class ScriptedPolicy(torch.nn.Module):
             score[:, : self.num_stags] += 0.12 * torch.relu(teammate_to_stag_dist - 0.2)
 
         target_idx = score.argmin(dim=-1)
-        target = prey_pos[torch.arange(batch_size, device=flat_obs.device), target_idx]
+        target = prey_pos[torch.arange(batch_size, device=obs_tensor.device), target_idx]
         action = _safe_normalize(target)
 
         if teammate_pos is not None:
@@ -499,17 +501,13 @@ class ScriptedPolicy(torch.nn.Module):
             # Patrol landmarks when no nearby prey is visible.
             min_prey_dist = prey_dist.min(dim=-1).values
             lm_idx = torch.linalg.vector_norm(landmarks, dim=-1).argmin(dim=-1)
-            lm_target = landmarks[torch.arange(batch_size, device=flat_obs.device), lm_idx]
+            lm_target = landmarks[torch.arange(batch_size, device=obs_tensor.device), lm_idx]
             lm_action = _safe_normalize(lm_target)
             far_mask = (min_prey_dist > 0.8).unsqueeze(-1)
             action = torch.where(far_mask, 0.6 * action + 0.4 * lm_action, action)
 
         action = _safe_normalize(action).clamp(-1.0, 1.0)
-        if len(leading_shape) > 0:
-            action = action.reshape(*leading_shape, 2)
-        else:
-            action = action.squeeze(0)
-        return format_action_output(obs, action_key, action)
+        return action
 
 
 def _resolve_scripted_counts(
