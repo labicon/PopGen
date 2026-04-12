@@ -26,6 +26,7 @@ dependencies = [
     "lbforaging",
     "smacv2",
     "gymnasium>=0.29.0",
+    "overcooked-ai",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +40,7 @@ benchmarl = { path = "deps/BenchMARL", editable = true }
 vmas = { path = "deps/VectorizedMultiAgentSimulator", editable = true }
 lbforaging = { path = "deps/lb-foraging", editable = true }
 smacv2 = { git = "https://github.com/oxwhirl/smacv2.git" }
+overcooked-ai = { path = "deps/overcooked_ai", editable = true }
 
 [build-system]
 requires = ["hatchling"]

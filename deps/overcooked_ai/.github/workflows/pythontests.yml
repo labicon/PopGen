@@ -1,0 +1,32 @@
+on: ['push', 'pull_request']
+jobs:
+  ubuntu_mdp_tests:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python 3.10.16
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.10.16
+        architecture: 'x64'
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+    - name: Setup virtual environment and install dependencies
+      run: |
+        uv venv
+        source .venv/bin/activate
+        uv pip install coverage
+    - name: Setup # needs -e flag for coverage tests to work
+      run: |
+        source .venv/bin/activate
+        uv pip install -e .
+    - name: Run tests and generate coverage report
+      run: |
+        source .venv/bin/activate
+        coverage run -m unittest discover -s testing/ -p "*_test.py"
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v1
+      with:
+        name: codecov-report
+        fail_ci_if_error: false
