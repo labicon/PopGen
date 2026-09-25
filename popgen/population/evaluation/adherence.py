@@ -156,10 +156,11 @@ class BehaviorAdherenceEvaluator(BaseEvaluator):
         """Aggregate instance-level metrics into overall metrics."""
         n_adherent = sum(r["adherence"] for r in instance_metrics)
         n_errors = sum(1 for r in instance_metrics if "[ERROR]" in r["reasoning"])
-        n_evaluated = len(instance_metrics) - n_errors
+        n_instances = len(instance_metrics)
+        n_evaluated = n_instances - n_errors
 
         return {
-            "adherence": n_adherent / len(instance_metrics),
+            "adherence": n_adherent / n_instances if n_instances > 0 else 0.0,
             "adjusted_adherence": n_adherent / n_evaluated if n_evaluated > 0 else 0.0,
             "n_evaluated": n_evaluated,
             "n_errors": n_errors,

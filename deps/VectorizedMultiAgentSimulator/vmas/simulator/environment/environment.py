@@ -853,9 +853,12 @@ class Environment(TorchVectorizedObject):
             cam_range = torch.tensor([zoom * aspect_ratio, zoom], device=self.device)
 
         if shared_viewer:
-            # zoom out to fit everyone
+            # zoom out to fit everyone (exclude agents hidden from rendering)
+            rendering_agents = [a for a in self.world.agents if a.is_rendering[env_index]]
+            if not rendering_agents:
+                rendering_agents = self.world.agents
             all_poses = torch.stack(
-                [agent.state.pos[env_index] for agent in self.world.agents],
+                [agent.state.pos[env_index] for agent in rendering_agents],
                 dim=0,
             )
             max_agent_radius = max(

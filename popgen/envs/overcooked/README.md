@@ -192,25 +192,132 @@ INTERACT behaviour depends on what is in front of the agent:
 
 ## Reward
 
-In the upstream env, soup delivery reward is tracked per agent in `mdp_infos["sparse_reward_by_agent"]`, and `OvercookedEnv.step(...)` returns their sum as `timestep_sparse_reward`. In this wrapper, that scalar team reward is written to each group entry unchanged, so a delivery produces reward `20.0` for both `ego` and `teammate` tensors at that timestep. All other timesteps return `0`.
+### Default reward (sparse + upstream shaping)
 
-Custom dense reward shaping is supported via `train_fn`:
+Each call to `OvercookedBenchWrapper._step` computes the per-agent reward as:
 
 ```python
-def my_reward(env, agent_index):
-    """
-    env          — the OvercookedEnv instance
-    agent_index  — 0 (ego) or 1 (teammate)
-    Returns a scalar float reward for this agent at this step.
-    """
-    player = env.state.players[agent_index]
-    reward = 0.0
-    if player.held_object is not None and player.held_object.name == "onion":
-        reward += 0.05
-    return reward
-
-train_fn(my_reward, output_dir="/tmp/my_run")
+reward_by_agent[i] = sparse_r_by_agent[i] + shaped_r_by_agent[i]
 ```
+
+Both values come from the info dict returned by `OvercookedEnv.step(...)`.
+
+**Sparse component (`sparse_r_by_agent`)** — soup delivery only:
+
+| Event | Reward |
+|---|---|
+| Soup delivered to serving station | `+20.0` per delivery |
+| All other steps | `0.0` |
+
+**Shaped component (`shaped_r_by_agent`)** — dense progress signals built into the upstream overcooked-ai library, defined in `BASE_REW_SHAPING_PARAMS` in `overcooked_mdp.py`. These are active by default because `_MdpGenerator` calls `OvercookedGridworld.from_layout_name(...)` without overriding `rew_shaping_params`, so the library defaults apply:
+
+| Event | Reward | Condition |
+|---|---|---|
+| Place ingredient in pot (`PLACEMENT_IN_POT_REW`) | `+3.0` | Per onion (or tomato) successfully added to a pot that is not yet full |
+| Pick up dish (`DISH_PICKUP_REWARD`) | `+3.0` | Only when the pickup is _useful_ (a pot is cooking or ready) |
+| Pick up soup from pot (`SOUP_PICKUP_REWARD`) | `+5.0` | On the step the agent takes a finished soup out of the pot |
+| Distance-based signals (`DISH_DISP_DISTANCE_REW`, `POT_DISTANCE_REW`, `SOUP_DISTANCE_REW`) | `0.0` | Disabled by default |
+
+These upstream shaped rewards are given independently to whichever agent performs the action — they are not shared between agents.
+
+Sparse reward alone is very difficult to learn from in `large_room` because the delivery pipeline is long (pick onion → fill pot × 3 → start cooking → wait → pick dish → serve) and the agent only sees the `+20` signal at the very end. The upstream shaping above mitigates this by rewarding intermediate steps, but may not be sufficient or well-calibrated for a specific training objective.
+
+### Custom dense reward shaping
+
+Custom dense reward shaping is supported via `train_fn`. When a `reward_fn` is provided, it **completely replaces** `sparse_r_by_agent + shaped_r_by_agent` — the upstream shaping rewards described above are no longer applied. The function is called once per agent per environment step and must return a scalar `float`.
+
+```python
+def compute_reward(env, agent_index):
+    # env          — OvercookedEnv instance
+    # agent_index  — 0 (ego) or 1 (teammate)
+    ...
+    return reward  # float
+
+train_fn(compute_reward, output_dir="/tmp/my_run")
+```
+
+#### Key state signals for `large_room`
+
+| Expression | Type | Description |
+|---|---|---|
+| `env.state.players[agent_index]` | `PlayerState` | Ego or teammate state |
+| `player.held_object` | `ObjectState \| None` | `None` when empty-handed; `.name` is `"onion"`, `"dish"`, or `"soup"` |
+| `player.position` | `(x, y)` tuple | Agent's current grid position |
+| `player.orientation` | `(dx, dy)` tuple | Facing direction |
+| `env.mdp.get_pot_states(env.state)` | `dict` | Pot states grouped by category (see below) |
+| `env.game_stats["useful_onion_pickup"][agent_index]` | `int` | Cumulative useful onion pickups this episode |
+| `env.game_stats["dish_pickup"][agent_index]` | `int` | Cumulative dish pickups |
+| `env.game_stats["soup_pickup"][agent_index]` | `int` | Cumulative soups picked up from pot |
+| `env.game_stats["cumulative_sparse_rewards_by_agent"][agent_index]` | `float` | Cumulative deliveries × 20 |
+
+`env.mdp.get_pot_states(env.state)` returns a dict with keys:
+- `"empty"` — list of pot positions that are empty
+- `"onion"` — list of positions of pots currently filling with onions
+- `"cooking"` — list of positions of pots actively cooking
+- `"ready"` — list of positions of pots with finished soup
+
+In `large_room` there is exactly one pot at `(3, 0)`, so at most one entry appears across these lists.
+
+#### Example: progress-shaping reward
+
+This reward gives dense per-step signals for each stage of the pipeline. Reward components are sized to reflect relative progress toward delivery.
+
+```python
+def compute_reward(env, agent_index):
+    reward = 0.0
+    player = env.state.players[agent_index]
+    held = player.held_object
+
+    # Stage 1 – holding an onion is progress toward filling the pot
+    if held is not None and held.name == "onion":
+        reward += 0.1
+
+    # Stage 2 – holding a dish means soup is (or will be) ready
+    if held is not None and held.name == "dish":
+        reward += 0.2
+
+    # Stage 3 – holding soup means delivery is imminent
+    if held is not None and held.name == "soup":
+        reward += 0.5
+
+    # Stage 4 – delivery (sparse bonus on top of the above)
+    cumulative = env.game_stats["cumulative_sparse_rewards_by_agent"]
+    if cumulative[agent_index] > 0:
+        reward += 1.0
+
+    return reward
+```
+
+#### Example: event-delta reward
+
+A cleaner alternative counts discrete events rather than held-object state, avoiding the "stay holding onion forever" failure mode:
+
+```python
+def compute_reward(env, agent_index):
+    reward = 0.0
+    stats = env.game_stats
+
+    # One-time bonuses on the step an event first occurs
+    # (compare against previous step's count via a closure or global)
+    onion_pickups = stats["useful_onion_pickup"][agent_index]
+    dish_pickups  = stats["dish_pickup"][agent_index]
+    soup_pickups  = stats["soup_pickup"][agent_index]
+    deliveries    = stats["cumulative_sparse_rewards_by_agent"][agent_index] / 20.0
+
+    # Use deltas: attach these to a stateful wrapper that stores prev counts
+    # (see REWARD_API_REFERENCE for field definitions)
+    return reward
+```
+
+Because `game_stats` values are cumulative totals, to reward individual events you need to compare the current count against the previous step. A common pattern is to carry previous values in a `nonlocal` closure or a simple wrapper class.
+
+#### Design tips for `large_room`
+
+- **Reward the critical bottleneck.** The hardest step is filling the pot to 3 onions. A small per-onion bonus (`+0.1` per useful pickup) dramatically speeds up early learning.
+- **Avoid rewarding idle holding.** Giving `+0.1` every step the agent holds an onion incentivises picking up onions and never putting them down. Use event deltas or time the bonus to the moment of pot interaction instead.
+- **Dish pickup timing.** Rewarding dish pickup before the pot is cooking can cause the agent to grab a dish and park near the pot indefinitely. Gate the dish bonus on `pot["is_cooking"] or pot["is_ready"]`.
+- **Keep magnitudes proportional.** A delivery is worth `20.0` sparse. Dense bonuses that sum to more than `20.0` before a delivery can cause the agent to optimise the shaping signal rather than actually score.
+- **Per-agent vs. shared reward.** `train_fn` calls `compute_reward(env, 0)` and `compute_reward(env, 1)` separately. You can return asymmetric rewards to specialise roles (e.g., only reward `agent_0` for onion pickups and `agent_1` for soup delivery).
 
 See `REWARD_API_REFERENCE` (exported from this package) for the full list of accessible state fields.
 

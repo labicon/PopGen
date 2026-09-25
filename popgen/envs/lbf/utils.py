@@ -2,28 +2,55 @@ import inspect
 import logging
 import os
 import random
+import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+
+# Enable headless rendering for pyglet (used by lbforaging) before importing lbforaging.
+os.environ.setdefault("PYGLET_HEADLESS", "true")
 
 import gymnasium as gym
-import numpy as np
 
 # Ensure lbforaging is registered
 import lbforaging  # noqa: F401
+import popgen.envs.lbf.register_envs  # noqa: F401
+import numpy as np
 import torch
 import torch.nn as nn
-from benchmarl.algorithms import IppoConfig, MappoConfig
 from benchmarl.environments.lbf.common import LbfGymWrapper, LbfTask
 from benchmarl.experiment import Experiment, ExperimentConfig
-from benchmarl.models.mlp import MlpConfig
 from pydantic import BaseModel, Field
 from tensordict import TensorDictBase
 from torchrl.envs import EnvBase, TransformedEnv
 
-from popgen.envs.utils import apply_rollout_seed
+from popgen.envs.utils import apply_rollout_seed, apply_train_kwargs, load_algorithm_config, load_model_config, resolve_cfg_dir
 
-# Enable headless rendering for pyglet (used by lbforaging)
-os.environ.setdefault("PYGLET_HEADLESS", "true")
+_LBF_RENDER_LOCK = threading.Lock()
+
+
+def _patch_pyglet_vertexdomain_finalizer() -> None:
+    """Guard pyglet finalization for partially initialized render batches."""
+    try:
+        from pyglet.graphics.vertexdomain import VertexDomain
+    except Exception:
+        return
+
+    if getattr(VertexDomain, "_popgen_safe_del", False):
+        return
+
+    original_del = VertexDomain.__del__
+
+    def _safe_del(self):
+        if not hasattr(self, "attributes"):
+            return
+        try:
+            original_del(self)
+        except Exception:
+            pass
+
+    VertexDomain.__del__ = _safe_del
+    VertexDomain._popgen_safe_del = True
 
 # ---------------------------------------------------------------------------- #
 #                              Environment Config                              #
@@ -68,6 +95,7 @@ If a food's level exceeds a single agent's level:
 
 - Multiple agents must **LOAD at the same time step**.
 - The **sum of their levels** must meet or exceed the food level.
+- Every food in the environment should be cooperatively loaded by the agents together, as no single agent can carry any food alone.
 
 --------------------------------------------------
 Visual Representation
@@ -162,26 +190,28 @@ REWARD_API_REFERENCE = """Reward function API (authoritative):
 - Accessible state:
   - `self.players`: list of all players.
   - `self.field`: 2D numpy array grid. Cells with value > 0 are foods, and the value is food level.
-  - For each player `p` in `self.players`: `p.position`, `p.level`, `p.reward`, `p.score`.
-  - `p.reward`: the per-step reward earned this timestep (reset to 0 at the start of each step). Use this to detect whether the agent just collected food.
-  - `p.score`: the cumulative reward accumulated over the entire episode (sum of all past `p.reward` values). Use this to measure total episode progress.
-- Current agent is `agent` (same attributes as above).
+  - For each player `p` in `self.players`: `p.position`, `p.level`, `p.reward`, `p.score`, `p.action`.
+  - Current agent is `agent` (same attributes as above).
 - Important limitations:
   - Use `self.field`, `self.players`, and player attributes to access to states.
   - Do not assume access to history; history-dependent logic is possible only if you explicitly persist state yourself.
 - Return value:
-  - Return a scalar reward for this single agent at the current step (Python `float` recommended; scalar torch is also accepted)."""
+  - Return a scalar reward for this single agent at the current step (Python `float` recommended; scalar torch is also accepted).
+  - Keep the per-step reward within [-10, 10]. Values outside that range, and any NaN or inf, are clamped at runtime.
+  - Keep dense per-step terms small, around |r| <= 1, and reserve larger values for rare events (order 1-5). The clamp bounds a single step, not the episode: a dense term of 1 per step already accumulates to hundreds over an episode, and returns that large make advantages explode, which drives the policy to NaN and kills the run. Aim for an episode return in the low tens.
+  - Prefer normalized or tanh-shaped dense terms over raw distances or unbounded sums."""
 
 REWARD_EXAMPLE = """
-Behavior: move to the nearest food, load it if adjacent, and get a reward boost for successful collection.
+Behavior: move to the nearest food, load it if adjacent, and avoid idling
 ```python
 import torch
 
 def compute_reward(self, agent):
     reward = 0.0
 
-    # Current agent position for this step.
+    # Current agent position and chosen discrete action for this step.
     row, col = agent.position
+    action = agent.action
 
     # Find the nearest remaining food from the current grid state.
     nearest_dist = float("inf")
@@ -197,9 +227,17 @@ def compute_reward(self, agent):
         # Dense shaping toward the nearest food.
         reward += 1.0 / (nearest_dist + 1.0)
 
+        # Encourage LOAD when already in a valid loading position.
+        if nearest_dist == 1 and action == 5:
+            reward += 2.0
+
     # Reinforce successful collection from the environment's score signal.
-    if agent.reward > 0:
+    if agent.reward > 0 or agent.score > 0:
         reward += 5.0
+
+    # Small penalty for doing nothing when not adjacent to food.
+    if action == 0 and nearest_dist > 1:
+        reward -= 0.05
 
     return reward
 ```
@@ -266,10 +304,10 @@ def _infer_num_agents(env: gym.Env) -> int:
     raise ValueError(f"Could not infer number of agents from env type {type(env).__name__}.")
 
 
-def _build_lbf_group_map(
+def build_group_map(
     task_config: dict,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    """Build LBF group map separating scripted teammate from learning agents."""
+    """Build LBF training group map separating scripted teammate from learning agents."""
     n_agents = task_config.get("players")
     if n_agents is None:
         raise ValueError("Could not infer number of agents from LBF task config (expected 'players' key).")
@@ -281,6 +319,7 @@ def _build_lbf_group_map(
     group_map = {"ego": agents_group, "teammate": teammate_group}
     trainable_group = {"ego": agents_group}
     return group_map, trainable_group
+
 
 
 def _to_rollout_env(env, device: str = "cpu") -> EnvBase:
@@ -308,6 +347,42 @@ def _resolve_state_env(env):
         visited.add(id(next_env))
         current = next_env
 
+
+def _reset_lbf_renderer(env) -> None:
+    """Close and clear the lbforaging viewer so later rollouts get a fresh context."""
+    state_env = _resolve_state_env(env)
+    viewer = getattr(state_env, "viewer", None)
+    if viewer is not None:
+        with _LBF_RENDER_LOCK:
+            try:
+                viewer.close()
+            except Exception:
+                pass
+        state_env.viewer = None
+    if hasattr(state_env, "_rendering_initialized"):
+        state_env._rendering_initialized = False
+
+
+
+def _group_to_team(group_name: str, all_groups: list[str]) -> str:
+    """Map env-specific group names to canonical team buckets."""
+    group = str(group_name).lower()
+    lower_groups = {str(g).lower() for g in all_groups}
+
+    if group in {"ego", "teammate", "agents", "agent_blue", "blue"}:
+        return "ego"
+    if group in {"opponent", "opponents", "agent_red", "red", "enemy", "enemies"}:
+        return "opponent"
+
+    if "ego" in lower_groups or "teammate" in lower_groups:
+        return "opponent" if group not in {"ego", "teammate"} else "ego"
+
+    if "agent_blue" in lower_groups or "agent_red" in lower_groups:
+        return "opponent" if group == "agent_red" else "ego"
+
+    if any(tok in group for tok in ("opponent", "enemy", "red")):
+        return "opponent"
+    return "ego"
 
 
 def _collect_step_state(td) -> dict:
@@ -347,7 +422,7 @@ def _collect_step_state(td) -> dict:
         act_2d = act.reshape(num_agents, -1) if act is not None else None
         rew_2d = rew.reshape(num_agents, -1) if rew is not None else None
 
-        team = "ego" if group in ("ego", "teammate") else "opponent"
+        team = _group_to_team(group_name=group, all_groups=groups)
         for i in range(num_agents):
             action_val = None
             if act_2d is not None:
@@ -395,12 +470,20 @@ def _extract_step_group_rewards(
     if rew_t.ndim == 0:
         return [float(rew_t.item())]
 
-    if rew_t.ndim >= 2 and int(rew_t.shape[0]) == int(num_steps):
-        rew_step = rew_t[step_idx]
-    elif rew_t.ndim >= 2 and int(rew_t.shape[1]) == int(num_steps):
-        rew_step = rew_t[:, step_idx]
-    elif rew_t.shape[0] > step_idx:
-        rew_step = rew_t[step_idx]
+    # rollout_td has batch_size (num_envs, T) when returned by env.rollout(),
+    # so rew_t has shape (num_envs, T, n_agents, reward_dim).
+    # Index using batch_dims to correctly extract the reward at step_idx.
+    batch_dims = rollout_td.batch_dims
+    T = rollout_td.shape[-1] if batch_dims >= 1 else 0
+
+    if batch_dims == 2:
+        if step_idx >= T:
+            return []
+        rew_step = rew_t[0, step_idx]  # (n_agents, reward_dim)
+    elif batch_dims == 1:
+        if step_idx >= T:
+            return []
+        rew_step = rew_t[step_idx]  # (n_agents, reward_dim)
     else:
         rew_step = rew_t
 
@@ -435,7 +518,7 @@ def _attach_rewards_from_rollout(states: list[dict[str, dict]], rollout_td: Tens
         opp_vals: list[float] = []
         for g in reward_groups:
             vals = _extract_step_group_rewards(rollout_td=rollout_td, group=g, step_idx=step_idx, num_steps=num_steps)
-            team = "ego" if g in ("ego", "teammate") else "opponent"
+            team = _group_to_team(group_name=g, all_groups=reward_groups)
             if team == "ego":
                 ego_vals.extend(vals)
             else:
@@ -454,9 +537,10 @@ def rollout_lbf_env(
     seed: int | None = None,
     **kwargs,
 ):
-    """Rollout a single policy module."""
+    """Rollout a policy in the LBF environment."""
     rollout_env = _to_rollout_env(env)
     policy.eval()
+    _patch_pyglet_vertexdomain_finalizer()
 
     def rollout_policy(tensordict):
         out = policy(tensordict)
@@ -480,15 +564,16 @@ def rollout_lbf_env(
                 state_env.unwrapped.render_mode = "rgb_array"
 
     def render_callback(env, td):
-        try:
-            frame = env.render(mode="rgb_array")
-        except TypeError:
+        with _LBF_RENDER_LOCK:
             try:
-                frame = env.render()
+                frame = env.render(mode="rgb_array")
+            except TypeError:
+                try:
+                    frame = env.render()
+                except Exception:
+                    frame = None
             except Exception:
                 frame = None
-        except Exception:
-            frame = None
         if isinstance(frame, np.ndarray):
             images.append(frame)
         states.append(_collect_step_state(td))
@@ -499,15 +584,25 @@ def rollout_lbf_env(
     if "max_steps" in supported_args and "max_steps" not in rollout_kwargs:
         rollout_kwargs["max_steps"] = max_steps
 
-    with torch.no_grad():
-        rollout_td = rollout_env.rollout(
-            policy=rollout_policy,
-            callback=render_callback,
-            auto_cast_to_device=True,
-            break_when_any_done=True,
-            **rollout_kwargs,
-        )
-    _attach_rewards_from_rollout(states=states, rollout_td=rollout_td)
+    try:
+        with torch.no_grad():
+            rollout_td = rollout_env.rollout(
+                policy=rollout_policy,
+                callback=render_callback,
+                auto_cast_to_device=True,
+                break_when_any_done=True,
+                **rollout_kwargs,
+            )
+        # Recover any steps the callback missed (typically the terminal step).
+        batch_dims = rollout_td.batch_dims
+        T = rollout_td.shape[-1] if batch_dims >= 1 else 0
+        for t in range(len(states), T):
+            step_td = rollout_td[:, t] if batch_dims == 2 else rollout_td[t : t + 1]
+            states.append(_collect_step_state(step_td))
+
+        _attach_rewards_from_rollout(states=states, rollout_td=rollout_td)
+    finally:
+        _reset_lbf_renderer(rollout_env)
 
     return states, images, None
 
@@ -516,108 +611,112 @@ def train_lbf_env(
     reward_fn,
     output_dir,
     rl_cfg_dir,
+    run_name: str | None = None,
     task_yaml_name="lbf.yaml",
-    mappo_yaml_name="mappo.yaml",
     experiment_yaml_name="base_experiment.yaml",
-    mlp_yaml_name="mlp.yaml",
     seed=0,
     callbacks=None,
     teammate_policy: list[nn.Module] | None = None,
+    **kwargs,
 ):
     """Train LBF with optional scripted teammate policies."""
+    if "centralized_critic" in kwargs:
+        raise ValueError(
+            "centralized_critic is not supported. Only IPPO-style (non-centralized) training is available."
+        )
+    prioritized: bool = kwargs.pop("prioritized", True)
+
     if hasattr(reward_fn, "__globals__"):
         reward_fn.__globals__["torch"] = torch
 
     callbacks = list(callbacks or [])
+    base_cfg_dir = Path(rl_cfg_dir)
+    rl_cfg_dir = resolve_cfg_dir(base_cfg_dir, teammate_policy)
 
     original_step = LbfGymWrapper._step
 
     try:
-        task = LbfTask.LBF.get_from_yaml(path=str(rl_cfg_dir / task_yaml_name))
-
-        group_map, trainable_group = _build_lbf_group_map(task_config=task.config)
-        task.config["group_map"] = group_map
+        task = LbfTask.LBF.get_from_yaml(path=str(base_cfg_dir / task_yaml_name))
 
         if teammate_policy is not None:
-            from popgen.agents.callback import TeammatePolicyCallback
+            group_map, trainable_group = build_group_map(task_config=task.config)
+            task.config["group_map"] = group_map
 
-            callbacks.append(
-                TeammatePolicyCallback(
-                    teammate_policies=teammate_policy,
-                    trainable_group=trainable_group,
-                )
+            is_population = isinstance(teammate_policy[0], list)
+            from popgen.agents.callbacks import select_teammate_callback_cls
+
+            callback_cls = select_teammate_callback_cls(
+                is_population=is_population,
+                prioritized=prioritized,
             )
+            callbacks.append(callback_cls(teammate_policies=teammate_policy, trainable_group=trainable_group))
 
-        desired_group_map = task.config.get("group_map")
-        if desired_group_map:
-            name_to_group = {
-                aname: (gname, local_i)
-                for gname, names in desired_group_map.items()
-                for local_i, aname in enumerate(names)
-            }
-
-        def custom_step(self, tensordict):
-            base_env = self.env.unwrapped
+        if reward_fn is not None:
+            desired_group_map = task.config.get("group_map")
             if desired_group_map:
-                action_list = [None] * len(base_env.players)
-                for gname, names in desired_group_map.items():
-                    g_action = tensordict.get((gname, "action"))
-                    for local_i, aname in enumerate(names):
-                        global_idx = int(aname.split("_")[1])
-                        action_list[global_idx] = int(g_action[local_i].item())
-            else:
-                action_tensor = tensordict.get(("agents", "action"))
-                if action_tensor.ndim > 1 and action_tensor.shape[-1] > 1:
-                    action_idx = action_tensor.argmax(dim=-1)
+                name_to_group = {
+                    aname: (gname, local_i)
+                    for gname, names in desired_group_map.items()
+                    for local_i, aname in enumerate(names)
+                }
+
+            def custom_step(self, tensordict):
+                base_env = self.env.unwrapped
+                if desired_group_map:
+                    action_list = [None] * len(base_env.players)
+                    for gname, names in desired_group_map.items():
+                        g_action = tensordict.get((gname, "action"))
+                        for local_i, aname in enumerate(names):
+                            global_idx = int(aname.split("_")[1])
+                            action_list[global_idx] = int(g_action[local_i].item())
                 else:
-                    action_idx = action_tensor
-                action_list = action_idx.detach().cpu().numpy().tolist()
+                    action_tensor = tensordict.get(("agents", "action"))
+                    if action_tensor.ndim > 1 and action_tensor.shape[-1] > 1:
+                        action_idx = action_tensor.argmax(dim=-1)
+                    else:
+                        action_idx = action_tensor
+                    action_list = action_idx.detach().cpu().numpy().tolist()
 
-            out_td = original_step(self, tensordict)
+                out_td = original_step(self, tensordict)
 
-            new_rewards = []
-            for i, player in enumerate(base_env.players):
-                player.action = int(action_list[i])
-                r = reward_fn(base_env, player)
-                if isinstance(r, torch.Tensor):
-                    r = r.item()
-                new_rewards.append(r)
+                new_rewards = []
+                for i, player in enumerate(base_env.players):
+                    if desired_group_map:
+                        gname, local_i = name_to_group[f"agent_{i}"]
+                        player.obs = out_td[gname, "observation"][local_i].cpu().numpy()
+                    else:
+                        player.obs = out_td["agents", "observation"][i].cpu().numpy()
+                    player.action = int(action_list[i])
+                    r = reward_fn(base_env, player)
+                    if isinstance(r, torch.Tensor):
+                        r = r.item()
+                    new_rewards.append(r)
 
-            if desired_group_map:
-                for gname, names in desired_group_map.items():
-                    idxs = [int(n.split("_")[1]) for n in names]
-                    rt = torch.tensor(
-                        [new_rewards[idx] for idx in idxs],
-                        device=self.device,
-                        dtype=torch.float32,
+                if desired_group_map:
+                    for gname, names in desired_group_map.items():
+                        idxs = [int(n.split("_")[1]) for n in names]
+                        rt = torch.tensor(
+                            [new_rewards[idx] for idx in idxs],
+                            device=self.device,
+                            dtype=torch.float32,
+                        ).unsqueeze(-1)
+                        out_td[gname, "reward"] = rt
+                else:
+                    reward_tensor = torch.tensor(
+                        new_rewards, device=self.device, dtype=torch.float32
                     ).unsqueeze(-1)
-                    out_td[gname, "reward"] = rt
-            else:
-                reward_tensor = torch.tensor(
-                    new_rewards, device=self.device, dtype=torch.float32
-                ).unsqueeze(-1)
-                out_td["agents", "reward"] = reward_tensor
+                    out_td["agents", "reward"] = reward_tensor
 
-            return out_td
+                return out_td
 
-        LbfGymWrapper._step = custom_step
+            LbfGymWrapper._step = custom_step
 
-        mappo_path = rl_cfg_dir / mappo_yaml_name
-        if mappo_path.exists():
-            algorithm_config = MappoConfig.get_from_yaml(path=str(mappo_path))
-        elif (rl_cfg_dir / "ippo.yaml").exists():
-            algorithm_config = IppoConfig.get_from_yaml(path=str(rl_cfg_dir / "ippo.yaml"))
-        else:
-            algorithm_config = MappoConfig.get_from_yaml()
-
+        algorithm_config = load_algorithm_config(rl_cfg_dir)
         experiment_config = ExperimentConfig.get_from_yaml(path=str(rl_cfg_dir / experiment_yaml_name))
-        model_config = MlpConfig.get_from_yaml(path=str(rl_cfg_dir / mlp_yaml_name))
-        critic_model_config = MlpConfig.get_from_yaml(path=str(rl_cfg_dir / mlp_yaml_name))
+        model_config = load_model_config(rl_cfg_dir)
+        critic_model_config = load_model_config(rl_cfg_dir)
 
-        # Disable BenchMARL internal evaluation; B2T evaluates policies via
-        # pipeline rollouts/adherence.
-        experiment_config.evaluation = False
-        experiment_config.evaluation_episodes = 1
+        experiment_config.render = True
 
         requested_devices = [
             str(getattr(experiment_config, "sampling_device", "")),
@@ -634,8 +733,11 @@ def train_lbf_env(
             if str(getattr(experiment_config, "buffer_device", "")).lower() != "disk":
                 experiment_config.buffer_device = "cpu"
 
+        apply_train_kwargs(kwargs, experiment_config, algorithm_config, model_config, critic_model_config)
+
         experiment_config.save_folder = output_dir
-        experiment_config.wandb_extra_kwargs = {"name": Path(output_dir).name, "tags": ["lbf"]}
+        display_run_name = run_name.strip() if isinstance(run_name, str) and run_name.strip() else Path(output_dir).name
+        experiment_config.wandb_extra_kwargs = {"name": display_run_name, "tags": ["lbf"]}
 
         experiment = Experiment(
             task=task,
@@ -765,27 +867,40 @@ def serialize_state_fn(rollout_data: list[dict]) -> list[dict]:
     return rollout_data
 
 
-def train_fn(reward_fn: Callable, output_dir: str, **kwargs):
+def train_fn(
+    reward_fn: Callable | None = None,
+    output_dir: str | None = None,
+    run_name: str | None = None,
+    **kwargs,
+):
     """
     Trains agents using BenchMARL with a custom reward function.
 
     Args:
         reward_fn: Callable taking (agent, world) and returning reward (float or tensor).
         output_dir: Directory to save results.
+        run_name: Name for the training run.
     """
-    scripted_policy = kwargs.pop("scripted_policy", None)
-    if scripted_policy is None:
+    if not isinstance(run_name, str) or not run_name.strip():
+        raise ValueError("run_name must be provided and non-empty.")
+
+    teammate_policy = kwargs.pop("teammate_policy", None)
+    config_overrides = kwargs.pop("config_overrides", None)
+
+    if teammate_policy is None:
         temp_env = create_env(num_envs=1, seed=0, device="cpu")
         try:
-            scripted_policy = ScriptedPolicy(temp_env)
+            teammate_policy = [ClosestFoodPolicy(temp_env)]
         finally:
             temp_env.close()
 
     return train_lbf_env(
         reward_fn=reward_fn,
         output_dir=output_dir,
+        run_name=run_name.strip(),
         rl_cfg_dir=RL_CFG_DIR,
-        teammate_policy=scripted_policy,
+        teammate_policy=teammate_policy,
+        config_overrides=config_overrides,
         **kwargs,
     )
 
@@ -794,16 +909,8 @@ def train_fn(reward_fn: Callable, output_dir: str, **kwargs):
 # ---------------------------------------------------------------------------- #
 
 
-class ScriptedPolicy(torch.nn.Module):
-    """Heuristic policy that moves toward the closest food and loads when adjacent.
-
-    Parses the flattened LBF observation vector to extract food/agent positions,
-    finds the nearest food by Manhattan distance, moves toward it, and issues
-    LOAD when adjacent (distance == 1).
-
-    Args:
-        env: BenchMARL LBF environment created by create_env.
-    """
+class _LbfScriptedPolicyBase(torch.nn.Module):
+    """Base class for scripted teammate policies in LBF."""
 
     # Action constants
     NONE = 0
@@ -812,73 +919,274 @@ class ScriptedPolicy(torch.nn.Module):
     WEST = 3   # col - 1
     EAST = 4   # col + 1
     LOAD = 5
+    MOVEMENT_RANDOM_EPSILON = 0.2
 
     def __init__(self, env):
         super().__init__()
         self.num_agents, self.num_foods = _extract_env_metadata(env)
-        # nn.Module requires at least one parameter for some codepaths
-        self.dummy_param = torch.nn.Parameter(torch.empty(0))
 
-    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
-        """Select action for each observation in the batch.
+    @staticmethod
+    def _manhattan(row_a: float, col_a: float, row_b: float, col_b: float) -> float:
+        return abs(row_a - row_b) + abs(col_a - col_b)
 
-        Args:
-            obs_tensor: Observation tensor with shape ``(batch, obs_dim)``.
+    def _parse_observation_row(
+        self,
+        row_obs: torch.Tensor,
+    ) -> tuple[float, float, float, list[tuple[float, float, float]], list[tuple[float, float, float, int]]]:
+        foods: list[tuple[float, float, float, int]] = []
+        for food_idx in range(self.num_foods):
+            food_row = float(row_obs[3 * food_idx].item())
+            food_col = float(row_obs[3 * food_idx + 1].item())
+            food_level = float(row_obs[3 * food_idx + 2].item())
+            if food_row < 0 or food_col < 0 or food_level <= 0:
+                continue
+            foods.append((food_row, food_col, food_level, food_idx))
 
-        Returns:
-            Action tensor, shape ``(batch,)`` with integer action indices.
-        """
-        if not isinstance(obs_tensor, torch.Tensor):
-            raise TypeError(f"LBF ScriptedPolicy expected torch.Tensor observation, got {type(obs_tensor).__name__}.")
-        if obs_tensor.dim() != 2:
-            raise ValueError(
-                f"LBF ScriptedPolicy expects observation tensor with shape (batch, obs_dim), got {tuple(obs_tensor.shape)}."
-            )
-        batch_size = obs_tensor.shape[0]
+        agent_offset = self.num_foods * 3
+        self_row = float(row_obs[agent_offset].item())
+        self_col = float(row_obs[agent_offset + 1].item())
+        self_level = float(row_obs[agent_offset + 2].item())
 
-        actions = torch.zeros(batch_size, dtype=torch.long, device=obs_tensor.device)
+        teammates: list[tuple[float, float, float]] = []
+        for agent_idx in range(1, self.num_agents):
+            offset = agent_offset + 3 * agent_idx
+            if offset + 2 >= row_obs.shape[0]:
+                break
+            tm_row = float(row_obs[offset].item())
+            tm_col = float(row_obs[offset + 1].item())
+            tm_level = float(row_obs[offset + 2].item())
+            if tm_row < 0 or tm_col < 0 or tm_level <= 0:
+                continue
+            teammates.append((tm_row, tm_col, tm_level))
 
-        for b in range(batch_size):
-            o = obs_tensor[b]
+        return self_row, self_col, self_level, teammates, foods
 
-            # Self position (first agent entry, after all food entries)
-            agent_offset = self.num_foods * 3
-            self_row = o[agent_offset].item()
-            self_col = o[agent_offset + 1].item()
+    def _move_towards(self, self_row: float, self_col: float, target_row: float, target_col: float) -> int:
+        row_diff = target_row - self_row
+        col_diff = target_col - self_col
+        if abs(row_diff) < 1e-9 and abs(col_diff) < 1e-9:
+            return self.NONE
 
-            # Find closest visible food
-            min_dist = float("inf")
-            closest_food_row, closest_food_col = -1.0, -1.0
-            for i in range(self.num_foods):
-                food_row = o[3 * i].item()
-                food_col = o[3 * i + 1].item()
-                food_level = o[3 * i + 2].item()
-                if food_row < 0 or food_level <= 0:
-                    continue
-                dist = abs(food_row - self_row) + abs(food_col - self_col)
-                if dist < min_dist:
-                    min_dist = dist
-                    closest_food_row, closest_food_col = food_row, food_col
+        vertical_action = None
+        if abs(row_diff) >= 1e-9:
+            vertical_action = self.NORTH if row_diff < 0 else self.SOUTH
 
-            if min_dist == float("inf"):
-                actions[b] = self.NONE
+        horizontal_action = None
+        if abs(col_diff) >= 1e-9:
+            horizontal_action = self.WEST if col_diff < 0 else self.EAST
+
+        if vertical_action is None:
+            greedy_action = horizontal_action if horizontal_action is not None else self.NONE
+        elif horizontal_action is None:
+            greedy_action = vertical_action
+        elif abs(row_diff) > abs(col_diff):
+            greedy_action = vertical_action
+        elif abs(col_diff) > abs(row_diff):
+            greedy_action = horizontal_action
+        else:
+            greedy_action = vertical_action
+
+        epsilon = min(max(float(self.MOVEMENT_RANDOM_EPSILON), 0.0), 1.0)
+        if random.random() < epsilon:
+            return random.choice((self.NORTH, self.SOUTH, self.WEST, self.EAST))
+        return greedy_action
+
+    def _choose_target_food(
+        self,
+        self_row: float,
+        self_col: float,
+        self_level: float,
+        teammates: list[tuple[float, float, float]],
+        foods: list[tuple[float, float, float, int]],
+    ) -> tuple[float, float, float, int] | None:
+        raise NotImplementedError
+
+    def _adjacent_action(
+        self,
+        self_row: float,
+        self_col: float,
+        target_row: float,
+        target_col: float,
+        teammates: list[tuple[float, float, float]],
+    ) -> int:
+        del self_row, self_col, target_row, target_col, teammates
+        return self.LOAD
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        if not isinstance(obs, torch.Tensor):
+            raise TypeError(f"LBF ScriptedPolicy expected torch.Tensor observation, got {type(obs).__name__}.")
+        if obs.dim() != 2:
+            raise ValueError(f"LBF ScriptedPolicy expects observation tensor with shape (batch, obs_dim), got {tuple(obs.shape)}.")
+
+        batch_size = obs.shape[0]
+        actions = torch.full((batch_size,), self.NONE, dtype=torch.long, device=obs.device)
+
+        for batch_idx in range(batch_size):
+            self_row, self_col, self_level, teammates, foods = self._parse_observation_row(obs[batch_idx])
+            if self_row < 0 or self_col < 0 or not foods:
+                actions[batch_idx] = self.NONE
                 continue
 
-            # Adjacent to food -> LOAD
-            if min_dist <= 1:
-                actions[b] = self.LOAD
+            target = self._choose_target_food(self_row, self_col, self_level, teammates, foods)
+            if target is None:
+                actions[batch_idx] = self.NONE
                 continue
 
-            # Move toward the closest food (prefer larger axis difference)
-            row_diff = closest_food_row - self_row
-            col_diff = closest_food_col - self_col
+            target_row, target_col, _target_level, _target_idx = target
+            dist_to_target = self._manhattan(self_row, self_col, target_row, target_col)
 
-            if abs(row_diff) >= abs(col_diff):
-                actions[b] = self.NORTH if row_diff < 0 else self.SOUTH
-            else:
-                actions[b] = self.WEST if col_diff < 0 else self.EAST
+            if dist_to_target <= 1:
+                actions[batch_idx] = self._adjacent_action(
+                    self_row=self_row,
+                    self_col=self_col,
+                    target_row=target_row,
+                    target_col=target_col,
+                    teammates=teammates,
+                )
+                continue
+
+            actions[batch_idx] = self._move_towards(self_row, self_col, target_row, target_col)
 
         return actions
+
+
+class ClosestFoodPolicy(_LbfScriptedPolicyBase):
+    """Greedy partner: always move toward the nearest visible food."""
+
+    def _choose_target_food(
+        self,
+        self_row: float,
+        self_col: float,
+        self_level: float,
+        teammates: list[tuple[float, float, float]],
+        foods: list[tuple[float, float, float, int]],
+    ) -> tuple[float, float, float, int] | None:
+        del self_level, teammates
+        return min(
+            foods,
+            key=lambda food: (self._manhattan(self_row, self_col, food[0], food[1]), food[3]),
+        )
+
+
+class TeamCenterFoodPolicy(_LbfScriptedPolicyBase):
+    """Center-seeking partner: pick food closest to team center position."""
+
+    def _choose_target_food(
+        self,
+        self_row: float,
+        self_col: float,
+        self_level: float,
+        teammates: list[tuple[float, float, float]],
+        foods: list[tuple[float, float, float, int]],
+    ) -> tuple[float, float, float, int] | None:
+        del self_level
+        team_rows = [self_row] + [teammate[0] for teammate in teammates]
+        team_cols = [self_col] + [teammate[1] for teammate in teammates]
+        center_row = sum(team_rows) / len(team_rows)
+        center_col = sum(team_cols) / len(team_cols)
+        return min(
+            foods,
+            key=lambda food: (self._manhattan(center_row, center_col, food[0], food[1]), food[3]),
+        )
+
+
+class TeammateBiasedFoodPolicy(_LbfScriptedPolicyBase):
+    """Supportive partner: prioritize food that minimizes teammate travel."""
+
+    def _choose_target_food(
+        self,
+        self_row: float,
+        self_col: float,
+        self_level: float,
+        teammates: list[tuple[float, float, float]],
+        foods: list[tuple[float, float, float, int]],
+    ) -> tuple[float, float, float, int] | None:
+        del self_level
+        if not teammates:
+            return min(
+                foods,
+                key=lambda food: (self._manhattan(self_row, self_col, food[0], food[1]), food[3]),
+            )
+
+        return min(
+            foods,
+            key=lambda food: (
+                min(self._manhattan(teammate[0], teammate[1], food[0], food[1]) for teammate in teammates),
+                self._manhattan(self_row, self_col, food[0], food[1]),
+                food[3],
+            ),
+        )
+
+
+class SynchronizedLoadingFoodPolicy(_LbfScriptedPolicyBase):
+    """Coordination-focused partner: wait at food until teammate is also adjacent."""
+
+    def _choose_target_food(
+        self,
+        self_row: float,
+        self_col: float,
+        self_level: float,
+        teammates: list[tuple[float, float, float]],
+        foods: list[tuple[float, float, float, int]],
+    ) -> tuple[float, float, float, int] | None:
+        del self_level
+        return min(
+            foods,
+            key=lambda food: (
+                self._manhattan(self_row, self_col, food[0], food[1])
+                + sum(self._manhattan(teammate[0], teammate[1], food[0], food[1]) for teammate in teammates),
+                food[3],
+            ),
+        )
+
+    def _adjacent_action(
+        self,
+        self_row: float,
+        self_col: float,
+        target_row: float,
+        target_col: float,
+        teammates: list[tuple[float, float, float]],
+    ) -> int:
+        del self_row, self_col
+        all_teammates_adjacent = all(
+            self._manhattan(teammate[0], teammate[1], target_row, target_col) <= 1
+            for teammate in teammates
+        )
+        if not teammates or all_teammates_adjacent:
+            return self.LOAD
+        return self.NONE
+
+
+# Backward compatibility for existing codepaths expecting env_module.ScriptedPolicy.
+ScriptedPolicy = ClosestFoodPolicy
+
+
+EVALUATION_BEHAVIOR_SET: list[dict[str, Any]] = [
+    {
+        "name": "closest_food_greedy",
+        "description": "Greedy nearest-food teammate baseline.",
+        "policy_cls": ClosestFoodPolicy,
+    },
+    {
+        "name": "team_center_food",
+        "description": "Targets foods near team center to reduce split behavior.",
+        "policy_cls": TeamCenterFoodPolicy,
+    },
+    {
+        "name": "teammate_biased_food",
+        "description": "Prioritizes foods that are easier for teammate to reach.",
+        "policy_cls": TeammateBiasedFoodPolicy,
+    },
+    {
+        "name": "synchronized_loading_food",
+        "description": "Waits at target food until teammate is adjacent, then loads.",
+        "policy_cls": SynchronizedLoadingFoodPolicy,
+    },
+]
+
+def get_evaluation_scripted_policies() -> list[Callable[[Any], torch.nn.Module]]:
+    """Return scripted policy factories for evaluation behavior sweeps."""
+    return [entry["policy_cls"] for entry in EVALUATION_BEHAVIOR_SET]
 
 
 # ---------------------------------------------------------------------------- #
@@ -898,7 +1206,7 @@ def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **k
         An instance of the LBF environment.
     """
     task = LbfTask.LBF.get_from_yaml(path=str(RL_CFG_DIR / "lbf.yaml"))
-    group_map, _ = _build_lbf_group_map(task_config=task.config)
+    group_map, _ = build_group_map(task.config)
     task.config["group_map"] = group_map
     return task.get_env_fun(
         num_envs=num_envs,

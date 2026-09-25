@@ -2,9 +2,10 @@
 
 PopGen generates and evaluates behavior-conditioned agents for multi-agent environments.
 
-Current active pipeline is single-behavior, per-run generation/evaluation under:
-- `scripts/population/` (general harness)
-- `experiments/b2t/` (experiment harness)
+Pipelines:
+- `scripts/population/` – behavior generation + per-behavior agent generation (policy code, RL reward, or LLM agent) and adherence evaluation
+- `scripts/cooperator/` – train and evaluate a cooperator (ego agent) against a generated population
+- `scripts/self-play/`, `scripts/fcp/` – self-play and FCP baselines
 
 ## Setup
 
@@ -60,16 +61,24 @@ Key scripts:
 - `generate_agents.py`
 - `gather_results.py`
 
-### B2T harness
+### Cooperator training
 
 ```bash
-cd experiments/b2t
-bash run.sh --env lbf --output-dir ./results
+cd scripts/cooperator
+./run_experiments.sh env=lbf n_behaviors=8          # population → cooperator → evaluation
+./run_cooperator.sh env=lbf population_dir=/path/to/population   # cooperator on an existing population
+```
+
+### Baselines
+
+```bash
+cd scripts/self-play && ./run_experiments.sh env=pp_stag
+cd scripts/fcp && python main.py
 ```
 
 ## Output Layout (Current)
 
-Both harnesses produce per-experiment outputs with:
+The population harness produces per-experiment outputs with:
 
 ```text
 <result_path>/

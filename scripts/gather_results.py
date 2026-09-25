@@ -207,20 +207,12 @@ def _select_generation_output(
 ) -> dict[str, Any]:
     """Select model output entry corresponding to a given rollout index.
 
-    Rules:
-    - llm_agent: align rollouts with the last `n_rollouts` entries in model_outputs.jsonl.
-    - others: use the last model output entry for every rollout.
+    Uses the last model output entry for every rollout: the file records one
+    entry per *generation*, not per rollout, so the final entry is the one the
+    rollouts were actually produced from.
     """
     if not model_outputs:
         return {}
-
-    if generation_type == "llm_agent":
-        # Match last entries with rollouts (tail alignment).
-        start_idx = max(0, len(model_outputs) - n_rollouts)
-        aligned = model_outputs[start_idx:]
-        if rollout_idx < len(aligned):
-            return aligned[rollout_idx]
-        return aligned[-1] if aligned else model_outputs[-1]
 
     return model_outputs[-1]
 

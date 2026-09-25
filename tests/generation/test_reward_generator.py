@@ -1,4 +1,7 @@
+import ast
 import json
+import pathlib
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -6,6 +9,7 @@ from popgen.population.generation.reward_generator import RewardFnGenerator
 from popgen.population.types import CodeSnippet
 from popgen.utils.config import LitellmConfig
 from popgen.utils.parsing import clean_code
+from popgen.utils.rewards import DEFAULT_REWARD_CLAMP
 
 
 class TestCodeSnippetModel:
@@ -353,3 +357,61 @@ def compute_reward(self, agent):
     distance = agent.state.pos[0]
     return -distance"""
         assert result == expected
+
+
+class TestRewardRangeGuidance:
+    """The runtime clamp is invisible to the model unless the prompt says so."""
+
+    ENVS = [
+        "football",
+        "lbf",
+        "overcooked",
+        "point_mass_rendezvous",
+        "pp",
+        "pp_stag",
+        "smacv2",
+    ]
+
+    @staticmethod
+    def _module_constant(env_name: str, name: str) -> str:
+        """Read a module-level string constant from source.
+
+        Parsed rather than imported: some env modules have unrelated optional
+        dependencies, and this assertion is purely about prompt text.
+        """
+        source = pathlib.Path(f"popgen/envs/{env_name}/utils.py").read_text()
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                if any(getattr(t, "id", None) == name for t in node.targets):
+                    return node.value.value
+        raise AssertionError(f"{name} not found in popgen/envs/{env_name}/utils.py")
+
+    @pytest.mark.parametrize("env_name", ENVS)
+    def test_every_env_states_the_reward_range(self, env_name):
+        reference = self._module_constant(env_name, "REWARD_API_REFERENCE")
+        bound = int(DEFAULT_REWARD_CLAMP)
+        assert f"[-{bound}, {bound}]" in reference
+        assert "clamped at runtime" in reference
+
+    @pytest.mark.parametrize("env_name", ENVS)
+    def test_range_is_not_in_the_shared_environment_description(self, env_name):
+        """ENVIRONMENT_DESCRIPTION is reused by the policy-code and LLM-agent
+        pipelines, which have no reward function, so it must stay clean."""
+        description = self._module_constant(env_name, "ENVIRONMENT_DESCRIPTION")
+        assert "clamped at runtime" not in description
+
+    def test_range_reaches_the_composed_system_prompt(self):
+        generator = RewardFnGenerator(model_config=LitellmConfig(model_name="openai/gpt-4o-mini"))
+
+        with patch.object(RewardFnGenerator.__mro__[1], "generate") as mock_generate:
+            mock_generate.return_value = MagicMock()
+            with patch("popgen.population.generation.reward_generator.parse_llm_response") as mock_parse:
+                mock_parse.return_value = CodeSnippet(code="import torch")
+                generator.generate(
+                    behavior="b",
+                    environment_description="env description",
+                    reward_api_reference="Reward function API (authoritative):\n- Return value:\n  - Keep the per-step reward within [-100, 100].",
+                )
+
+        system_prompt = mock_generate.call_args.kwargs["system_prompt"]
+        assert "[-100, 100]" in system_prompt

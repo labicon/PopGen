@@ -62,19 +62,28 @@ from pathlib import Path
 os.environ.setdefault("SDL_VIDEODRIVER", "offscreen")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
+# Point pysc2 at the bundled StarCraft II installation when SC2PATH is not already set.
+_BUNDLED_SC2 = Path(__file__).resolve().parents[3] / "deps" / "StarCraftII"
+if not os.environ.get("SC2PATH") and _BUNDLED_SC2.is_dir():
+    os.environ["SC2PATH"] = str(_BUNDLED_SC2)
+
 import torch
 import torch.nn as nn
-from benchmarl.algorithms import IppoConfig, MappoConfig
 from benchmarl.environments import Smacv2Task
 from benchmarl.experiment import Experiment, ExperimentConfig
-from benchmarl.models import MlpConfig
 from pydantic import BaseModel, Field
 from tensordict import TensorDict, TensorDictBase
 from torchrl.data import Composite, Unbounded
 from torchrl.envs.libs.smacv2 import SMACv2Env
 from torchrl.envs.utils import ACTION_MASK_ERROR
 
-from popgen.envs.utils import resolve_rollout_seed
+from popgen.envs.utils import (
+    apply_train_kwargs,
+    load_algorithm_config,
+    load_model_config,
+    resolve_cfg_dir,
+    resolve_rollout_seed,
+)
 
 
 _ACTIVE_SMACV2_REWARD_FN: Callable | None = None
@@ -251,6 +260,22 @@ The action space is discrete with dynamic size depending on the number of visibl
 
 Attack actions can appear available for alive enemies even if they are out of shoot range.
 If the policy emits an action that cannot be executed (e.g., out-of-range attack), the command is not executed.
+
+> **Policy generation constraints (important)**:
+- Only use what is in the current local observation `obs`, plus optional tiny function-level memory.
+- You can reliably use: move availability, visible/shootable enemy features, ally visibility/relative position/health, own health, own normalized position.
+- You cannot reliably observe: teammate's current action or target, enemy aggro/focus, or exact global formation.
+- Avoid behaviors that depend on hidden teammate intent or enemy targeting, such as:
+  - "attack the same target as teammate"
+  - "draw enemy fire" / "tank for teammate"
+  - "swap aggro"
+  - "hold exact max range"
+  - precise flanking geometry
+- Prefer simple observable tactics: nearest-shootable focus, lowest-health-shootable focus, move toward nearest visible enemy, retreat when low health, or stay near ally.
+- For alive agents, use Action 1 (`stop`) when idling, not Action 0 (`no-op`).
+- Only return attack `6 + enemy_idx` when that enemy is currently `shootable > 0`.
+- Before returning a move action, check the corresponding move feature in `move_feats`.
+- Coordinate convention: `rel_x > 0` means east, `rel_y > 0` means north.
 """
 
 REWARD_API_REFERENCE = """Reward function API (authoritative):
@@ -283,7 +308,10 @@ REWARD_API_REFERENCE = """Reward function API (authoritative):
   - Do not assume `env.agents` or `env.enemies` are lists.
   - Do not invent undocumented attributes such as `unit.action_recent`.
 - Return value:
-  - Return a scalar reward for this single agent at the current step (Python `float` recommended; scalar torch is also accepted)."""
+  - Return a scalar reward for this single agent at the current step (Python `float` recommended; scalar torch is also accepted).
+  - Keep the per-step reward within [-10, 10]. Values outside that range, and any NaN or inf, are clamped at runtime.
+  - Keep dense per-step terms small, around |r| <= 1, and reserve larger values for rare events (order 1-5). The clamp bounds a single step, not the episode: a dense term of 1 per step already accumulates to hundreds over an episode, and returns that large make advantages explode, which drives the policy to NaN and kills the run. Aim for an episode return in the low tens.
+  - Prefer normalized or tanh-shaped dense terms over raw distances or unbounded sums."""
 
 REWARD_EXAMPLE = """
 Behavior: reward agent for surviving, keeping kite distance, and dealing damage
@@ -340,6 +368,7 @@ class ActionType(BaseModel):
     5: move west
     6+: attack enemy k (for visible enemy k)
 
+    For alive agents, idle with `1` (stop), not `0`.
     Example: to move north, return ActionType(action_id=2).
     """
 
@@ -358,6 +387,17 @@ class ActionType(BaseModel):
 # ---------------------------------------------------------------------------- #
 #                            Training & Rollout                                #
 # ---------------------------------------------------------------------------- #
+
+
+class _FixedGroupMap:
+    """Picklable callable that returns a fixed group_map regardless of env."""
+
+    def __init__(self, group_map: dict):
+        self._group_map = group_map
+
+    def __call__(self, env):
+        return self._group_map
+
 
 def _previous_unit_health(previous_units: dict | None, unit_id: int, current_unit) -> float:
     """Return the prior-step health for a SMAC unit, falling back to current health."""
@@ -819,7 +859,79 @@ def _patch_smacv2_env(env, *, group_map: dict[str, list[str]] | None = None):
     return env
 
 
-def _build_smacv2_train_group_map(
+class _RemappedActionSpec:
+    """Callable that remaps SMACv2's flat 'agents' action spec to ego/teammate groups.
+
+    SMACv2's ``env.full_action_spec`` is structured as::
+
+        Composite({'agents': Composite({'action': spec}, shape=(n_agents,))})
+
+    BenchMARL's ``_check_specs`` requires ``action_spec[group]`` to exist for
+    every key in ``group_map``.  This callable rebuilds the spec so that each
+    split group ('ego', 'teammate', …) gets its own per-agent Composite whose
+    'action' sub-spec has batch shape ``(len(group_agents),)``.
+    """
+
+    def __init__(self, group_map: dict):
+        self._group_map = group_map  # e.g. {'ego': ['0'], 'teammate': ['1']}
+
+    def __call__(self, env) -> "Composite":
+        from torchrl.data import Composite
+        # action spec shape: (n_agents,) — slice per group
+        action_spec = env.full_action_spec["agents"]["action"]
+        offset = 0
+        result = {}
+        for group, agent_names in self._group_map.items():
+            n = len(agent_names)
+            group_action = action_spec[offset : offset + n]
+            result[group] = Composite({"action": group_action}, shape=(n,))
+            offset += n
+        return Composite(result)
+
+
+class _RemappedObservationSpec:
+    """Expose per-group observation specs for a split SMACv2 team."""
+
+    def __init__(self, group_map: dict):
+        self._group_map = group_map
+
+    def __call__(self, env) -> "Composite":
+        from torchrl.data import Composite
+
+        agents_spec = env.observation_spec["agents"]
+        observation_spec = agents_spec["observation"]
+        offset = 0
+        result = {}
+        for group, agent_names in self._group_map.items():
+            n = len(agent_names)
+            group_observation = observation_spec[offset : offset + n]
+            result[group] = Composite({"observation": group_observation}, shape=(n,))
+            offset += n
+        return Composite(result)
+
+
+class _RemappedActionMaskSpec:
+    """Expose per-group action-mask specs for a split SMACv2 team."""
+
+    def __init__(self, group_map: dict):
+        self._group_map = group_map
+
+    def __call__(self, env) -> "Composite":
+        from torchrl.data import Composite
+
+        agents_spec = env.observation_spec["agents"]
+        action_mask_spec = agents_spec["action_mask"]
+        offset = 0
+        result = {}
+        for group, agent_names in self._group_map.items():
+            n = len(agent_names)
+            group_mask = action_mask_spec[offset : offset + n]
+            result[group] = Composite({"action_mask": group_mask}, shape=(n,))
+            offset += n
+        return Composite(result)
+
+
+def build_group_map(
     task_config: dict,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """Build SMACv2 training group map separating ego from scripted teammates.
@@ -943,12 +1055,20 @@ def _extract_step_group_rewards(
     if rew_t.ndim == 0:
         return [float(rew_t.item())]
 
-    if rew_t.ndim >= 2 and int(rew_t.shape[0]) == int(num_steps):
-        rew_step = rew_t[step_idx]
-    elif rew_t.ndim >= 2 and int(rew_t.shape[1]) == int(num_steps):
-        rew_step = rew_t[:, step_idx]
-    elif rew_t.shape[0] > step_idx:
-        rew_step = rew_t[step_idx]
+    # rollout_td has batch_size (num_envs, T) when returned by env.rollout(),
+    # so rew_t has shape (num_envs, T, n_agents, reward_dim).
+    # Index using batch_dims to correctly extract the reward at step_idx.
+    batch_dims = rollout_td.batch_dims
+    T = rollout_td.shape[-1] if batch_dims >= 1 else 0
+
+    if batch_dims == 2:
+        if step_idx >= T:
+            return []
+        rew_step = rew_t[0, step_idx]  # (n_agents, reward_dim)
+    elif batch_dims == 1:
+        if step_idx >= T:
+            return []
+        rew_step = rew_t[step_idx]  # (n_agents, reward_dim)
     else:
         rew_step = rew_t
 
@@ -986,7 +1106,10 @@ def _attach_rewards_from_rollout(states: list[dict], rollout_td) -> None:
         )
 
         if global_reward_t is not None:
-            r = float(global_reward_t[step_idx].reshape(-1)[0].item())
+            if rollout_td.batch_dims == 2:
+                r = float(global_reward_t[0, step_idx].reshape(-1)[0].item())
+            else:
+                r = float(global_reward_t[step_idx].reshape(-1)[0].item())
             for name in ego_names:
                 step["ego_team"][name]["reward"] = r
             for name in opp_names:
@@ -1061,6 +1184,99 @@ def serialize_state_fn(rollout_data: list[dict]) -> list[dict]:
     return rollout_data
 
 
+def _render_smacv2_frame(env) -> "np.ndarray | None":
+    """Draw a top-down map frame of the current SMACv2 state using matplotlib.
+
+    pysc2's built-in renderer is incompatible with Python 3.11+ (random.shuffle
+    API change), so we draw our own lightweight visualization from raw env state.
+
+    Returns an HxWx3 uint8 numpy array, or None on any failure.
+    """
+    try:
+        import numpy as np
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+
+        # Navigate to the raw StarCraft2Env through torchrl/smacv2 wrappers.
+        raw = env
+        if hasattr(raw, "_env"):
+            raw = raw._env          # SMACv2Wrapper → StarCraftCapabilityEnvWrapper
+        if hasattr(raw, "env"):
+            raw = raw.env           # StarCraftCapabilityEnvWrapper → StarCraft2Env
+
+        # Raw env must have unit dicts populated after at least one step.
+        if not hasattr(raw, "agents") or raw.agents is None:
+            return None
+        if not hasattr(raw, "enemies") or raw.enemies is None:
+            return None
+
+        map_x = getattr(raw, "map_x", 32)
+        map_y = getattr(raw, "map_y", 32)
+
+        fig, ax = plt.subplots(figsize=(5, 5), dpi=80)
+        ax.set_xlim(0, map_x)
+        ax.set_ylim(0, map_y)
+        ax.set_facecolor("#1a1a2e")
+        ax.set_aspect("equal")
+        ax.axis("off")
+        ax.set_title("SMACv2", color="white", fontsize=10, pad=4)
+        fig.patch.set_facecolor("#1a1a2e")
+
+        def _draw_unit(pos_x, pos_y, radius, color, health_ratio, label):
+            circle = mpatches.Circle(
+                (pos_x, pos_y), radius, color=color, zorder=3
+            )
+            ax.add_patch(circle)
+            # Health bar (small rectangle above unit)
+            bar_w = radius * 2
+            bar_h = radius * 0.4
+            bar_x = pos_x - radius
+            bar_y = pos_y + radius + 0.2
+            bg = mpatches.FancyBboxPatch(
+                (bar_x, bar_y), bar_w, bar_h,
+                boxstyle="square,pad=0", color="#555555", zorder=4
+            )
+            fg = mpatches.FancyBboxPatch(
+                (bar_x, bar_y), bar_w * max(0.0, health_ratio), bar_h,
+                boxstyle="square,pad=0", color="#44ff44", zorder=5
+            )
+            ax.add_patch(bg)
+            ax.add_patch(fg)
+            ax.text(
+                pos_x, pos_y, label, ha="center", va="center",
+                fontsize=6, color="white", zorder=6,
+            )
+
+        radius = getattr(raw, "unit_size", 0.8)
+
+        for uid, unit in raw.agents.items():
+            if unit.health <= 0:
+                continue
+            health_ratio = unit.health / max(unit.health_max, 1)
+            _draw_unit(unit.pos.x, unit.pos.y, radius, "#4488ff", health_ratio, f"A{uid}")
+
+        for eid, unit in raw.enemies.items():
+            if unit.health <= 0:
+                continue
+            health_ratio = unit.health / max(unit.health_max, 1)
+            _draw_unit(unit.pos.x, unit.pos.y, radius, "#ff4444", health_ratio, f"E{eid}")
+
+        # Capture to numpy array
+        fig.canvas.draw()
+        buf = fig.canvas.buffer_rgba()
+        frame = np.frombuffer(buf, dtype=np.uint8).reshape(
+            fig.canvas.get_width_height()[::-1] + (4,)
+        )[..., :3].copy()
+        plt.close(fig)
+        return frame
+
+    except Exception as e:
+        py_logging.debug("SMACv2 custom render failed: %s", e)
+        return None
+
+
 def rollout_smacv2_env(
     policy,
     env,
@@ -1080,14 +1296,9 @@ def rollout_smacv2_env(
     images = []
 
     def state_callback(env_inner, td):
-        try:
-            frame = env_inner.render(mode="rgb_array")
-            if frame is not None:
-                import numpy as np
-                if isinstance(frame, np.ndarray):
-                    images.append(frame)
-        except Exception:
-            pass
+        frame = _render_smacv2_frame(env_inner)
+        if frame is not None:
+            images.append(frame)
         states.append(_collect_step_state(td))
 
     rollout_sig = inspect.signature(env.rollout)
@@ -1105,6 +1316,13 @@ def rollout_smacv2_env(
             trust_policy=True,
             **rollout_kwargs,
         )
+
+    # Recover any steps the callback missed (typically the terminal step).
+    batch_dims = rollout_td.batch_dims
+    T = rollout_td.shape[-1] if batch_dims >= 1 else 0
+    for t in range(len(states), T):
+        step_td = rollout_td[:, t] if batch_dims == 2 else rollout_td[t : t + 1]
+        states.append(_collect_step_state(step_td))
 
     _attach_rewards_from_rollout(states, rollout_td)
 
@@ -1256,6 +1474,7 @@ def train_smacv2_env(
 
     run_name = run_name.strip()
     callbacks = []
+    prioritized: bool = kwargs.pop("prioritized", True)
 
     _configure_smacv2_logging(
         quiet_absl=quiet_absl,
@@ -1263,28 +1482,23 @@ def train_smacv2_env(
     )
 
     base_cfg_dir = Path(rl_cfg_dir)
+    resolved_cfg_dir = resolve_cfg_dir(base_cfg_dir, teammate_policy)
     global _ACTIVE_SMACV2_REWARD_FN
     previous_reward_fn = _ACTIVE_SMACV2_REWARD_FN
     _ACTIVE_SMACV2_REWARD_FN = reward_fn
     try:
         task_enum = getattr(Smacv2Task, smacv2_task)
         task = task_enum.get_from_yaml(path=str(base_cfg_dir / f"{task_name}.yaml"))
-        experiment_config = ExperimentConfig.get_from_yaml(path=str(rl_cfg_dir / "base_experiment.yaml"))
-        ippo_path = base_cfg_dir / "ippo.yaml"
-        if ippo_path.exists():
-            algorithm_config = IppoConfig.get_from_yaml(path=str(ippo_path))
-        else:
-            algorithm_config = MappoConfig.get_from_yaml(path=str(base_cfg_dir / "mappo.yaml"))
-
-        model_config = MlpConfig.get_from_yaml(path=str(base_cfg_dir / "mlp.yaml"))
-        critic_mlp_path = base_cfg_dir / "critic_mlp.yaml"
-        critic_model_config = MlpConfig.get_from_yaml(path=str(critic_mlp_path)) if critic_mlp_path.exists() else model_config
-
-        desired_group_map = None
+        experiment_config = ExperimentConfig.get_from_yaml(path=str(resolved_cfg_dir / "base_experiment.yaml"))
+        algorithm_config = load_algorithm_config(resolved_cfg_dir)
+        model_config = load_model_config(resolved_cfg_dir)
+        try:
+            critic_model_config = load_model_config(resolved_cfg_dir, prefix="critic_")
+        except FileNotFoundError:
+            critic_model_config = model_config
 
         if teammate_policy is not None:
-            group_map, trainable_group = _build_smacv2_train_group_map(task_config=task.config)
-            desired_group_map = group_map
+            group_map, trainable_group = build_group_map(task_config=task.config)
             task.get_env_fun = _PatchedSmacv2GetEnvFun(task.config, group_map=group_map)
             task.state_spec = _GroupedSmacv2StateSpec()
             task.info_spec = _GroupedSmacv2InfoSpec()
@@ -1292,27 +1506,30 @@ def train_smacv2_env(
             task.action_mask_spec = _GroupedSmacv2ActionMaskSpec()
             task.action_spec = _GroupedSmacv2ActionSpec()
 
-            teammate_flat = teammate_policy
+            is_population = isinstance(teammate_policy[0], list)
+            from popgen.agents.callbacks import select_teammate_callback_cls
 
-            from popgen.agents.callback import TeammatePolicyCallback
+            callback_cls = select_teammate_callback_cls(
+                is_population=is_population,
+                prioritized=prioritized,
+            )
+            teammate_arg = teammate_policy
             callbacks.append(
-                TeammatePolicyCallback(
-                    teammate_policies=teammate_flat,
+                callback_cls(
+                    teammate_policies=teammate_arg,
                     trainable_group=trainable_group,
                 )
             )
         elif reward_fn is not None:
             task.get_env_fun = _PatchedSmacv2GetEnvFun(task.config, group_map=None)
 
-        for key, val in kwargs.items():
-            applied = False
-            for cfg_obj in (experiment_config, algorithm_config, model_config):
-                if hasattr(cfg_obj, key):
-                    setattr(cfg_obj, key, val)
-                    applied = True
-                    break
-            if not applied:
-                py_logging.warning(f"train_smacv2_env: unknown kwarg '{key}' — ignored.")
+        apply_train_kwargs(
+            kwargs,
+            experiment_config,
+            algorithm_config,
+            model_config,
+            critic_model_config,
+        )
 
         experiment_config.save_folder = output_dir
         experiment_config.wandb_extra_kwargs = {"name": run_name, "tags": ["smacv2"]}
@@ -1339,8 +1556,14 @@ def rollout_fn(policy, env=None, **kwargs):
 
     Args:
         policy: A trained, already-resolved policy module.
-        env: Unused for SMACv2 rollout. A fresh env is always created so the
-            rollout seed is applied at construction time.
+        env: Optional environment. If this is a ``TransformedEnv`` (e.g. the
+            ``experiment.test_env`` returned by :func:`load_ego_policy_and_env`,
+            which carries ``InitTracker`` and ``TensorDictPrimer`` transforms
+            required by recurrent GRU/LSTM policies), its transforms are
+            deep-copied and re-applied to the fresh env so that ``is_init``
+            and the hidden-state tensors are properly initialised.
+            A fresh base env is always created so the rollout seed is applied
+            at construction time.
         **kwargs: Forwarded to rollout_smacv2_env after consuming
             create_env-compatible kwargs such as ``task_name``, ``seed``,
             ``device``, ``quiet_absl``, and
@@ -1350,10 +1573,15 @@ def rollout_fn(policy, env=None, **kwargs):
         (states, images, error) or (states, images, error, rollout_info) when
         return_info=True is passed in kwargs.
     """
+    from torchrl.envs import TransformedEnv
+
+    original_env = env  # may be a TransformedEnv with recurrent transforms
     rollout_kwargs = dict(kwargs)
-    # Always build a fresh env with the correct ego/teammate grouping.
-    # The env passed from load_reward_rollout_artifacts uses the unpatched
-    # default group_map ("agents") and must not be reused.
+    # Always build a fresh base env so the rollout seed is applied at
+    # construction time.  The env passed from load_reward_rollout_artifacts
+    # uses the unpatched default group_map ("agents") and must not be reused
+    # as-is, but its transforms (InitTracker, TensorDictPrimer) must be kept
+    # for recurrent (GRU/LSTM) policies that require is_init in the TensorDict.
     create_env_params = set(inspect.signature(create_env).parameters.keys())
     create_env_kwargs = {}
     for key in list(rollout_kwargs):
@@ -1363,6 +1591,33 @@ def rollout_fn(policy, env=None, **kwargs):
     torch.manual_seed(effective_seed)
     create_env_kwargs["seed"] = effective_seed
     env = create_env(**create_env_kwargs)
+
+    # Re-apply transforms from the original env (e.g. InitTracker that sets
+    # is_init, TensorDictPrimer that initialises GRU/LSTM hidden states).
+    # We reconstruct each transform from its stored parameters instead of
+    # deepcopying because nn.Module-based transforms hold _thread.lock objects
+    # that are not deepcopy-able.
+    if isinstance(original_env, TransformedEnv):
+        from torchrl.envs import Compose, InitTracker, TensorDictPrimer
+
+        source = original_env.transform
+        components = list(source.transforms) if hasattr(source, "transforms") else [source]
+        new_transforms = []
+        for t in components:
+            if isinstance(t, InitTracker):
+                new_transforms.append(InitTracker(init_key=t.init_key))
+            elif isinstance(t, TensorDictPrimer):
+                new_transforms.append(
+                    TensorDictPrimer(
+                        t.primers,
+                        random=t.random,
+                        reset_key=t.reset_key,
+                        expand_specs=t.expand_specs,
+                    )
+                )
+        if new_transforms:
+            composed = Compose(*new_transforms) if len(new_transforms) > 1 else new_transforms[0]
+            env = TransformedEnv(env, composed)
 
     if "max_steps" not in rollout_kwargs:
         rollout_kwargs["max_steps"] = 200
@@ -1417,20 +1672,19 @@ def train_fn(
 # ---------------------------------------------------------------------------- #
 
 
-class ScriptedPolicy(nn.Module):
-    """Heuristic policy: attack nearest enemy, otherwise move toward it.
+class _SmacScriptedPolicyBase(nn.Module):
+    """Base class for SMACv2 scripted teammate policies.
 
-    The policy parses SMACv2 enemy features from the local observation:
-    - enemy_feats[:, 0]: attack-available (shootable now)
-    - enemy_feats[:, 1]: normalized distance
-    - enemy_feats[:, 2]: relative x
-    - enemy_feats[:, 3]: relative y
+    Subclasses implement :meth:`_select_attack_target` to choose which visible
+    enemy to shoot at and :meth:`_no_target_action` to decide what to do when
+    no enemy is in range.
 
-    For each agent:
-    1) find the closest visible enemy,
-    2) attack it if the corresponding attack action is valid,
-    3) otherwise move toward that enemy,
-    4) if movement is blocked, fall back to the first valid masked action.
+    Enemy features layout (per enemy):
+    - feat[0]: attack-available (shootable now)
+    - feat[1]: normalized distance
+    - feat[2]: relative x  (positive = east)
+    - feat[3]: relative y  (positive = north)
+    - feat[4]: health (normalized, when obs_all_health=True)
     """
 
     STOP = 1
@@ -1492,6 +1746,7 @@ class ScriptedPolicy(nn.Module):
         return int(valid[0].item()) if valid.numel() > 0 else 0
 
     def _move_toward_enemy_action(self, rel_x: float, rel_y: float, mask_row: torch.Tensor | None) -> int:
+        """Return a movement action in the direction of the enemy."""
         candidates: list[int] = []
 
         def push(action: int) -> None:
@@ -1529,14 +1784,54 @@ class ScriptedPolicy(nn.Module):
 
         return self._first_valid_action(mask_row)
 
-    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
-        """Select nearest-enemy attack/chase actions for each observation.
+    def _move_away_from_enemy_action(self, rel_x: float, rel_y: float, mask_row: torch.Tensor | None) -> int:
+        """Return a movement action in the direction AWAY from the enemy."""
+        return self._move_toward_enemy_action(-rel_x, -rel_y, mask_row)
+
+    def _select_attack_target(
+        self,
+        visible_ids: torch.Tensor,
+        enemy_feats: torch.Tensor,
+    ) -> int:
+        """Return the enemy index to attack / chase.
 
         Args:
-            obs_tensor: Observation tensor with shape ``(batch, obs_dim)``.
+            visible_ids: 1-D tensor of visible enemy indices.
+            enemy_feats: ``(n_enemies, n_feats)`` tensor.
 
         Returns:
-            Action tensor with shape ``(batch,)``.
+            Index into ``enemy_feats`` of the chosen target.
+        """
+        raise NotImplementedError
+
+    def _no_target_action(
+        self,
+        nearest_id: int,
+        rel_x: float,
+        rel_y: float,
+        mask_row: torch.Tensor | None,
+    ) -> int:
+        """Action to take when the selected target cannot be attacked.
+
+        Args:
+            nearest_id: Index of the nearest visible enemy (for convenience).
+            rel_x: Relative x of the chosen target.
+            rel_y: Relative y of the chosen target.
+            mask_row: Optional action-mask row for this agent.
+
+        Returns:
+            Discrete action integer.
+        """
+        raise NotImplementedError
+
+    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
+        """Select actions for a batch of per-agent observations.
+
+        Args:
+            obs_tensor: ``(batch, obs_dim)`` observation tensor.
+
+        Returns:
+            ``(batch,)`` discrete action tensor.
         """
         if not isinstance(obs_tensor, torch.Tensor):
             raise TypeError(f"SMACv2 ScriptedPolicy expected torch.Tensor observation, got {type(obs_tensor).__name__}.")
@@ -1584,11 +1879,13 @@ class ScriptedPolicy(nn.Module):
                 actions[b] = self._first_valid_action(mask_row) if mask_row is not None else self.STOP
                 continue
 
-            nearest = visible_ids[torch.argmin(dist[visible_ids])]
-            nearest_id = int(nearest.item())
-            attack_action = self._attack_action_start + nearest_id
+            # Nearest visible enemy (used as fallback reference by subclasses).
+            nearest_id = int(visible_ids[torch.argmin(dist[visible_ids])].item())
 
-            can_attack = bool(shootable[nearest].item() > 0)
+            target_id = self._select_attack_target(visible_ids, enemy_feats)
+            attack_action = self._attack_action_start + target_id
+
+            can_attack = bool(shootable[target_id].item() > 0)
             if mask_row is not None:
                 can_attack = (
                     can_attack
@@ -1600,13 +1897,117 @@ class ScriptedPolicy(nn.Module):
                 actions[b] = attack_action
                 continue
 
-            actions[b] = self._move_toward_enemy_action(
-                rel_x=float(rel_x[nearest].item()),
-                rel_y=float(rel_y[nearest].item()),
+            actions[b] = self._no_target_action(
+                nearest_id=nearest_id,
+                rel_x=float(rel_x[target_id].item()),
+                rel_y=float(rel_y[target_id].item()),
                 mask_row=mask_row,
             )
 
         return actions
+
+
+class AttackNearestPolicy(_SmacScriptedPolicyBase):
+    """Attack the nearest visible enemy; chase it when out of range.
+
+    This is the default scripted teammate behaviour.
+    """
+
+    def _select_attack_target(self, visible_ids: torch.Tensor, enemy_feats: torch.Tensor) -> int:
+        dist = enemy_feats[:, 1]
+        return int(visible_ids[torch.argmin(dist[visible_ids])].item())
+
+    def _no_target_action(self, nearest_id: int, rel_x: float, rel_y: float, mask_row: torch.Tensor | None) -> int:
+        return self._move_toward_enemy_action(rel_x, rel_y, mask_row)
+
+
+class FocusFirePolicy(_SmacScriptedPolicyBase):
+    """Focus-fire the lowest-health visible enemy; chase the nearest when out of range.
+
+    Uses ``enemy_feats[:, 4]`` (health) when available.  Falls back to nearest
+    enemy when health information is absent from the observation.
+    """
+
+    def _select_attack_target(self, visible_ids: torch.Tensor, enemy_feats: torch.Tensor) -> int:
+        dist = enemy_feats[:, 1]
+        if self._enemy_feat_size > 4:
+            # Prefer lowest-health enemy among those that are shootable.
+            shootable = enemy_feats[:, 0]
+            health = enemy_feats[:, 4]
+            in_range_ids = visible_ids[shootable[visible_ids] > 0]
+            if in_range_ids.numel() > 0:
+                return int(in_range_ids[torch.argmin(health[in_range_ids])].item())
+        # Fall back to nearest visible.
+        return int(visible_ids[torch.argmin(dist[visible_ids])].item())
+
+    def _no_target_action(self, nearest_id: int, rel_x: float, rel_y: float, mask_row: torch.Tensor | None) -> int:
+        # Chase nearest enemy (use nearest_id's position, not the target's).
+        return self._move_toward_enemy_action(rel_x, rel_y, mask_row)
+
+
+class HoldGroundPolicy(_SmacScriptedPolicyBase):
+    """Attack any enemy in range but hold position (STOP) when none are visible.
+
+    Models a defensive unit that refuses to advance into unknown territory.
+    """
+
+    def _select_attack_target(self, visible_ids: torch.Tensor, enemy_feats: torch.Tensor) -> int:
+        dist = enemy_feats[:, 1]
+        shootable = enemy_feats[:, 0]
+        in_range_ids = visible_ids[shootable[visible_ids] > 0]
+        if in_range_ids.numel() > 0:
+            return int(in_range_ids[torch.argmin(dist[in_range_ids])].item())
+        return int(visible_ids[torch.argmin(dist[visible_ids])].item())
+
+    def _no_target_action(self, nearest_id: int, rel_x: float, rel_y: float, mask_row: torch.Tensor | None) -> int:
+        return self.STOP
+
+
+class RetreatPolicy(_SmacScriptedPolicyBase):
+    """Attack enemies in range while retreating when none can be shot.
+
+    Models a kite-style unit: engages at range and falls back when enemies
+    close in, forcing the cooperator to adapt to a moving, evasive teammate.
+    """
+
+    def _select_attack_target(self, visible_ids: torch.Tensor, enemy_feats: torch.Tensor) -> int:
+        dist = enemy_feats[:, 1]
+        return int(visible_ids[torch.argmin(dist[visible_ids])].item())
+
+    def _no_target_action(self, nearest_id: int, rel_x: float, rel_y: float, mask_row: torch.Tensor | None) -> int:
+        return self._move_away_from_enemy_action(rel_x, rel_y, mask_row)
+
+
+# Backward compatibility: existing codepaths that import ScriptedPolicy keep working.
+ScriptedPolicy = AttackNearestPolicy
+
+
+EVALUATION_BEHAVIOR_SET: list[dict] = [
+    {
+        "name": "attack_nearest",
+        "description": "Attacks the nearest visible enemy; chases when out of range.",
+        "policy_cls": AttackNearestPolicy,
+    },
+    {
+        "name": "focus_fire",
+        "description": "Focus-fires the lowest-health enemy in range; chases nearest otherwise.",
+        "policy_cls": FocusFirePolicy,
+    },
+    {
+        "name": "hold_ground",
+        "description": "Attacks enemies in range but holds position (STOP) when none are visible.",
+        "policy_cls": HoldGroundPolicy,
+    },
+    {
+        "name": "retreat",
+        "description": "Attacks enemies in range then retreats (moves away) when none can be shot.",
+        "policy_cls": RetreatPolicy,
+    },
+]
+
+def get_evaluation_scripted_policies() -> list:
+    """Return scripted policy factories for evaluation behaviour sweeps."""
+    return [entry["policy_cls"] for entry in EVALUATION_BEHAVIOR_SET]
 
 
 # ---------------------------------------------------------------------------- #
@@ -1652,6 +2053,6 @@ def create_env(
         device=device,
     )()
     # Apply ego/teammate grouping so rollout envs match training format.
-    group_map, _ = _build_smacv2_train_group_map(task.config)
+    group_map, _ = build_group_map(task.config)
     env = _patch_smacv2_env(env, group_map=group_map)
     return env

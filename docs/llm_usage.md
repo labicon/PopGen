@@ -58,10 +58,10 @@ python generate_agents.py \
   behavior_path=./data/behaviors/lbf.json
 ```
 
-B2T harness:
+LLM agent (the LLM acts as the policy at every timestep):
 
 ```bash
-cd experiments/b2t
+cd scripts/population
 python generate_agents.py \
   env=lbf \
   generation=llm_agent \

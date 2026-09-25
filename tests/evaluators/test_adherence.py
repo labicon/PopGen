@@ -216,3 +216,18 @@ class TestComputeInstanceMetricWithImages:
         image_entries = [c for c in user_content if c["type"] == "image_url"]
         assert len(image_entries) == 1
         assert "base64data" in image_entries[0]["image_url"]["url"]
+
+
+def test_aggregate_metrics_with_no_instances_does_not_raise():
+    """All retries failing produced zero rollouts, and aggregating an empty
+    list raised ZeroDivisionError. The resulting "Evaluation failed: division
+    by zero" was the only feedback the next attempt received, hiding the real
+    training error."""
+    evaluator = BehaviorAdherenceEvaluator(model_config=LitellmConfig(model_name="openai/gpt-4o-mini"))
+
+    metrics = evaluator.aggregate_metrics([])
+
+    assert metrics["adherence"] == 0.0
+    assert metrics["adjusted_adherence"] == 0.0
+    assert metrics["n_evaluated"] == 0
+    assert metrics["n_errors"] == 0

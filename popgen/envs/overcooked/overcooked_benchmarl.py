@@ -68,6 +68,7 @@ class OvercookedBenchWrapper(EnvBase):
         device: DEVICE_TYPING = "cpu",
         group_map: Optional[Dict[str, List[str]]] = None,
         seed: Optional[int] = None,
+        randomize_start_pos: bool = True,
     ):
         super().__init__(device=device, batch_size=[])
 
@@ -77,9 +78,15 @@ class OvercookedBenchWrapper(EnvBase):
         self.group_map = group_map or {"ego": ["agent_0"], "teammate": ["agent_1"]}
         self._obs_indices = _observation_indices_for_layout(self.layout_name)
 
+        start_state_fn = None
+        if randomize_start_pos:
+            sample_mdp = OvercookedGridworld.from_layout_name(layout_name)
+            start_state_fn = sample_mdp.get_random_start_state_fn(random_start_pos=True)
+
         # Build OvercookedEnv using a picklable generator (lambda would break BenchMARL's pickle)
         self.oc_env = OvercookedEnv(
             mdp_generator_fn=_MdpGenerator(layout_name),
+            start_state_fn=start_state_fn,
             horizon=horizon,
             info_level=0,
         )
@@ -201,13 +208,18 @@ class OvercookedBenchWrapper(EnvBase):
                     int(g_action[local_i].item())
                 ]
 
-        next_state, sparse_reward, done, info = self.oc_env.step(tuple(action_list))
+        next_state, _sparse_reward, done, info = self.oc_env.step(tuple(action_list))
 
         feats = self._project_features(self.oc_env.featurize_state_mdp(next_state))
         agent_feats = [
             torch.tensor(f, device=self.device, dtype=torch.float32) for f in feats
         ]
-        reward_val = float(sparse_reward)
+        sparse_by_agent = info.get("sparse_r_by_agent", [0.0] * len(action_list))
+        shaped_by_agent = info.get("shaped_r_by_agent", [0.0] * len(action_list))
+        reward_by_agent = [
+            float(sparse_by_agent[i]) + float(shaped_by_agent[i])
+            for i in range(len(action_list))
+        ]
 
         out_td = TensorDict(
             {
@@ -223,8 +235,11 @@ class OvercookedBenchWrapper(EnvBase):
         for gname, names in self.group_map.items():
             n = len(names)
             obs = torch.stack(agent_feats[feat_idx : feat_idx + n], dim=0)
+            group_rewards = [
+                reward_by_agent[int(aname.split("_")[1])] for aname in names
+            ]
             rewards = torch.tensor(
-                [reward_val] * n, device=self.device, dtype=torch.float32
+                group_rewards, device=self.device, dtype=torch.float32
             ).unsqueeze(-1)
             out_td[gname] = TensorDict(
                 {"observation": obs, "reward": rewards},
@@ -274,12 +289,14 @@ class OvercookedClass(TaskClass):
             layout_name = self.config.get("layout_name", _get_default_layout_name())
             horizon = self.config.get("horizon", 400)
             group_map = self.config.get("group_map")
+            randomize_start_pos = self.config.get("randomize_start_pos", True)
             return OvercookedBenchWrapper(
                 layout_name=layout_name,
                 horizon=horizon,
                 device=device,
                 group_map=group_map,
                 seed=seed,
+                randomize_start_pos=randomize_start_pos,
             )
 
         return make_env

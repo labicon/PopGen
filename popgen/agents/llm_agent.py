@@ -131,7 +131,7 @@ class LLMAgent(nn.Module):
         ...     horizon_length=5,
         ... )
         >>>
-        >>> # Use in rollout via MultiPolicyRouter; forward() receives (batch, obs_dim)
+        >>> # Use in rollout via EgoTeammateRouter or MultiPolicyRouter; forward() receives (batch, obs_dim)
         >>> obs = torch.randn(1, 20)  # (batch, obs_dim) for a single agent
         >>> action = agent(obs)  # Returns shape (batch,) tensor
     """

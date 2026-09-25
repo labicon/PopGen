@@ -5,7 +5,11 @@ import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
+from dotenv import load_dotenv
+
 from popgen.population import Behavior
+
+load_dotenv(override=True)
 
 
 OmegaConf.register_new_resolver("basename", lambda s: s.split("/")[-1])

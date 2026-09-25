@@ -1,0 +1,23 @@
+type: rl_reward
+
+# Model used for reward generation
+model_name: openrouter/google/gemini-3-flash-preview
+
+# Retry cheap failures (LLM/parse/import errors, rollout errors) inside each
+# alignment attempt.
+n_generation_retries: 5
+
+# Extra RL trainings allowed per alignment attempt after a *slow* training
+# failure. Each costs tens of minutes, so 0 means such a failure ends the
+# attempt; the next attempt starts fresh with a newly generated reward.
+n_training_retries: 0
+
+# A training failure is only charged to n_training_retries if training ran at
+# least this long. Faster crashes (bad reward shape, for instance) are cheap
+# and stay on the n_generation_retries budget.
+min_expensive_training_seconds: 120.0
+
+# Per-step magnitude bound applied to the generated reward at runtime; NaN/inf
+# are replaced. Keep in sync with the range stated in each environment's
+# REWARD_API_REFERENCE. Set to null to disable.
+reward_clamp: 10.0

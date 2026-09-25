@@ -17,7 +17,7 @@ from torchrl.envs import EnvBase, TransformedEnv
 from overcooked_ai_py.mdp.actions import Action, Direction
 
 from popgen.envs.overcooked.overcooked_benchmarl import NUM_ACTIONS, OvercookedBenchWrapper, OvercookedTask
-from popgen.envs.utils import apply_rollout_seed
+from popgen.envs.utils import apply_rollout_seed, apply_train_kwargs, load_algorithm_config, load_model_config, resolve_cfg_dir
 
 # Suppress pygame display for headless rendering
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -152,7 +152,7 @@ Policy-writing rules for this observation design:
 - Use `obs[30:34]` wall flags when moving.
 - Use `obs[34:36]` to avoid crowding the teammate near pots, dispensers, and narrow hallways. If the teammate is blocking the path or workspace, `STAY` can be the correct action.
 - Relative offsets use `(dx, dy)`: positive `dx` means east, negative `dx` west; positive `dy` means south, negative `dy` north.
-- Reliable counter drop options if you must free your hands:
+- Counters exist ONLY as a last resort to free your hands so you can start cooking a full pot. They are NEVER a way to make progress or hand items to the teammate (see Coordination Requirement — counter hand-off roles are invalid and deadlock). A counter holds only ONE item, and the observation does not tell you whether a counter is already occupied, so a second drop onto the same counter silently fails and traps the agent.
   - Counters at `(2, 0)` and `(4, 0)`, reached from `(2, 1)` or `(4, 1)` while facing NORTH.
   - Bottom counters at `(2, 6)`, `(3, 6)`, `(4, 6)`, reached from row `y=5` while facing SOUTH.
 
@@ -169,6 +169,47 @@ Visual Representation
 
 - The **ego agent** (agent_0) is shown in **blue**.
 - The **teammate agent** (agent_1) is shown in **green**.
+
+--------------------------------------------------
+Coordination Requirement
+--------------------------------------------------
+
+The full soup pipeline is made of these REAL steps, each of which moves a real item to its real destination:
+  (A) pick up an onion from a dispenser
+  (B) put the onion into the pot
+  (C) start cooking: empty-handed INTERACT on a full, not-yet-cooking pot
+  (D) pick up a dish from the dish dispenser
+  (E) pick up the finished soup into the dish and deliver it to the serving station
+
+Every behavior specializes the ego in a subset of these real steps. A valid behavior must satisfy BOTH rules below.
+
+RULE 1 — Make real progress, never "stage" on counters.
+The ego's job must be genuine pipeline work: carrying a real item to its real destination (an onion INTO the pot, a dish TO the pot to scoop soup, soup TO the serving station). Do NOT design "stager", "prepper", "monitor", "coordinator", "runner", or "hand-off" roles whose plan is to fetch an item and drop it on a counter for the teammate to pick up later. Counter hand-offs are NOT progress: they score nothing, a counter holds only one item, and the observation cannot tell you a counter is already occupied — so the second drop silently fails and the agent gets stuck forever repeating INTERACT. If you cannot phrase the ego's role as "move real item X to its real destination Y", the behavior is invalid. Rephrase it as one of the real steps above.
+
+RULE 2 — Omit at least one real step ENTIRELY so the teammate is required.
+Choose at least one pipeline step that the ego's CODE NEVER performs under ANY observation, no matter how long the episode runs — e.g. never touches an onion dispenser, OR never starts the cook, OR never picks up a dish, OR never delivers to the serving station. The teammate must be needed to cover the omitted step(s). This is about the IMPLEMENTED CODE, not the wording. The single most common failure is a policy that *sounds* specialized ("onion courier", "dish helper") but whose code adds fallback branches that, given enough time, walk the pot through every remaining stage by itself. A role like "balances between tasks", "adapts to what the pot needs", or "fills in wherever help is needed" is a violation the instant the code path exists to finish a soup alone. Reducing how *often* the ego does a step is not enough — the code branch for the omitted step(s) must not exist at all.
+
+The two rules work together: do your chosen steps FOR REAL and FULLY (Rule 1), and make sure the steps you did NOT choose are completely absent from your code (Rule 2).
+
+--------------------------------------------------
+Spatial Constraints for Policy Design
+--------------------------------------------------
+
+Critical interaction tiles that must stay clear when not actively used
+(known as `_LARGE_ROOM_BLOCKING_POSITIONS`):
+  (3, 1) — pot interaction tile
+  (1, 1) — left onion dispenser interaction tile
+  (5, 1) — right onion dispenser interaction tile
+  (1, 5) — dish dispenser interaction tile
+  (5, 5) — serving station interaction tile
+
+If your policy is idle (waiting for the pot to cook, waiting for the teammate, etc.), do NOT park at any of the above tiles. Standing there blocks the cooperator's path and prevents it from completing its tasks.
+
+Instead, move to one of the safe idle positions in the centre of the room
+(known as `_LARGE_ROOM_IDLE_POSITIONS`):
+  [3, 3], [2, 3], [4, 3], [3, 4]
+
+These centre tiles are always walkable and never obstruct any key workspace, so they are the correct place to wait when not actively pursuing a task.
 
 --------------------------------------------------
 Policy Output Requirement
@@ -207,6 +248,9 @@ REWARD_API_REFERENCE = """Reward function API (authoritative):
     - `player.held_object`: ObjectState or None (e.g., `held_object.name` is "onion", "dish", or "soup").
 - Return value:
   - Return a scalar reward for this single agent at the current step (Python `float` recommended).
+  - Keep the per-step reward within [-10, 10]. Values outside that range, and any NaN or inf, are clamped at runtime.
+  - Keep dense per-step terms small, around |r| <= 1, and reserve larger values for rare events (order 1-5). The clamp bounds a single step, not the episode: a dense term of 1 per step already accumulates to hundreds over an episode, and returns that large make advantages explode, which drives the policy to NaN and kills the run. Aim for an episode return in the low tens.
+  - Prefer normalized or tanh-shaped dense terms over raw distances or unbounded sums.
 """
 
 REWARD_EXAMPLE = """
@@ -423,15 +467,18 @@ def train_overcooked_env(
     output_dir,
     rl_cfg_dir,
     task_yaml_name="overcooked.yaml",
-    ippo_yaml_name="ippo.yaml",
     experiment_yaml_name="base_experiment.yaml",
-    mlp_yaml_name="mlp.yaml",
     seed=0,
     callbacks=None,
     teammate_policy=None,
+    run_name=None,
+    prioritized=True,
+    prioritized_beta=1.0,
+    prioritized_warmup_batches=30,
+    **kwargs,
 ):
     """Train Overcooked with optional scripted teammate and custom reward function."""
-    if hasattr(reward_fn, "__globals__"):
+    if reward_fn is not None and hasattr(reward_fn, "__globals__"):
         reward_fn.__globals__["torch"] = torch
 
     callbacks = list(callbacks or [])
@@ -447,60 +494,86 @@ def train_overcooked_env(
         task.config["group_map"] = group_map
 
         if teammate_policy is not None:
-            from popgen.agents.callback import TeammatePolicyCallback
+            from popgen.agents.callbacks import PrioritizedCallback, select_teammate_callback_cls
 
+            is_population = isinstance(teammate_policy[0], list)
+            callback_cls = select_teammate_callback_cls(is_population=is_population, prioritized=prioritized)
+            callback_kwargs = {}
+            if callback_cls is PrioritizedCallback:
+                # Only the prioritized callback takes the sampling prior's knobs; the
+                # uniform ones would reject them.
+                callback_kwargs = {"beta": prioritized_beta, "warmup_batches": prioritized_warmup_batches}
             callbacks.append(
-                TeammatePolicyCallback(
+                callback_cls(
                     teammate_policies=teammate_policy,
                     trainable_group=trainable_group,
+                    **callback_kwargs,
                 )
             )
 
-        desired_group_map = task.config.get("group_map")
+        if reward_fn is not None:
+            desired_group_map = task.config.get("group_map")
 
-        def custom_step(self, tensordict):
-            out_td = original_step(self, tensordict)
+            # The generated reward describes the EGO agent only, so override the
+            # ego group and leave every other group on the environment's own
+            # reward. This mirrors vmas_common, which overrides `world.agents[0]`
+            # alone.
+            #
+            # Evaluating the ego's reward from the teammate's index was wasted
+            # work (nothing trains on the teammate group -- `trainable_group` is
+            # ego-only) and it corrupted `collection/reward/*`, which is the mean
+            # over groups. It was also semantically backwards: a reward that
+            # penalises the ego for fetching dishes, so the partner must, then
+            # penalised the scripted partner for doing exactly its job.
+            #
+            # Note for cooperator training: `TeamRewardSumCallback` adds the
+            # teammate group's reward into the ego's training reward. It is only
+            # attached by CooperatorTrainingPipeline, which passes reward_fn=None,
+            # so it never combines with this override today. If the two are ever
+            # used together, the ego would train on `generated(ego) +
+            # task_reward(teammate)` rather than the generated reward summed over
+            # both agents.
+            ego_group, ego_agent_names = next(iter(trainable_group.items()))
+            ego_idxs = [int(name.split("_")[1]) for name in ego_agent_names]
 
-            if desired_group_map:
-                for gname, names in desired_group_map.items():
-                    idxs = [int(n.split("_")[1]) for n in names]
-                    n = len(names)
-                    new_rewards = []
-                    for idx in idxs:
-                        r = reward_fn(self.oc_env, idx)
-                        if isinstance(r, torch.Tensor):
-                            r = r.item()
-                        new_rewards.append(float(r))
-                    rt = torch.tensor(
-                        new_rewards, device=self.device, dtype=torch.float32
-                    ).unsqueeze(-1)
-                    out_td[gname, "reward"] = rt
-            else:
-                new_rewards = []
-                for idx in range(2):
+            def custom_step(self, tensordict):
+                out_td = original_step(self, tensordict)
+
+                ego_rewards = []
+                for idx in ego_idxs:
                     r = reward_fn(self.oc_env, idx)
                     if isinstance(r, torch.Tensor):
                         r = r.item()
-                    new_rewards.append(float(r))
+                    ego_rewards.append(float(r))
                 reward_tensor = torch.tensor(
-                    new_rewards, device=self.device, dtype=torch.float32
+                    ego_rewards, device=self.device, dtype=torch.float32
                 ).unsqueeze(-1)
-                out_td["agents", "reward"] = reward_tensor
 
-            return out_td
+                if desired_group_map:
+                    out_td[ego_group, "reward"] = reward_tensor
+                else:
+                    # Flat layout: replace only the ego rows, keeping the other
+                    # agents' environment reward intact.
+                    flat = out_td["agents", "reward"].clone()
+                    for row, idx in enumerate(ego_idxs):
+                        flat[idx] = reward_tensor[row]
+                    out_td["agents", "reward"] = flat
 
-        OvercookedBenchWrapper._step = custom_step
+                return out_td
 
-        algorithm_config = IppoConfig.get_from_yaml(
-            path=str(rl_cfg_dir / ippo_yaml_name)
-        )
+            OvercookedBenchWrapper._step = custom_step
+
+        base_rl_cfg_dir = Path(rl_cfg_dir)
+        mode_cfg_dir = resolve_cfg_dir(base_rl_cfg_dir, teammate_policy)
+
+        algorithm_config = load_algorithm_config(mode_cfg_dir)
         experiment_config = ExperimentConfig.get_from_yaml(
-            path=str(rl_cfg_dir / experiment_yaml_name)
+            path=str(mode_cfg_dir / experiment_yaml_name)
         )
-        model_config = MlpConfig.get_from_yaml(path=str(rl_cfg_dir / mlp_yaml_name))
-        critic_model_config = MlpConfig.get_from_yaml(
-            path=str(rl_cfg_dir / mlp_yaml_name)
-        )
+        model_config = load_model_config(mode_cfg_dir)
+        critic_model_config = load_model_config(mode_cfg_dir)
+
+        apply_train_kwargs(kwargs, experiment_config, algorithm_config, model_config, critic_model_config)
 
         requested_devices = [
             str(getattr(experiment_config, "sampling_device", "")),
@@ -518,8 +591,9 @@ def train_overcooked_env(
                 experiment_config.buffer_device = "cpu"
 
         experiment_config.save_folder = output_dir
+        display_run_name = run_name.strip() if isinstance(run_name, str) and run_name.strip() else Path(output_dir).name
         experiment_config.wandb_extra_kwargs = {
-            "name": Path(output_dir).name,
+            "name": display_run_name,
             "tags": ["overcooked"],
         }
 
@@ -611,7 +685,7 @@ def rollout_fn(policy, env=None, **kwargs):
     return rollout_overcooked_env(policy=policy, env=env, **kwargs)
 
 
-def train_fn(reward_fn: Callable, output_dir: str, **kwargs):
+def train_fn(reward_fn: Callable | None = None, output_dir: str | None = None, run_name: str | None = None, **kwargs):
     """Train agents in Overcooked with a custom reward function.
 
     Args:
@@ -619,16 +693,18 @@ def train_fn(reward_fn: Callable, output_dir: str, **kwargs):
             where ``env`` is the ``OvercookedEnv`` instance and ``agent_index``
             is 0 (ego) or 1 (teammate). Returns a scalar float reward.
         output_dir: Directory to save results.
+        run_name: Display name for this training run.
     """
-    scripted_policy = kwargs.pop("scripted_policy", None)
-    if scripted_policy is None:
-        scripted_policy = ScriptedPolicy()
+    teammate_policy = kwargs.pop("teammate_policy", None)
+    if teammate_policy is None:
+        teammate_policy = [ScriptedPolicy()]
 
     return train_overcooked_env(
         reward_fn=reward_fn,
         output_dir=output_dir,
         rl_cfg_dir=RL_CFG_DIR,
-        teammate_policy=scripted_policy,
+        run_name=run_name,
+        teammate_policy=teammate_policy,
         **kwargs,
     )
 
@@ -1400,6 +1476,300 @@ class ScriptedPolicy(nn.Module):
         return actions
 
 
+# ---------------------------------------------------------------------------- #
+#                        Diverse Evaluation Behaviors                          #
+# ---------------------------------------------------------------------------- #
+
+# Interaction tiles that must stay clear for the cooperator to use freely.
+_LARGE_ROOM_BLOCKING_POSITIONS: frozenset[tuple[int, int]] = frozenset({
+    (3, 1),  # pot interaction tile
+    (1, 1),  # left onion dispenser interaction tile
+    (5, 1),  # right onion dispenser interaction tile
+    (1, 5),  # dish dispenser interaction tile
+    (5, 5),  # serving station interaction tile
+})
+# Safe floor tiles in the centre of the room used as idle targets.
+_LARGE_ROOM_IDLE_POSITIONS: list[list[int]] = [[3, 3], [2, 3], [4, 3], [3, 4]]
+
+
+class _NonBlockingEvaluationPolicy(ScriptedPolicy):
+    """Shared base for evaluation policies.
+
+    When the policy would STAY at a critical interaction tile (in front of the
+    pot, dispensers, or serving station), it instead moves toward the nearest
+    safe idle position so the cooperator's path stays unobstructed.
+    """
+
+    _BLOCKING_POSITIONS = _LARGE_ROOM_BLOCKING_POSITIONS
+    _IDLE_POSITIONS = _LARGE_ROOM_IDLE_POSITIONS
+
+    def _choose_action(self, obs_row: torch.Tensor, slot_idx: int) -> int:
+        action = super()._choose_action(obs_row, slot_idx)
+        if action != _STAY_IDX:
+            return action
+        layout = self._obs_layout(obs_row)
+        if layout is None:
+            return action
+        ego_position = self._round_delta(obs_row[layout["position"]])
+        if ego_position in self._BLOCKING_POSITIONS:
+            idle_delta = self._fixed_target_delta(ego_position, self._IDLE_POSITIONS)
+            wall_flags = obs_row[layout["walls"]]
+            return self._fallback_movement(delta=idle_delta, wall_flags=wall_flags)
+        return action
+
+
+class IngredientFillerPolicy(_NonBlockingEvaluationPolicy):
+    """Ingredient specialist: fetches onions and fills the pot only.
+
+    Ignores dish pickup, cooking start, and serving entirely.
+    STAYs once the pot is full, cooking, or ready.
+    """
+
+    @classmethod
+    def _greedy_decision(
+        cls,
+        *,
+        held_obj,
+        onion_delta,
+        dish_delta,
+        serving_delta,
+        empty_counter_delta,
+        orientation_idx,
+        wall_flags,
+        ready_pot,
+        cookable_pot,
+        start_cooking_pot,
+        ingredient_pot,
+    ) -> dict:
+        # Edge case: holding soup — serve it to free hands.
+        if held_obj == "soup":
+            return {
+                "action": cls._action_toward(serving_delta, orientation_idx, wall_flags, interact_when_adjacent=True),
+                "target_delta": serving_delta,
+                "target_kind": "serving",
+            }
+        if held_obj in {"onion", "tomato"}:
+            if ingredient_pot is not None:
+                return {
+                    "action": cls._action_toward(ingredient_pot["delta"], orientation_idx, wall_flags, interact_when_adjacent=True),
+                    "target_delta": ingredient_pot["delta"],
+                    "target_kind": "pot",
+                }
+            if empty_counter_delta != (0, 0):
+                return {
+                    "action": cls._action_toward(empty_counter_delta, orientation_idx, wall_flags, interact_when_adjacent=True),
+                    "target_delta": empty_counter_delta,
+                    "target_kind": "counter",
+                }
+            return {"action": _STAY_IDX, "target_delta": (0, 0), "target_kind": None}
+        if ingredient_pot is not None:
+            return {
+                "action": cls._action_toward(onion_delta, orientation_idx, wall_flags, interact_when_adjacent=True),
+                "target_delta": onion_delta,
+                "target_kind": "onion",
+            }
+        # Pot is full/cooking/ready — nothing left for this role.
+        return {"action": _STAY_IDX, "target_delta": (0, 0), "target_kind": None}
+
+
+class SoupServerPolicy(_NonBlockingEvaluationPolicy):
+    """Service specialist: fetches dish and delivers soup only.
+
+    Ignores onion fetching and cooking start entirely.
+    STAYs until the pot becomes cookable.
+    """
+
+    @classmethod
+    def _greedy_decision(
+        cls,
+        *,
+        held_obj,
+        onion_delta,
+        dish_delta,
+        serving_delta,
+        empty_counter_delta,
+        orientation_idx,
+        wall_flags,
+        ready_pot,
+        cookable_pot,
+        start_cooking_pot,
+        ingredient_pot,
+    ) -> dict:
+        if held_obj == "soup":
+            return {
+                "action": cls._action_toward(serving_delta, orientation_idx, wall_flags, interact_when_adjacent=True),
+                "target_delta": serving_delta,
+                "target_kind": "serving",
+            }
+        if held_obj == "dish":
+            target_pot = ready_pot or cookable_pot
+            if target_pot is None:
+                return {"action": _STAY_IDX, "target_delta": (0, 0), "target_kind": None}
+            return {
+                "action": cls._action_toward(
+                    target_pot["delta"], orientation_idx, wall_flags,
+                    interact_when_adjacent=ready_pot is not None,
+                ),
+                "target_delta": target_pot["delta"],
+                "target_kind": "pot",
+            }
+        if ready_pot is not None or cookable_pot is not None:
+            return {
+                "action": cls._action_toward(dish_delta, orientation_idx, wall_flags, interact_when_adjacent=True),
+                "target_delta": dish_delta,
+                "target_kind": "dish",
+            }
+        return {"action": _STAY_IDX, "target_delta": (0, 0), "target_kind": None}
+
+
+class CookingManagerPolicy(_NonBlockingEvaluationPolicy):
+    """Production manager: fills onions AND starts cooking; never touches dish or serving station.
+
+    STAYs once the pot is cooking or ready, waiting for the next production cycle.
+    """
+
+    @classmethod
+    def _greedy_decision(
+        cls,
+        *,
+        held_obj,
+        onion_delta,
+        dish_delta,
+        serving_delta,
+        empty_counter_delta,
+        orientation_idx,
+        wall_flags,
+        ready_pot,
+        cookable_pot,
+        start_cooking_pot,
+        ingredient_pot,
+    ) -> dict:
+        # Edge case: holding soup — serve it to free hands.
+        if held_obj == "soup":
+            return {
+                "action": cls._action_toward(serving_delta, orientation_idx, wall_flags, interact_when_adjacent=True),
+                "target_delta": serving_delta,
+                "target_kind": "serving",
+            }
+        if held_obj in {"onion", "tomato"}:
+            if ingredient_pot is not None:
+                return {
+                    "action": cls._action_toward(ingredient_pot["delta"], orientation_idx, wall_flags, interact_when_adjacent=True),
+                    "target_delta": ingredient_pot["delta"],
+                    "target_kind": "pot",
+                }
+            if empty_counter_delta != (0, 0):
+                return {
+                    "action": cls._action_toward(empty_counter_delta, orientation_idx, wall_flags, interact_when_adjacent=True),
+                    "target_delta": empty_counter_delta,
+                    "target_kind": "counter",
+                }
+            return {"action": _STAY_IDX, "target_delta": (0, 0), "target_kind": None}
+        if start_cooking_pot is not None:
+            return {
+                "action": cls._action_toward(start_cooking_pot["delta"], orientation_idx, wall_flags, interact_when_adjacent=True),
+                "target_delta": start_cooking_pot["delta"],
+                "target_kind": "pot",
+            }
+        if ingredient_pot is not None:
+            return {
+                "action": cls._action_toward(onion_delta, orientation_idx, wall_flags, interact_when_adjacent=True),
+                "target_delta": onion_delta,
+                "target_kind": "onion",
+            }
+        # Pot is cooking or ready — nothing left for this role.
+        return {"action": _STAY_IDX, "target_delta": (0, 0), "target_kind": None}
+
+
+class PatienceServerPolicy(_NonBlockingEvaluationPolicy):
+    """Conservative server: only fetches dish once the pot is fully ready (not just cooking).
+
+    While waiting for soup to finish, drifts toward the pot workspace, creating congestion
+    near the pot. The cooperator must learn to route around this parked partner.
+    """
+
+    @classmethod
+    def _greedy_decision(
+        cls,
+        *,
+        held_obj,
+        onion_delta,
+        dish_delta,
+        serving_delta,
+        empty_counter_delta,
+        orientation_idx,
+        wall_flags,
+        ready_pot,
+        cookable_pot,
+        start_cooking_pot,
+        ingredient_pot,
+    ) -> dict:
+        if held_obj == "soup":
+            return {
+                "action": cls._action_toward(serving_delta, orientation_idx, wall_flags, interact_when_adjacent=True),
+                "target_delta": serving_delta,
+                "target_kind": "serving",
+            }
+        if held_obj == "dish":
+            if ready_pot is not None:
+                return {
+                    "action": cls._action_toward(ready_pot["delta"], orientation_idx, wall_flags, interact_when_adjacent=True),
+                    "target_delta": ready_pot["delta"],
+                    "target_kind": "pot",
+                }
+            # Pot not ready yet — drift toward it without interacting.
+            if cookable_pot is not None:
+                return {
+                    "action": cls._action_toward(cookable_pot["delta"], orientation_idx, wall_flags, interact_when_adjacent=False),
+                    "target_delta": cookable_pot["delta"],
+                    "target_kind": "pot",
+                }
+            return {"action": _STAY_IDX, "target_delta": (0, 0), "target_kind": None}
+        # Only fetch dish when soup is fully ready.
+        if ready_pot is not None:
+            return {
+                "action": cls._action_toward(dish_delta, orientation_idx, wall_flags, interact_when_adjacent=True),
+                "target_delta": dish_delta,
+                "target_kind": "dish",
+            }
+        # Pot is cooking but not ready — drift toward it to wait nearby.
+        if cookable_pot is not None:
+            return {
+                "action": cls._action_toward(cookable_pot["delta"], orientation_idx, wall_flags, interact_when_adjacent=False),
+                "target_delta": cookable_pot["delta"],
+                "target_kind": "pot",
+            }
+        return {"action": _STAY_IDX, "target_delta": (0, 0), "target_kind": None}
+
+
+EVALUATION_BEHAVIOR_SET: list[dict] = [
+    {
+        "name": "ingredient_filler",
+        "description": "Ingredient specialist: fetches onions and fills the pot only; ignores dish pickup, cooking start, and serving entirely.",
+        "policy_cls": IngredientFillerPolicy,
+    },
+    {
+        "name": "soup_server",
+        "description": "Service specialist: fetches dish and delivers soup only; ignores onion fetching and cooking start entirely.",
+        "policy_cls": SoupServerPolicy,
+    },
+    {
+        "name": "cooking_manager",
+        "description": "Production manager: fills onions and starts cooking; never fetches a dish or visits the serving station.",
+        "policy_cls": CookingManagerPolicy,
+    },
+    {
+        "name": "patience_server",
+        "description": "Conservative server: only fetches a dish once the pot is fully ready; otherwise drifts to the pot workspace and waits, creating congestion near the pot.",
+        "policy_cls": PatienceServerPolicy,
+    },
+]
+
+
+def get_evaluation_scripted_policies() -> list[Callable]:
+    """Return scripted policy constructors for evaluation behavior sweeps."""
+    return [entry["policy_cls"] for entry in EVALUATION_BEHAVIOR_SET]
+
 
 # ---------------------------------------------------------------------------- #
 #                              Make env function                               #
@@ -1413,6 +1783,7 @@ def create_env(
     continuous_actions=False,
     seed=None,
     device="cpu",
+    randomize_start_pos=True,
     **kwargs,
 ):
     """Create an OvercookedBenchWrapper via OvercookedTask.
@@ -1423,6 +1794,7 @@ def create_env(
         num_envs: Passed to get_env_fun (ignored for non-vectorized env).
         seed: Optional random seed.
         device: Torch device string.
+        randomize_start_pos: If True, agent start positions are sampled randomly each episode.
 
     Returns:
         An OvercookedBenchWrapper instance.
@@ -1437,6 +1809,7 @@ def create_env(
         task.config["layout_name"] = layout_name
     if horizon is not None:
         task.config["horizon"] = horizon
+    task.config["randomize_start_pos"] = randomize_start_pos
     return task.get_env_fun(
         num_envs=num_envs,
         continuous_actions=continuous_actions,

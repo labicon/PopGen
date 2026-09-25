@@ -4,7 +4,15 @@ scripts/population/behavior_reward/results
 scripts/population/behavior_policy/results
 scripts/llm_agent/results
 scripts/cooperator/results
+scripts/cooperator/results_compare_vs
+scripts/cooperator/results_population_sweep
+scripts/cooperator/results_vs_methods
 scripts/self-play/results
+scripts/fcp/results
+scripts/mep/results
+scripts/comedi/results
+scripts/external_results
+final_results/
 
 # Stacraft 2 dependencies
 deps/StarCraftII

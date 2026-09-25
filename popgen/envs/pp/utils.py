@@ -1,13 +1,16 @@
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Callable
 
 import torch
 import yaml
 from benchmarl.environments import VmasTask
+from benchmarl.experiment.callback import Callback
 from pydantic import BaseModel, Field
 from torchrl.envs.libs.vmas import VmasEnv
 
 from . import semdiv_simple_tag as simple_tag_scenario
-from popgen.envs.vmas_common import default_trainable_group, rollout_vmas_env, train_vmas_env
+from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
 
 # ---------------------------------------------------------------------------- #
 #                              Environment Config                              #
@@ -112,10 +115,15 @@ REWARD_API_REFERENCE = """Reward function API (authoritative):
   - `entity.state.pos` and `entity.state.vel`: tensors with leading batch dim.
 - Return value:
   - Return a torch tensor of shape `(batch_dim,)` on world device.
+  - Keep the per-step reward within [-10, 10]. Values outside that range, and any NaN or inf, are clamped at runtime.
+  - Keep dense per-step terms small, around |r| <= 1, and reserve larger values for rare events (order 1-5). The clamp bounds a single step, not the episode: a dense term of 1 per step already accumulates to hundreds over an episode, and returns that large make advantages explode, which drives the policy to NaN and kills the run. Aim for an episode return in the low tens.
+  - Prefer normalized or tanh-shaped dense terms over raw distances or unbounded sums.
 - Note:
   - The trainable ego agent corresponds to the first world agent (`adversary_0`)."""
 
-REWARD_EXAMPLE = """Simple predator reward example: encourage chasing the nearest prey and add collision bonus.
+REWARD_EXAMPLE = """API reference only -- the tensor shapes and state access are the point, not what it rewards. It rewards generic task success; your reward must instead single out the given behavior description.
+
+Simple predator reward example: encourage chasing the nearest prey and add collision bonus.
 
 ```python
 import torch
@@ -168,7 +176,6 @@ class ActionType(BaseModel):
 def _load_task_cfg() -> dict:
     with open(RL_CFG_DIR / "simple_tag.yaml") as f:
         return yaml.safe_load(f)
-
 
 def _resolve_semdiv_config(overrides: dict, task_cfg: dict) -> dict:
     """Resolve SEMDIV scenario kwargs with sane defaults."""
@@ -232,18 +239,22 @@ def _set_ego_agent_render_color(env, color=EGO_AGENT_DARK_RED) -> None:
             return
 
 
-def train_fn(reward_fn: callable, output_dir: str, **kwargs):
+class _EgoColorCallback(Callback):
+    """BenchMARL callback that applies the ego agent render color on setup."""
+
+    def on_setup(self):
+        if hasattr(self.experiment, "test_env"):
+            _set_ego_agent_render_color(self.experiment.test_env)
+
+
+def train_fn(reward_fn: callable, output_dir: str, run_name: str | None = None, **kwargs):
     """Train the ego predator policy in VMAS simple_tag with scripted non-ego agents."""
-    scripted_policy = kwargs.pop("scripted_policy", None)
+    scripted_policy = kwargs.pop("scripted_policy", None) or kwargs.pop("teammate_policy", None)
 
     task_cfg = _load_task_cfg()
     semdiv_config = _resolve_semdiv_config(overrides=kwargs, task_cfg=task_cfg)
     for key in semdiv_config:
         kwargs.pop(key, None)
-
-    effective_task_cfg = dict(task_cfg)
-    effective_task_cfg.update(semdiv_config)
-    group_map = build_group_map(effective_task_cfg)
 
     if scripted_policy is None:
         scripted_policy = ScriptedPolicy(
@@ -252,10 +263,17 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
             num_good_agents=int(semdiv_config["num_good_agents"]),
             num_stags=int(semdiv_config["num_stags"]),
         )
-    elif isinstance(scripted_policy, torch.nn.Module):
+    if isinstance(scripted_policy, torch.nn.Module):
         scripted_policy = [scripted_policy]
     else:
         scripted_policy = list(scripted_policy)
+
+    effective_task_cfg = dict(task_cfg)
+    effective_task_cfg.update(semdiv_config)
+    group_map = build_group_map(effective_task_cfg)
+
+    extra_callbacks = list(kwargs.pop("callbacks", None) or [])
+    extra_callbacks.append(_EgoColorCallback())
 
     return train_vmas_env(
         reward_fn=reward_fn,
@@ -265,9 +283,10 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
         vmas_task=VmasTask.SIMPLE_TAG,
         rl_cfg_dir=RL_CFG_DIR,
         group_map=group_map,
-        trainable_group=default_trainable_group(group_map),
         teammate_policy=scripted_policy,
         scenario_kwargs=semdiv_config,
+        callbacks=extra_callbacks,
+        run_name=run_name,
         **kwargs,
     )
 
@@ -386,17 +405,46 @@ def serialize_state_fn(rollout_data: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------- #
 
 
+@contextmanager
+def get_cooperator_reload_context():
+    """Patch vmas.make_env to use semdiv scenario during cooperator checkpoint reload.
+
+    BenchMARL's Experiment.reload_from_file creates VmasEnv with scenario="simple_tag"
+    (string lookup → original scenario). The original scenario does not set _action_script
+    on prey agents, so TorchRL includes them in agent_names and check_marl_grouping fails
+    because they are absent from the group_map. This patch restores the semdiv scenario
+    that was active during training.
+    """
+    import vmas
+
+    _original = vmas.make_env
+
+    def _patched(scenario, *args, **kwargs):
+        if scenario == "simple_tag":
+            return _original(simple_tag_scenario.Scenario(), *args, **kwargs)
+        return _original(scenario, *args, **kwargs)
+
+    vmas.make_env = _patched
+    try:
+        yield
+    finally:
+        vmas.make_env = _original
+
+
 def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **kwargs):
     """Create VMAS simple_tag environment."""
     task_cfg = _load_task_cfg()
     semdiv_config = _resolve_semdiv_config(overrides=kwargs, task_cfg=task_cfg)
     num_good_agents = int(semdiv_config["num_good_agents"])
 
+    task_cfg = dict(task_cfg)
+    task_cfg["num_good_agents"] = num_good_agents
+
     task = VmasTask.SIMPLE_TAG.get_from_yaml(path=str(RL_CFG_DIR / "simple_tag.yaml"))
     config = dict(task.config)
     config["num_good_agents"] = num_good_agents
+    config["group_map"] = build_group_map(task_cfg)
     config.update(semdiv_config)
-    config["group_map"] = build_group_map(config)
 
     env = VmasEnv(
         scenario=simple_tag_scenario.Scenario(),
@@ -427,8 +475,8 @@ def _safe_normalize(vec: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     return vec / norm
 
 
-class ScriptedPolicy(torch.nn.Module):
-    """Scripted predator partner policy for simple_tag."""
+class _PredatorScriptedPolicyBase(torch.nn.Module):
+    """Shared utilities for scripted predator partner policies in simple_tag."""
 
     def __init__(self, env=None, num_landmarks=None, num_adversaries=None, num_good_agents=None, num_stags=None):
         super().__init__()
@@ -445,69 +493,274 @@ class ScriptedPolicy(torch.nn.Module):
         self.num_stags = max(0, min(num_stags, self.num_good_agents))
         self.dummy_param = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
-        if not isinstance(obs_tensor, torch.Tensor):
-            raise TypeError(f"PP ScriptedPolicy expected torch.Tensor observation, got {type(obs_tensor).__name__}.")
-        if obs_tensor.dim() != 2:
-            raise ValueError(
-                f"PP ScriptedPolicy expects observation tensor with shape (batch, obs_dim), got {tuple(obs_tensor.shape)}."
-            )
+    def _extract_policy_features(self, obs: torch.Tensor) -> tuple[dict[str, torch.Tensor] | None, torch.Tensor]:
+        if not isinstance(obs, torch.Tensor):
+            raise TypeError(f"PP ScriptedPolicy expected torch.Tensor observation, got {type(obs).__name__}.")
+        if obs.dim() != 2:
+            raise ValueError(f"PP ScriptedPolicy expects observation tensor with shape (batch, obs_dim), got {tuple(obs.shape)}.")
 
-        batch_size = obs_tensor.shape[0]
-        obs_dim = obs_tensor.shape[-1]
+        batch_size = obs.shape[0]
+        obs_dim = obs.shape[-1]
+        teammate_count = max(0, self.num_adversaries - 1)
+        n_other_pos = teammate_count + self.num_good_agents
 
-        start = 4 + 2 * self.num_landmarks
-        n_other_pos = (self.num_adversaries - 1) + self.num_good_agents
-        end = start + 2 * n_other_pos
+        action = obs.new_zeros(batch_size, 2, dtype=torch.float32)
+        if n_other_pos <= 0 or self.num_good_agents <= 0:
+            return None, action
 
-        action = torch.zeros(batch_size, 2, device=obs_tensor.device, dtype=torch.float32)
-        if obs_dim < end or n_other_pos <= 0 or self.num_good_agents <= 0:
-            return action
+        landmark_start = 4
+        landmark_end = landmark_start + 2 * self.num_landmarks
+        other_pos_start = landmark_end
+        other_pos_end = other_pos_start + 2 * n_other_pos
+        prey_vel_start = other_pos_end
+        prey_vel_end = prey_vel_start + 2 * self.num_good_agents
 
-        landmark_flat = obs_tensor[:, 4:start]
+        if obs_dim < other_pos_end:
+            return None, action
+
+        landmark_flat = obs[:, landmark_start:landmark_end]
         landmarks = (
             landmark_flat.reshape(batch_size, self.num_landmarks, 2)
-            if landmark_flat.shape[-1] >= 2
-            else None
+            if self.num_landmarks > 0
+            else obs.new_zeros(batch_size, 0, 2)
         )
-        other_pos = obs_tensor[:, start:end].reshape(batch_size, n_other_pos, 2)
+        other_pos = obs[:, other_pos_start:other_pos_end].reshape(batch_size, n_other_pos, 2)
 
-        teammate_count = max(0, self.num_adversaries - 1)
-        teammate_pos = other_pos[:, :teammate_count] if teammate_count > 0 else None
+        teammate_pos = (
+            other_pos[:, :teammate_count]
+            if teammate_count > 0
+            else obs.new_zeros(batch_size, 0, 2)
+        )
         prey_pos = other_pos[:, teammate_count:]
+        prey_vel = (
+            obs[:, prey_vel_start:prey_vel_end].reshape(batch_size, self.num_good_agents, 2)
+            if obs_dim >= prey_vel_end
+            else obs.new_zeros(batch_size, self.num_good_agents, 2)
+        )
 
         prey_dist = torch.linalg.vector_norm(prey_pos, dim=-1)
-        score = prey_dist.clone()
+        teammate_prey_dist = None
+        if teammate_count > 0:
+            teammate_to_prey = prey_pos.unsqueeze(1) - teammate_pos.unsqueeze(2)
+            teammate_prey_dist = torch.linalg.vector_norm(teammate_to_prey, dim=-1).min(dim=1).values
 
-        if teammate_pos is not None and self.num_stags > 0:
-            tm = teammate_pos[:, 0, :].unsqueeze(1)
-            stag_pos = prey_pos[:, : self.num_stags, :]
+        nearest_teammate = None
+        if teammate_count > 0:
+            teammate_dist = torch.linalg.vector_norm(teammate_pos, dim=-1)
+            nearest_teammate = teammate_pos[
+                torch.arange(batch_size, device=obs.device),
+                teammate_dist.argmin(dim=-1),
+            ]
+
+        return {
+            "landmarks": landmarks,
+            "teammate_pos": teammate_pos,
+            "nearest_teammate": nearest_teammate,
+            "prey_pos": prey_pos,
+            "prey_vel": prey_vel,
+            "prey_dist": prey_dist,
+            "teammate_prey_dist": teammate_prey_dist,
+        }, action
+
+    def _nearest_landmark_direction(self, features: dict[str, torch.Tensor]) -> torch.Tensor:
+        landmarks = features["landmarks"]
+        batch_size = landmarks.shape[0]
+        if landmarks.shape[1] == 0:
+            return landmarks.new_zeros(batch_size, 2)
+        landmark_dist = torch.linalg.vector_norm(landmarks, dim=-1)
+        landmark_idx = landmark_dist.argmin(dim=-1)
+        return landmarks[torch.arange(batch_size, device=landmarks.device), landmark_idx]
+
+    def _target_direction(
+        self,
+        features: dict[str, torch.Tensor],
+        target_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        prey_pos = features["prey_pos"]
+        return prey_pos[torch.arange(prey_pos.shape[0], device=prey_pos.device), target_idx]
+
+
+class ClosestPreyPolicy(_PredatorScriptedPolicyBase):
+    """Greedy partner: always chase the currently closest prey."""
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        features, action = self._extract_policy_features(obs)
+        if features is None:
+            return action
+
+        prey_dist = features["prey_dist"]
+        target_idx = prey_dist.argmin(dim=-1)
+        target = self._target_direction(features, target_idx)
+        return _safe_normalize(target).clamp(-1.0, 1.0)
+
+
+class TeammateBiasedPreyPolicy(_PredatorScriptedPolicyBase):
+    """Supportive partner: prioritize prey that are easier for the teammate to pressure."""
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        features, action = self._extract_policy_features(obs)
+        if features is None:
+            return action
+
+        prey_dist = features["prey_dist"]
+        teammate_prey_dist = features["teammate_prey_dist"]
+        if teammate_prey_dist is None:
+            target_idx = prey_dist.argmin(dim=-1)
+        else:
+            score = teammate_prey_dist + 0.25 * prey_dist
+            target_idx = score.argmin(dim=-1)
+
+        target = self._target_direction(features, target_idx)
+        return _safe_normalize(target).clamp(-1.0, 1.0)
+
+
+class CoordinatedStagPressurePolicy(_PredatorScriptedPolicyBase):
+    """Coordination-aware partner that avoids solo stag attempts and uses landmarks when far."""
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        features, action = self._extract_policy_features(obs)
+        if features is None:
+            return action
+
+        prey_dist = features["prey_dist"]
+        score = prey_dist.clone()
+        teammate_prey_dist = features["teammate_prey_dist"]
+
+        if teammate_prey_dist is not None and self.num_stags > 0:
             stag_dist = prey_dist[:, : self.num_stags]
-            teammate_to_stag_dist = torch.linalg.vector_norm(stag_pos - tm, dim=-1)
+            teammate_to_stag_dist = teammate_prey_dist[:, : self.num_stags]
             lone_contact = (stag_dist < 0.18) & (teammate_to_stag_dist > 0.25)
             score[:, : self.num_stags] += 0.35 * lone_contact.to(score.dtype)
             score[:, : self.num_stags] += 0.12 * torch.relu(teammate_to_stag_dist - 0.2)
 
         target_idx = score.argmin(dim=-1)
-        target = prey_pos[torch.arange(batch_size, device=obs_tensor.device), target_idx]
+        target = self._target_direction(features, target_idx)
         action = _safe_normalize(target)
 
-        if teammate_pos is not None:
-            # Keep mild spatial separation from teammate to avoid path collapse.
-            sep = -_safe_normalize(teammate_pos[:, 0, :])
+        nearest_teammate = features["nearest_teammate"]
+        if nearest_teammate is not None:
+            sep = -_safe_normalize(nearest_teammate)
             action = action + 0.2 * sep
 
-        if landmarks is not None:
-            # Patrol landmarks when no nearby prey is visible.
+        landmarks = features["landmarks"]
+        if landmarks.shape[1] > 0:
             min_prey_dist = prey_dist.min(dim=-1).values
-            lm_idx = torch.linalg.vector_norm(landmarks, dim=-1).argmin(dim=-1)
-            lm_target = landmarks[torch.arange(batch_size, device=obs_tensor.device), lm_idx]
+            lm_target = self._nearest_landmark_direction(features)
             lm_action = _safe_normalize(lm_target)
             far_mask = (min_prey_dist > 0.8).unsqueeze(-1)
             action = torch.where(far_mask, 0.6 * action + 0.4 * lm_action, action)
 
-        action = _safe_normalize(action).clamp(-1.0, 1.0)
-        return action
+        return _safe_normalize(action).clamp(-1.0, 1.0)
+
+
+class VelocityInterceptPolicy(_PredatorScriptedPolicyBase):
+    """Velocity-aware partner: lead the prey instead of chasing current position only."""
+
+    def __init__(self, env=None, num_landmarks=None, num_adversaries=None, num_good_agents=None, num_stags=None, lead_scale: float = 0.5):
+        super().__init__(
+            env=env,
+            num_landmarks=num_landmarks,
+            num_adversaries=num_adversaries,
+            num_good_agents=num_good_agents,
+            num_stags=num_stags,
+        )
+        self.lead_scale = float(lead_scale)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        features, action = self._extract_policy_features(obs)
+        if features is None:
+            return action
+
+        prey_pos = features["prey_pos"]
+        prey_vel = features["prey_vel"]
+        intercept_pos = prey_pos + self.lead_scale * prey_vel
+        intercept_dist = torch.linalg.vector_norm(intercept_pos, dim=-1)
+        target_idx = intercept_dist.argmin(dim=-1)
+        target = intercept_pos[torch.arange(prey_pos.shape[0], device=prey_pos.device), target_idx]
+        action = _safe_normalize(target)
+
+        landmarks = features["landmarks"]
+        if landmarks.shape[1] > 0:
+            lm_action = _safe_normalize(self._nearest_landmark_direction(features))
+            far_mask = (intercept_dist.min(dim=-1).values > 0.9).unsqueeze(-1)
+            action = torch.where(far_mask, 0.7 * action + 0.3 * lm_action, action)
+
+        return _safe_normalize(action).clamp(-1.0, 1.0)
+
+
+class RabbitOnlyPolicy(_PredatorScriptedPolicyBase):
+    """Rabbit-specialist partner: ignores stags and always chases the nearest rabbit."""
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        features, action = self._extract_policy_features(obs)
+        if features is None:
+            return action
+
+        prey_dist = features["prey_dist"]
+        num_stags = self.num_stags
+        num_rabbits = self.num_good_agents - num_stags
+
+        if num_rabbits > 0:
+            rabbit_dist = prey_dist[:, num_stags:]
+            target_idx = num_stags + rabbit_dist.argmin(dim=-1)
+        else:
+            target_idx = prey_dist.argmin(dim=-1)
+
+        target = self._target_direction(features, target_idx)
+        return _safe_normalize(target).clamp(-1.0, 1.0)
+
+
+class StagOnlyPolicy(_PredatorScriptedPolicyBase):
+    """Stag-specialist partner: insists on pressuring stags even when rabbits are easier."""
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        features, action = self._extract_policy_features(obs)
+        if features is None:
+            return action
+
+        prey_dist = features["prey_dist"]
+        num_stags = self.num_stags
+
+        if num_stags > 0:
+            stag_dist = prey_dist[:, :num_stags]
+            target_idx = stag_dist.argmin(dim=-1)
+        else:
+            target_idx = prey_dist.argmin(dim=-1)
+
+        target = self._target_direction(features, target_idx)
+        return _safe_normalize(target).clamp(-1.0, 1.0)
+
+
+# Backward compatibility for existing codepaths expecting env_module.ScriptedPolicy.
+ScriptedPolicy = CoordinatedStagPressurePolicy
+
+
+EVALUATION_BEHAVIOR_SET: list[dict[str, Any]] = [
+    {
+        "name": "closest_prey_greedy",
+        "description": "Greedily chases the nearest prey each step.",
+        "policy_cls": ClosestPreyPolicy,
+    },
+    {
+        "name": "teammate_biased_prey",
+        "description": "Targets prey that are easier for the teammate to pressure too.",
+        "policy_cls": TeammateBiasedPreyPolicy,
+    },
+    {
+        "name": "rabbit_only",
+        "description": "Ignores stags and always chases the nearest rabbit.",
+        "policy_cls": RabbitOnlyPolicy,
+    },
+    {
+        "name": "stag_only",
+        "description": "Insists on pressuring stags even when rabbits are easier.",
+        "policy_cls": StagOnlyPolicy,
+    },
+]
+
+def get_evaluation_scripted_policies() -> list[Callable[[Any], torch.nn.Module]]:
+    """Return scripted policy factories for evaluation behavior sweeps."""
+    return [entry["policy_cls"] for entry in EVALUATION_BEHAVIOR_SET]
 
 
 def _resolve_scripted_counts(

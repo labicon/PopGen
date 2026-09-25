@@ -1,0 +1,18 @@
+defaults:
+  - ippo_config
+  - _self_
+
+
+share_param_critic: False
+clip_epsilon: 0.2
+# 0.05 rather than 0.005. BenchMARL's IPPO sets normalize_advantage=False, and with
+# 0.005 the ego never explored far enough to find the ~8-step fetch/place/cook chain
+# that earns the first reward: every partner that does not hand it shaped reward sat
+# at the partner-only floor (9 = three onion placements) for the whole run.
+entropy_coef: 0.05
+critic_coef: 1.0
+loss_critic_type: "l2"
+lmbda: 0.9
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+minibatch_advantage: False

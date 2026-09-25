@@ -1,0 +1,20 @@
+population:
+  env: point_mass_rendezvous
+  output_dir: ./results/${population.env}
+
+cooperator:
+  results_dir: null
+  output_dir: ${population.output_dir}/cooperator
+  run_name: ${population.env}-cooperator-${now:%Y-%m-%d_%H-%M-%S}
+  restart_from: null
+
+  # Forwarded as kwargs to env_module.train_fn(...).
+  # Do not set `run_name` here: it is computed by the training pipeline.
+  train_kwargs: {}
+
+hydra:
+  run:
+    dir: ${cooperator.output_dir}/${cooperator.run_name}
+  sweep:
+    dir: ${cooperator.output_dir}
+    subdir: ${cooperator.run_name}/${hydra.job.num}

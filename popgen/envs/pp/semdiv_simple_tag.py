@@ -83,7 +83,7 @@ class Scenario(BaseSimpleTagScenario):
 
         if num_good_agents is None:
             if num_rabbits is None:
-                num_rabbits = 3
+                num_rabbits = 0
             num_good_agents = num_stags + int(num_rabbits)
         else:
             num_good_agents = int(num_good_agents)
@@ -105,7 +105,7 @@ class Scenario(BaseSimpleTagScenario):
         self.num_rabbits = num_rabbits
         self.stag_capture_requirement = int(kwargs.pop("stag_capture_requirement", 2))
         self.rabbit_capture_requirement = int(kwargs.pop("rabbit_capture_requirement", 1))
-        self.stag_capture_reward = float(kwargs.pop("stag_capture_reward", 1.0))
+        self.stag_capture_reward = float(kwargs.pop("stag_capture_reward", 2.0))
         self.rabbit_capture_reward = float(kwargs.pop("rabbit_capture_reward", 0.5))
         self.stag_caught_penalty = float(kwargs.pop("stag_caught_penalty", 1.0))
         self.rabbit_caught_penalty = float(kwargs.pop("rabbit_caught_penalty", 0.5))
@@ -180,6 +180,25 @@ class Scenario(BaseSimpleTagScenario):
             self._rabbit_captures[env_index] = 0
             self._done[env_index] = False
             self._team_attempt_penalty[env_index] = 0.0
+        for prey in self.good_agents():
+            if prey._render is not None:
+                if env_index is None:
+                    prey.reset_render()
+                else:
+                    prey._render[env_index] = True
+
+    def post_step(self):
+        if not hasattr(self, "_prey_caught"):
+            return
+        for j, prey in enumerate(self.good_agents()):
+            caught = self._prey_caught[:, j]
+            if prey._render is None:
+                prey.reset_render()
+            prey._render[:] = ~caught
+            if caught.any():
+                prey.state.pos[caught, 0] = self.bound * 10.0
+                prey.state.pos[caught, 1] = self.bound * 10.0
+                prey.state.vel[caught] = 0.0
 
     def _compute_capture_mask(self) -> torch.Tensor:
         prey_agents = self.good_agents()
@@ -236,6 +255,9 @@ class Scenario(BaseSimpleTagScenario):
                 despawn[:, 1] = self.bound * 10.0
                 prey.state.pos[cap] = despawn[cap]
                 prey.state.vel[cap] = 0.0
+                if prey._render is None:
+                    prey.reset_render()
+                prey._render[cap] = False
 
     def _compute_solo_stag_attempts(self) -> torch.Tensor:
         """Count per-env solo stag attempts (exactly one predator colliding with a stag)."""

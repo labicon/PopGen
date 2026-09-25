@@ -89,16 +89,22 @@ class Viewer(object):
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
         script_dir = os.path.dirname(__file__)
+        icons_dir = os.path.join(script_dir, "icons")
 
-        pyglet.resource.path = [os.path.join(script_dir, "icons")]
-        pyglet.resource.reindex()
-
-        self.img_apple = pyglet.resource.image("apple.png")
-        self.img_agent = pyglet.resource.image("agent.png")
-        self.img_agent_ego = pyglet.resource.image("agent_blue.png")
+        # Load fresh image data per viewer to avoid reusing textures bound to a
+        # previous window/context after that viewer is closed.
+        self.img_apple = pyglet.image.load(os.path.join(icons_dir, "apple.png"))
+        self.img_agent = pyglet.image.load(os.path.join(icons_dir, "agent.png"))
+        self.img_agent_ego = pyglet.image.load(os.path.join(icons_dir, "agent_blue.png"))
 
     def close(self):
-        self.window.close()
+        if self.window is not None:
+            self.window.close()
+            self.window = None
+        self.img_apple = None
+        self.img_agent = None
+        self.img_agent_ego = None
+        self.isopen = False
 
     def window_closed_by_user(self):
         self.isopen = False

@@ -1,0 +1,5 @@
+_target_: popgen.population.generation.diversity.VerbalizedSamplingStrategy
+model_config:
+  model_name: openrouter/google/gemini-3-flash-preview
+probability_tuning: null
+do_cot: false

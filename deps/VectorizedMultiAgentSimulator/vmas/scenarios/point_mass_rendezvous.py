@@ -32,6 +32,12 @@ class Scenario(BaseScenario):
         self.landmark_radius = kwargs.pop("landmark_radius", 0.05)
         self.agent_radius = kwargs.pop("agent_radius", 0.05)
         self.shared_reward = kwargs.pop("shared_reward", True)
+        self.shared_goal_shaping = kwargs.pop("shared_goal_shaping", False)
+        self.shared_goal_shaping_scale = kwargs.pop("shared_goal_shaping_scale", 1.0)
+        self.shared_goal_shaping_gamma = kwargs.pop("shared_goal_shaping_gamma", 0.99)
+        self.shared_goal_shaping_temperature = kwargs.pop("shared_goal_shaping_temperature", 0.25)
+        self.shared_goal_shaping_pair_weight = kwargs.pop("shared_goal_shaping_pair_weight", 0.05)
+        self._prev_potential = None
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
@@ -110,11 +116,17 @@ class Scenario(BaseScenario):
                 )
                 landmark.set_pos(pos, batch_index=env_index)
 
-    def reward(self, agent: Agent):
-        self.rew = torch.zeros(self.world.batch_dim, device=self.world.device)
+        if self.shared_goal_shaping:
+            current_potential = self._compute_shaping_potential()
+            if env_index is None or self._prev_potential is None:
+                self._prev_potential = current_potential.clone()
+            else:
+                self._prev_potential[env_index] = current_potential[env_index]
+
+    def _compute_sparse_reward(self):
+        reward = torch.zeros(self.world.batch_dim, device=self.world.device)
 
         for landmark in self.world.landmarks:
-            # Check if all agents are on this landmark
             agents_on_landmark = torch.stack(
                 [
                     torch.linalg.vector_norm(
@@ -126,7 +138,69 @@ class Scenario(BaseScenario):
                 dim=1,
             ).all(dim=1)
 
-            self.rew[agents_on_landmark] += 1.0
+            reward[agents_on_landmark] += 1.0
+
+        return reward
+
+    def _compute_goal_potential(self):
+        landmark_costs = []
+        for landmark in self.world.landmarks:
+            agent_distances = torch.stack(
+                [
+                    torch.linalg.vector_norm(a.state.pos - landmark.state.pos, dim=1)
+                    for a in self.world.agents
+                ],
+                dim=1,
+            )
+            landmark_costs.append(agent_distances.max(dim=1).values)
+
+        landmark_costs = torch.stack(landmark_costs, dim=1)
+        temperature = float(self.shared_goal_shaping_temperature)
+        if temperature <= 0:
+            best_joint_cost = landmark_costs.min(dim=1).values
+        else:
+            best_joint_cost = -temperature * torch.logsumexp(
+                -landmark_costs / temperature,
+                dim=1,
+            )
+        return -best_joint_cost
+
+    def _compute_pairwise_potential(self):
+        pairwise_distances = []
+        for i, agent_a in enumerate(self.world.agents):
+            for j, agent_b in enumerate(self.world.agents):
+                if j <= i:
+                    continue
+                pairwise_distances.append(
+                    torch.linalg.vector_norm(agent_a.state.pos - agent_b.state.pos, dim=1)
+                )
+
+        if not pairwise_distances:
+            return torch.zeros(self.world.batch_dim, device=self.world.device)
+
+        mean_pairwise_distance = torch.stack(pairwise_distances, dim=1).mean(dim=1)
+        return -mean_pairwise_distance
+
+    def _compute_shaping_potential(self):
+        potential = self._compute_goal_potential()
+        pair_weight = float(self.shared_goal_shaping_pair_weight)
+        if pair_weight != 0:
+            potential = potential + pair_weight * self._compute_pairwise_potential()
+        return potential
+
+    def reward(self, agent: Agent):
+        is_first = agent == self.world.agents[0]
+        if is_first:
+            self.rew = self._compute_sparse_reward()
+            if self.shared_goal_shaping:
+                current_potential = self._compute_shaping_potential()
+                if self._prev_potential is None:
+                    self._prev_potential = current_potential.clone()
+                shaping_reward = self.shared_goal_shaping_scale * (
+                    self.shared_goal_shaping_gamma * current_potential - self._prev_potential
+                )
+                self.rew = self.rew + shaping_reward
+                self._prev_potential = current_potential.clone()
 
         return self.rew
 

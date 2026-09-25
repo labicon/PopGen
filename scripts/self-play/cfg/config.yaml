@@ -1,15 +1,23 @@
 env: point_mass_rendezvous
 
 self_play:
-  # Seeds to train; if null, use range(n_seeds)
+  # Explicit training seeds for each member. If null, seeds are sampled from
+  # population_seed when set; otherwise use range(n_seeds).
   seeds: null
   n_seeds: 4
+  population_seed: null
 
   # Number of parallel workers (set >1 only with multiple GPUs)
-  n_workers: 4
+  n_workers: 2
 
   output_dir: ./results/${env}/self_play
   run_name: ${now:%Y-%m-%d_%H-%M-%S}
+
+  # Optional path to an existing self-play run directory to resume from.
+  # When set, training resumes from the latest checkpoint in each seed_*/
+  # subdirectory. Seeds without checkpoints are trained from scratch.
+  # The run directory is reused as-is; run_name and output_dir are ignored.
+  restart_from: null
 
   # Forwarded as kwargs to self-play MAPPO training
   train_kwargs: {}
@@ -17,6 +25,10 @@ self_play:
 cooperator:
   # For standalone cooperator runs; if null, defaults to current self_play run.
   self_play_results_dir: null
+  # Optional checkpoint file, experiment dir, or cooperator run dir to resume from.
+  # When set, cooperator training restarts from the resolved checkpoint and writes
+  # back into that existing cooperator run directory.
+  restart_from: null
   output_subdir: cooperator
   run_name: ${now:%Y-%m-%d_%H-%M-%S}
 
@@ -28,11 +40,15 @@ evaluation:
   # For standalone evaluation; if null, defaults to cooperator/self_play fallback.
   run_dir: null
   n_eval_rollouts: 50
+  num_workers: 8
   seed: null
 
 pipeline:
+  # Set to false to skip self-play and train cooperator against an existing population.
+  # Requires cooperator.self_play_results_dir to point at a directory with seed_*/ subdirs.
+  run_self_play: true
   # Full pipeline only: run evaluation after cooperator training.
-  run_evaluation: false
+  run_evaluation: true
 
 hydra:
   run:

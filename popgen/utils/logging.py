@@ -25,7 +25,20 @@ def write_code_file(file_path: str, generated_item: Any) -> None:
 
 
 def write_model_output_record(output_dir: str, generated_item: Any, extra_record: dict[str, Any] | None = None) -> None:
-    record = {"output_dir": output_dir}
+    """Append one generation record to ``<output_dir>/model_outputs.jsonl``.
+
+    Appends rather than overwrites: retries rewrite ``reward.py`` / ``policy.py``
+    in place, so this file is the only surviving record of what earlier retries
+    generated and why they failed.
+    """
+    path = os.path.join(output_dir, "model_outputs.jsonl")
+    try:
+        with open(path) as f:
+            retry_idx = sum(1 for line in f if line.strip())
+    except OSError:
+        retry_idx = 0
+
+    record = {"output_dir": output_dir, "retry_idx": retry_idx}
     if extra_record:
         record.update(extra_record)
     elif generated_item is None:
@@ -33,7 +46,7 @@ def write_model_output_record(output_dir: str, generated_item: Any, extra_record
     else:
         record.update(generated_item.model_dump() if not isinstance(generated_item, Exception) else {"error": str(generated_item)})
 
-    with open(os.path.join(output_dir, "model_outputs.jsonl"), "w") as f:
+    with open(path, "a") as f:
         f.write(json.dumps(record) + "\n")
 
 

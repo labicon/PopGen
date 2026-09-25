@@ -2,8 +2,9 @@ defaults:
   - vmas_simple_tag_config
   - _self_
 
-max_steps: 50
+max_steps: 100
 num_good_agents: 5
+# num_stags: 5
 num_adversaries: 2
 ai_good_agents: true
 num_landmarks: 2

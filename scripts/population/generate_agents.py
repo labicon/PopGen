@@ -9,7 +9,7 @@ from typing import Any
 import hydra
 from dotenv import load_dotenv
 from omegaconf import DictConfig, OmegaConf
-from pqdm.threads import pqdm
+from pqdm.processes import pqdm
 
 from popgen.population import (
     Behavior,
@@ -20,7 +20,13 @@ from popgen.population import (
     RewardFnGenerator,
     RLAgentGenerationPipeline,
 )
+from popgen.population.pipeline import (
+    DEFAULT_MIN_EXPENSIVE_TRAINING_SECONDS,
+    DEFAULT_TRAINING_RETRIES,
+)
 from popgen.utils.config import LitellmConfig
+from popgen.utils.rewards import DEFAULT_REWARD_CLAMP
+from popgen.utils.worker_logging import configure_worker_logging
 
 OmegaConf.register_new_resolver("basename", lambda s: s.split("/")[-1])
 OmegaConf.register_new_resolver("classname", lambda s: s.split(".")[-1])
@@ -36,11 +42,16 @@ logging.basicConfig(
 )
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 def _timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+
+
+def _optional_float(value: Any) -> float | None:
+    """Coerce a config value to float, preserving an explicit null."""
+    return None if value is None else float(value)
 
 
 def _build_job(
@@ -86,6 +97,8 @@ def _build_job(
 
 def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
     os.makedirs(job["output_dir"], exist_ok=True)
+    # Workers are spawned, so they inherit none of the parent's log handlers.
+    configure_worker_logging(job["output_dir"])
 
     try:
         behavior = Behavior.model_validate(job["behavior"])
@@ -113,6 +126,7 @@ def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
                 env_module=env,
                 output_dir=job["output_dir"],
                 advisor=advisor,
+                reward_clamp=_optional_float(generation_cfg.get("reward_clamp", DEFAULT_REWARD_CLAMP)),
             )
             generation_kwargs = {}
         elif generation_type == "policy_code":
@@ -136,7 +150,16 @@ def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
                 output_dir=job["output_dir"],
                 advisor=advisor,
             )
-            reserved_keys = {"type", "evaluate", "model_name", "max_evaluation_attempts", "n_generation_retries"}
+            reserved_keys = {
+                "type",
+                "evaluate",
+                "model_name",
+                "max_evaluation_attempts",
+                "n_generation_retries",
+                "n_training_retries",
+                "min_expensive_training_seconds",
+                "reward_clamp",
+            }
             generation_kwargs = {k: v for k, v in generation_cfg.items() if k not in reserved_keys}
         else:
             raise ValueError(f"Unknown generation type: {generation_type}")
@@ -147,6 +170,10 @@ def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
             n_rollouts=int(evaluation_cfg["n_eval_rollouts"]),
             adherence_threshold=float(evaluation_cfg["adherence_threshold"]),
             n_generation_retries=int(generation_cfg.get("n_generation_retries", 3)),
+            n_training_retries=int(generation_cfg.get("n_training_retries", DEFAULT_TRAINING_RETRIES)),
+            min_expensive_training_seconds=float(
+                generation_cfg.get("min_expensive_training_seconds", DEFAULT_MIN_EXPENSIVE_TRAINING_SECONDS)
+            ),
             num_workers=int(job["pipeline_workers"]),
             generation_kwargs=generation_kwargs,
             evaluation_kwargs={"seed": int(job["seed"])},
@@ -165,6 +192,9 @@ def _run_single_job(job: dict[str, Any]) -> dict[str, Any]:
             "error": None,
         }
     except Exception as e:
+        # Also log it: the result dict only reaches metadata/<ts>/summary.json,
+        # which left worker crashes invisible in the run's logs.
+        logging.exception(f"[behavior_{job['behavior_idx']}] run failed: {e}")
         result = {
             "behavior_idx": job["behavior_idx"],
             "trial_idx": job["trial_idx"],

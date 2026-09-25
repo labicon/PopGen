@@ -1,11 +1,8 @@
 import json
 import re
 from collections.abc import Callable
-from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
-
-T = TypeVar("T", bound=BaseModel)
 
 
 class LLMResponseParseError(ValueError):
@@ -27,7 +24,7 @@ def _extract_text_content(content) -> str:
     return "" if content is None else str(content)
 
 
-def parse_llm_response(
+def parse_llm_response[T: BaseModel](
     response,
     model_class: type[T],
     postprocess_fn: Callable[[T], dict] | None = None,

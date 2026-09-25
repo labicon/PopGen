@@ -25,9 +25,31 @@ formation_noise: 0.2  # Noise on formation positions
 
 # Ai config
 n_traj_points: 0  # Number of spline trajectory points to plot for heuristic (ai) agents
-ai_strength: 0.5  # The speed of the ai 0<=x<=1
-ai_decision_strength: 0.5  # The decision strength of the ai 0<=x<=1
-ai_precision_strength: 0.5  # The precision strength of the ai 0<=x<=1
+# 0.4 chosen by sweeping a payoff matrix over hand-coded reference role policies
+# (attack / mark / cover / idle) in the two blue slots: it is the strength at which
+# splitting roles (one attacks, one marks) is the argmax of the reference payoff
+# matrix AND the two assignments are symmetric (attack/mark 52.25 vs mark/attack
+# 48.67, 1.5 sigma).  At 0.3 the assignments are asymmetric (2.9 sigma), which
+# would give away a "correct" convention; above 0.5 scoring becomes too rare to
+# learn (6-8% of episodes at 0.9).
+ai_strength: 0.4  # The speed of the ai 0<=x<=1
+ai_decision_strength: 0.4  # The decision strength of the ai 0<=x<=1
+ai_precision_strength: 0.4  # The precision strength of the ai 0<=x<=1
+
+# Optional opponent-strength randomization: when set to a [low, high] range, the
+# corresponding ai_*_strength above is ignored and a fresh value is sampled from
+# the range on every episode reset (shared across all parallel envs until the
+# next reset). Leave commented out to keep the fixed ai_*_strength values above.
+# Kept off deliberately: the payoff structure is only symmetric near 0.4-0.5, so
+# sampling [0.1, 0.5] would mix in asymmetric episodes.
+# ai_strength_range: [0.1, 0.5]
+# ai_decision_strength_range: [0.1, 0.5]
+# ai_precision_strength_range: [0.1, 0.5]
+
+# Opponent standoff: a red agent applies zero force while a blue agent is within
+# this distance of it, so marking neutralises the opponent instead of both agents
+# barging into the same contact zone.  0.0 restores stock VMAS behaviour.
+red_standoff_radius: 0.15
 
 # Task sizes
 agent_size: 0.025
@@ -53,12 +75,22 @@ max_speed: 0.18
 ball_max_speed: 0.3
 
 # Rewards
-dense_reward: False
-pos_shaping_factor_ball_goal: 10.0  # Reward for moving the ball towards the opponents' goal. This can be annealed in a curriculum.
-pos_shaping_factor_agent_ball: 0.1  # Reward for moving the closest agent to the ball in a team closer to it.
-# This reward does not trigger if the agent is less than distance_to_ball_trigger from the ball or the ball is moving
+dense_reward: True
+# 20.0 (was 10.0): heavier ball->goal shaping makes partial attacking progress pay,
+# so marking is still the best response to a weak (LLM-generated) attacking partner
+# that never actually scores.  Nearly doubles that margin (+4.26 -> +7.06).
+pos_shaping_factor_ball_goal: 20.0
+# Deliberately NOT raised: this term pays for proximity to the ball, so raising it
+# rewards both agents crowding it, which pushes toward both-attack and against role
+# division.  It is also the team-min term, so raising it amplifies the shared-credit
+# problem where the ego is paid for the partner being near the ball.
+pos_shaping_factor_agent_ball: 1.0
 distance_to_ball_trigger: 0.4
-scoring_reward: 100.0  # Discrete reward for scoring
+scoring_reward: 50.0
+# Dense per-step reward per neutralised (marked) red agent.  0.05 x ~285 steps is
+# ~14 per episode, about 23% of the return in the split cells -- enough to make role
+# division the argmax without becoming the dominant objective.  0.0 disables it.
+neutralize_reward: 0.05
 
 # Observations
 observe_teammates: True

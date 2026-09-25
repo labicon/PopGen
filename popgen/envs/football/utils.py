@@ -1,12 +1,15 @@
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Callable
 
 import torch
-import yaml
+import vmas
 from benchmarl.environments import VmasTask
 from pydantic import BaseModel, Field
 from vmas.scenarios import football as football_scenario
 
-from popgen.envs.vmas_common import default_trainable_group, rollout_vmas_env, train_vmas_env
+from popgen.envs.football import football_scenario as local_football_scenario
+from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
 
 # ---------------------------------------------------------------------------- #
 #                              Environment Config                              #
@@ -16,9 +19,19 @@ from popgen.envs.vmas_common import default_trainable_group, rollout_vmas_env, t
 RL_CFG_DIR = Path(__file__).parent / "rl_cfg"
 
 ENVIRONMENT_DESCRIPTION = """The environment is a football (soccer) game in simulation.
-The objective of the blue team is to score by getting the ball into the red team's goal area while preventing the red team from scoring in the blue team's goal area.
 The blue team has 2 agents and the red team has 1 agent (2v1), and blue agents must coordinate without explicit communication.
 An episode terminates immediately when blue scores or when blue concedes.
+
+The blue team has TWO ways to earn reward, and they cannot both be done by the same agent:
+  1. ATTACKING: advance the ball toward the red goal at +X, and score by putting it in.
+  2. NEUTRALISING: mark the red agent by staying within 0.15 of it.  A marked red agent
+     is frozen (see OPPONENT BEHAVIOUR below) and the blue team is paid a small reward
+     every timestep it stays frozen.
+Because there is one ball and one opponent, the highest-scoring joint behaviour is for the
+two blue agents to take DIFFERENT roles: one attacks while the other marks.  Two attackers
+leave the red agent free to contest the ball; two markers never advance the ball at all.
+Which of the two agents takes which role is not fixed - either assignment works equally
+well, so an agent has to infer from its teammate's behaviour which role is left for it.
 
 There are two blue agents: Agent 0 and Agent 1.
 The ego team is on the left side wearing blue jerseys, the opponent team is on the right side wearing red jerseys.
@@ -51,6 +64,23 @@ CRITICAL PHYSICS PARAMETERS - READ CAREFULLY
    - Blue goal to defend: (-1.5, 0.0) on LEFT
    - Red goal to attack: (+1.51, 0.0) on RIGHT
    - To score, move/push the ball toward +X into the right goal area
+
+================================================================================
+OPPONENT BEHAVIOUR - THE STANDOFF RULE (IMPORTANT)
+================================================================================
+
+The red agent is a scripted AI that chases and dribbles the ball, EXCEPT:
+  - While any blue agent is within 0.15 of the red agent, the red agent applies
+    ZERO force and coasts to a halt.  It is neutralised for as long as it is marked.
+  - Marking costs nothing but the marker's own time: it does not need ball contact.
+
+Consequences you should exploit:
+  - A blue agent that parks within 0.15 of the red agent removes the only defender,
+    leaving its teammate an uncontested path to goal.
+  - Marking pays a small dense reward every timestep, so a marker is productive even
+    while the ball is nowhere near it.
+  - The marking distance (0.15) is much larger and far easier to hold than the ball
+    contact threshold (0.045), so marking is a far more reliable behaviour than dribbling.
 
 ================================================================================
 OBSERVATION TENSOR LAYOUT (32 dimensions in this 2v1 config)
@@ -99,10 +129,18 @@ REWARD_API_REFERENCE = """Reward function API (authoritative):
   - `self.world.ball`: ball entity.
   - For any entity `e`: `e.state.pos` and `e.state.vel` are tensors of shape `(batch_dim, 2)`.
   - Typical scenario attributes used in default reward: `self.pitch_length`, `self.goal_size`, `self.ball_size`, `self.scoring_reward`.
+  - `self.neutralize_radius` (0.15): a red agent is frozen while a blue agent is within
+    this distance of it, so `dist(blue, red) < self.neutralize_radius` is the test for
+    "this opponent is currently neutralised".
 - Return value:
-  - Return a torch tensor of shape `(batch_dim,)` on the same device as world tensors."""
+  - Return a torch tensor of shape `(batch_dim,)` on the same device as world tensors.
+  - Keep the per-step reward within [-10, 10]. Values outside that range, and any NaN or inf, are clamped at runtime.
+  - Keep dense per-step terms small, around |r| <= 1, and reserve larger values for rare events (order 1-5). The clamp bounds a single step, not the episode: a dense term of 1 per step already accumulates to hundreds over an episode, and returns that large make advantages explode, which drives the policy to NaN and kills the run. Aim for an episode return in the low tens.
+  - Prefer normalized or tanh-shaped dense terms over raw distances or unbounded sums."""
 
-REWARD_EXAMPLE = """Simple reward function example for the football environment:
+REWARD_EXAMPLE = """API reference only -- the tensor shapes and state access are the point, not what it rewards. It rewards generic task success; your reward must instead single out the given behavior description.
+
+Simple reward function example for the football environment:
 
 ```python
 import torch
@@ -239,25 +277,31 @@ def build_group_map(task_cfg: dict) -> dict[str, list[str]]:
     return group_map
 
 
-def train_fn(reward_fn: callable, output_dir: str, **kwargs):
-    """
-    Trains agents using BenchMARL with a custom reward function.
+def train_fn(
+    reward_fn: Callable | None = None,
+    output_dir: str | None = None,
+    run_name: str | None = None,
+    **kwargs,
+):
+    """Trains agents using BenchMARL against a football teammate.
 
     Args:
-        reward_fn: Callable taking (agent, world) and returning reward tensor.
+        reward_fn: Optional custom reward callable (scenario, agent) → tensor.
+                   If None, the environment's built-in football reward is used.
         output_dir: Directory to save results.
+        run_name: Name for the training run.
+        **kwargs: Forwarded to train_vmas_env, including:
+            teammate_policy: list[nn.Module] or list[list[nn.Module]].
+                             Flat list → rl_reward config.
+                             List of lists → population_play config.
+                             None → default ScriptedPolicy teammate.
     """
-    reward_fn = _wrap_reward_with_goal_termination(reward_fn)
-    scripted_policy = kwargs.pop("scripted_policy", None)
-    if scripted_policy is None:
-        temp_env = create_env(num_envs=1, seed=0, device="cpu")
-        try:
-            scripted_policy = ScriptedPolicy(temp_env)
-        finally:
-            temp_env.close()
-        # env info is captured in __init__; clear the reference so the module
-        # remains picklable when BenchMARL sends it to data-collector workers.
-        scripted_policy.env = None
+    if reward_fn is not None:
+        reward_fn = _wrap_reward_with_goal_termination(reward_fn)
+
+    teammate_policy = kwargs.pop("teammate_policy", None)
+    if teammate_policy is None:
+        teammate_policy = [ScriptedPolicy()]
 
     task = VmasTask.FOOTBALL.get_from_yaml(path=str(RL_CFG_DIR / "football.yaml"))
     group_map = build_group_map(task.config)
@@ -265,13 +309,13 @@ def train_fn(reward_fn: callable, output_dir: str, **kwargs):
     return train_vmas_env(
         reward_fn=reward_fn,
         output_dir=output_dir,
-        scenario_module=football_scenario,
+        scenario_module=local_football_scenario,
         scenario_name="football",
         vmas_task=VmasTask.FOOTBALL,
         rl_cfg_dir=RL_CFG_DIR,
         group_map=group_map,
-        trainable_group=default_trainable_group(group_map),
-        teammate_policy=[scripted_policy],
+        teammate_policy=teammate_policy,
+        run_name=run_name,
         **kwargs,
     )
 
@@ -335,6 +379,30 @@ def serialize_state_fn(rollout_data: list[dict]) -> list[dict]:
 #                              Make env function                               #
 # ---------------------------------------------------------------------------- #
 
+@contextmanager
+def _use_local_scenario():
+    """Make `vmas.make_env("football", ...)` build the popgen scenario subclass.
+
+    BenchMARL resolves the scenario by name, which yields the stock VMAS football
+    scenario -- so without this, rollout/evaluation envs silently ignore the popgen
+    scenario kwargs (`red_standoff_radius`, `neutralize_reward`, the ai_*_strength
+    ranges) and run different dynamics from training, which applies the same patch
+    inside `train_vmas_env`.
+    """
+    original_make_env = vmas.make_env
+
+    def patched_make_env(scenario, *args, **kwargs):
+        if scenario == "football":
+            return original_make_env(local_football_scenario.Scenario(), *args, **kwargs)
+        return original_make_env(scenario, *args, **kwargs)
+
+    vmas.make_env = patched_make_env
+    try:
+        yield
+    finally:
+        vmas.make_env = original_make_env
+
+
 def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **kwargs):
     """
     Creates the football environment using VMAS.
@@ -348,12 +416,13 @@ def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **k
     """
     task = VmasTask.FOOTBALL.get_from_yaml(path=str(RL_CFG_DIR / "football.yaml"))
     task.config["group_map"] = build_group_map(task.config)
-    return task.get_env_fun(
-        num_envs=num_envs,
-        continuous_actions=continuous_actions,
-        seed=seed,
-        device=device,
-    )()
+    with _use_local_scenario():
+        return task.get_env_fun(
+            num_envs=num_envs,
+            continuous_actions=continuous_actions,
+            seed=seed,
+            device=device,
+        )()
 
 # ---------------------------------------------------------------------------- #
 #                              Scripted Policy                                 #
@@ -475,3 +544,210 @@ class ScriptedPolicy(torch.nn.Module):
         action = torch.where(yield_to_teammate, support_safe, recover_or_attack)
         action = action.clamp(-1, 1)
         return action
+
+
+# ---------------------------------------------------------------------------- #
+#                          Evaluation Scripted Policies                        #
+# ---------------------------------------------------------------------------- #
+
+
+def _unit(direction: torch.Tensor) -> torch.Tensor:
+    return (direction / (torch.linalg.norm(direction, dim=-1, keepdim=True) + 1e-8)).clamp(-1, 1)
+
+
+class DirectAttackerPolicy(torch.nn.Module):
+    """Push the ball toward the opponent's goal by approaching from behind it.
+
+    The action always targets either the ball or a point behind it (never the
+    goal itself), so it never runs away from the ball to chase the goal. It
+    continuously blends between two targets based on how well an approach to
+    the ball is already aligned with driving it toward goal:
+    - Well aligned (agent is already goal-side of... i.e. behind... the ball
+      relative to goal): drive straight at the ball, which pushes it forward.
+    - Poorly aligned (e.g. agent is between the ball and the goal): circle to
+      a point on the far side of the ball from goal before engaging.
+    Blending continuously on alignment (instead of switching on a fixed
+    distance radius) avoids bang-bang oscillation near a threshold boundary.
+
+    Ignores teammates — useful as a selfish attacker behavior baseline.
+    """
+
+    approach_offset: float = 0.12  # how far behind the ball to circle to
+    align_low: float = 0.2   # alignment below which the policy fully circles around
+    align_high: float = 0.8  # alignment above which the policy fully drives at the ball
+
+    def __init__(self, env=None):
+        super().__init__()
+        self.dummy_param = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        rel_ball = obs[:, 2:4]    # agent_pos - ball_pos
+        rel_goal = obs[:, 12:14]  # agent_pos - opponent_goal_pos
+
+        dir_to_ball = _unit(-rel_ball)                 # agent -> ball
+        dir_ball_to_goal = _unit(rel_ball - rel_goal)   # ball -> goal
+
+        # Point on the far side of the ball from goal; heading there first
+        # lines the agent up to push the ball forward instead of past it.
+        approach_point_rel = rel_ball + self.approach_offset * dir_ball_to_goal
+        dir_to_approach = _unit(-approach_point_rel)
+
+        # How well "toward the ball" already agrees with "toward goal".
+        alignment = (dir_to_ball * dir_ball_to_goal).sum(dim=-1, keepdim=True)
+        weight = ((alignment - self.align_low) / (self.align_high - self.align_low)).clamp(0.0, 1.0)
+
+        action = weight * dir_to_ball + (1.0 - weight) * dir_to_approach
+        return _unit(action)
+
+
+class WideSupportPolicy(torch.nn.Module):
+    """Provide a wide passing lane rather than directly chasing the ball.
+
+    Drifts to a position wide of the teammate (y offset) and slightly ahead
+    in the attacking direction. Falls back to direct ball-chase when very far.
+    """
+
+    wide_offset: float = 0.35   # lateral distance from teammate
+    fallback_dist: float = 1.2  # switch to direct chase when far from ball
+
+    def __init__(self, env=None):
+        super().__init__()
+        self.dummy_param = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        rel_ball = obs[:, 2:4]    # agent_pos - ball_pos → negate → toward ball
+        rel_goal = obs[:, 12:14]  # agent_pos - goal_pos → negate → toward goal
+
+        # Derive the teammate block rather than hardcoding slice(24, 26): the offset
+        # shifts with n_red_agents.
+        tm_slice = ScriptedPolicy._teammate_rel_slice(obs.shape[-1])
+        rel_teammate = obs[:, tm_slice]  # agent_pos - teammate_pos
+
+        dist_to_ball = torch.linalg.norm(rel_ball, dim=-1, keepdim=True)
+        dir_to_ball = _unit(-rel_ball)
+        dir_to_goal = _unit(-rel_goal)
+
+        # Target: slightly ahead of teammate (in +x) and displaced laterally.
+        # rel_teammate points from teammate toward ego; negate → toward teammate.
+        toward_tm = -rel_teammate                                     # (B, 2)
+        wide_target = toward_tm + torch.tensor(
+            [0.2, self.wide_offset], device=obs.device
+        )
+        dir_to_wide = _unit(wide_target)
+
+        # Blend: mostly wide positioning, some goal bias.
+        support_action = _unit(0.7 * dir_to_wide + 0.3 * dir_to_goal)
+
+        # Fallback to direct ball-chase when far from ball.
+        too_far = dist_to_ball > self.fallback_dist
+        return torch.where(too_far, dir_to_ball, support_action)
+
+
+class ManMarkerPolicy(torch.nn.Module):
+    """Man-to-man marking defender: shadows the opponent goal-side of them.
+
+    Holds a position between the single opponent and the ego's own goal so the
+    opponent cannot cut inside for an open shot or pass. The standoff distance
+    tightens once the opponent enters the defensive third near the ego's own
+    goal, and the policy contests the opponent directly at very close range.
+
+    Both standoff distances must stay comfortably inside the scenario's
+    `neutralize_radius` (0.15), or this policy fails to actually freeze the
+    opponent and stops being a marking partner at all: at the original 0.18 it
+    held red frozen only 26% of the time.
+    """
+
+    goal_offset: float = 3.01  # red_goal.x - blue_goal.x, used to derive own-goal-relative vectors
+    marking_distance: float = 0.09
+    tight_marking_distance: float = 0.05
+    danger_zone_x: float = 1.0      # opponent within this x-distance of own goal is "dangerous"
+    challenge_radius: float = 0.05  # contest the opponent directly once this close
+
+    def __init__(self, env=None):
+        super().__init__()
+        self.dummy_param = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        rel_goal = obs[:, 12:14]  # agent_pos - red_goal_pos
+        rel_adv = obs[:, 16:18]   # agent_pos - opponent_pos
+
+        rel_blue_goal = rel_goal + torch.tensor([self.goal_offset, 0.0], device=obs.device)
+        opp_rel_blue_goal = rel_blue_goal - rel_adv  # opponent_pos - blue_goal_pos
+
+        dir_opp_to_own_goal = _unit(-opp_rel_blue_goal)
+        dangerous = opp_rel_blue_goal[:, 0:1] < self.danger_zone_x
+        standoff = torch.where(
+            dangerous,
+            torch.tensor(self.tight_marking_distance, device=obs.device),
+            torch.tensor(self.marking_distance, device=obs.device),
+        )
+
+        # Goal-side shadow position: offset from the opponent toward own goal.
+        target_rel = rel_adv - standoff * dir_opp_to_own_goal
+        dir_to_target = _unit(-target_rel)
+
+        dist_to_opp = torch.linalg.norm(rel_adv, dim=-1, keepdim=True)
+        dir_to_opp = _unit(-rel_adv)
+        return torch.where(dist_to_opp < self.challenge_radius, dir_to_opp, dir_to_target)
+
+
+# Held-out partners for zero-shot coordination evaluation.
+#
+# `role` is the role each partner commits to, which is what makes role adaptation
+# measurable: a cooperator that coordinates takes the *complementary* role, so
+# P(ego marks | role="attack") should differ sharply from P(ego marks | role="mark").
+# A partner-independent policy gives the same number for both.
+#
+# Measured against an idle ego under rl_cfg/football.yaml (128 episodes):
+#   name             return   red frozen%   ball contact%   blue score%
+#   scripted          13.87        42.4             2.1            1.6
+#   direct_attacker   62.52        10.6            31.1           67.2
+#   wide_support      -7.97         7.3             0.1            0.0
+#   man_marking       11.05        73.4             0.2            0.0
+EVALUATION_BEHAVIOR_SET: list[dict[str, Any]] = [
+    {
+        "name": "scripted",
+        "description": "Hybrid scripted policy with dribbling, passing, and shooting logic. Yields possession "
+        "whenever the teammate is closer to the ball, so it commits to neither role and is excluded from the "
+        "role-adaptation conditioning.",
+        "policy_cls": ScriptedPolicy,
+        "role": "mixed",
+    },
+    {
+        "name": "direct_attacker",
+        "description": "Pushes the ball toward goal by approaching from behind it, blending continuously "
+        "between circling to get goal-side of the ball and driving through it. Ignores teammates. Holds the "
+        "ball 31% of steps and scores 67% of episodes unaided, so the complementary role is to mark.",
+        "policy_cls": DirectAttackerPolicy,
+        "role": "attack",
+    },
+    {
+        "name": "wide_support",
+        "description": "Drifts to a wide support position to provide a passing lane rather than chasing the ball. "
+        "Touches the ball ~0% of steps and never neutralises the opponent, so it fills neither role and leaves "
+        "both to the cooperator.",
+        "policy_cls": WideSupportPolicy,
+        "role": "none",
+    },
+    {
+        "name": "man_marking",
+        "description": "Man-to-man marks the opponent, shadowing them goal-side inside the neutralisation radius. "
+        "Holds the opponent frozen 73% of steps and never touches the ball, so the complementary role is to attack.",
+        "policy_cls": ManMarkerPolicy,
+        "role": "mark",
+    },
+]
+
+
+def get_evaluation_scripted_policies() -> list[Callable[..., torch.nn.Module]]:
+    """Return scripted policy factories for evaluation behavior sweeps."""
+    return [entry["policy_cls"] for entry in EVALUATION_BEHAVIOR_SET]
+
+
+def get_evaluation_partner_roles() -> dict[str, str]:
+    """Map held-out partner name -> committed role ("attack" / "mark" / "none" / "mixed").
+
+    Used to group evaluation rollouts when measuring whether the cooperator takes the
+    role its partner left open.
+    """
+    return {entry["name"]: entry["role"] for entry in EVALUATION_BEHAVIOR_SET}

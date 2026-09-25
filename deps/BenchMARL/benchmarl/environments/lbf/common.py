@@ -15,7 +15,7 @@ from benchmarl.utils import DEVICE_TYPING
 
 from tensordict import TensorDict, TensorDictBase
 
-from torchrl.data import CompositeSpec, UnboundedContinuousTensorSpec, TensorSpec, OneHotDiscreteTensorSpec, DiscreteTensorSpec
+from torchrl.data import Categorical, CompositeSpec, UnboundedContinuousTensorSpec, TensorSpec, OneHotDiscreteTensorSpec
 from torchrl.envs import EnvBase
 from torchrl.envs.libs import GymWrapper
 
@@ -67,7 +67,7 @@ class LbfGymWrapper(GymWrapper):
                 )
                 action_spec_dict[gname] = CompositeSpec(
                     {
-                        "action": DiscreteTensorSpec(
+                        "action": Categorical(
                             n=action_dim,
                             shape=torch.Size((n,)),
                             device=self.device,
@@ -100,7 +100,7 @@ class LbfGymWrapper(GymWrapper):
                 {
                     "agents": CompositeSpec(
                         {
-                            "action": DiscreteTensorSpec(
+                            "action": Categorical(
                                 n=action_dim,
                                 shape=torch.Size((self.num_agents,)),
                                 device=self.device,
@@ -188,6 +188,8 @@ class LbfGymWrapper(GymWrapper):
 
             if action_tensor.ndim > 1 and action_tensor.shape[-1] > 1:
                 action_idx = action_tensor.argmax(dim=-1)
+            elif action_tensor.ndim > 1 and action_tensor.shape[-1] == 1:
+                action_idx = action_tensor.squeeze(-1)
             else:
                 action_idx = action_tensor
 

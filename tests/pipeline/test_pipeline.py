@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from popgen.population.pipeline import AgentGenerationPipeline, RLAgentGenerationPipeline
+from popgen.utils.exceptions import TrainingFailure
 from popgen.population.types import Behavior, CodeSnippet
 
 
@@ -183,7 +184,7 @@ def test_rollout_latency_is_scalar_in_summary(tmp_path):
     assert summary["avg_latencies"]["rollout"] == 0.1
 
 
-def testgenerate_and_rollout_defaults_do_not_share_feedback_state(tmp_path):
+def test_generate_and_rollout_defaults_do_not_share_feedback_state(tmp_path):
     pipeline = _DummyPipeline(output_dir=str(tmp_path), fail_generate_n=1, fail_rollout_n=0)
     behavior = Behavior(name="b_defaults", description="test behavior")
 
@@ -249,7 +250,7 @@ def test_generate_returned_exception_is_retried_without_rollout(tmp_path):
     pipeline = _ExceptionReturningPipeline(output_dir=str(tmp_path), fail_generate_n=0, fail_rollout_n=0)
     behavior = Behavior(name="b_ret_exc", description="test behavior")
 
-    generated_item, _rollouts, success, _gen_retry, _latencies = pipeline.generate_and_rollout(
+    generated_item, _rollouts, success, _gen_retry, _latencies, retry_info = pipeline.generate_and_rollout(
         behavior=behavior,
         attempt_dir=str(tmp_path),
         n_generation_retries=1,
@@ -261,6 +262,10 @@ def test_generate_returned_exception_is_retried_without_rollout(tmp_path):
     assert success is False
     assert pipeline.generate_calls == 2
     assert pipeline.rollout_calls == 0
+    # A plain returned Exception is a cheap failure: it must not be charged to
+    # the training budget, and its text must survive for the next attempt.
+    assert retry_info["training_failures"] == 0
+    assert len(retry_info["feedbacks"]) == 2
 
 
 def test_rl_generation_flags_missing_checkpoints_as_failure(tmp_path):
@@ -292,3 +297,114 @@ def test_rl_generation_flags_missing_checkpoints_as_failure(tmp_path):
 
     assert isinstance(generated_item, Exception)
     assert "No checkpoints produced" in str(generated_item)
+
+
+class _TrainingFailurePipeline(_DummyPipeline):
+    """Returns a TrainingFailure, as RLAgentGenerationPipeline does."""
+
+    policy_type = "RewardFn"
+
+    def __init__(self, *args, elapsed: float = 3600.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.elapsed = elapsed
+
+    def _generate_policy(self, behavior, feedbacks, output_dir, num_workers=1, **kwargs):
+        del behavior, feedbacks, output_dir, num_workers, kwargs
+        self.generate_calls += 1
+        return (
+            TrainingFailure(RuntimeError("actor loss became nan"), elapsed=self.elapsed),
+            {},
+            {"reward_generation": 0.01, "training": 0.0},
+        )
+
+
+def test_slow_training_failure_ends_attempt_without_further_retrains(tmp_path):
+    """A slow training failure must not consume the cheap retry budget.
+
+    Each retrain costs tens of minutes, so exhausting n_generation_retries on
+    them burned hours per attempt.
+    """
+    pipeline = _TrainingFailurePipeline(output_dir=str(tmp_path), elapsed=3600.0)
+
+    generated_item, rollouts, success, _gen_retry, _latencies, retry_info = pipeline.generate_and_rollout(
+        behavior=Behavior(name="b_slow_train", description="test behavior"),
+        attempt_dir=str(tmp_path),
+        n_generation_retries=5,
+        n_rollouts=1,
+        num_workers=1,
+        n_training_retries=0,
+    )
+
+    assert isinstance(generated_item, TrainingFailure)
+    assert success is False
+    assert pipeline.generate_calls == 1, "a slow training failure must end the attempt immediately"
+    assert pipeline.rollout_calls == 0
+    assert retry_info["training_failures"] == 1
+    assert rollouts == []
+
+
+def test_fast_training_failure_stays_on_the_cheap_budget(tmp_path):
+    """A crash in seconds (e.g. bad reward shape) is cheap and should retry."""
+    pipeline = _TrainingFailurePipeline(output_dir=str(tmp_path), elapsed=1.0)
+
+    _generated_item, _rollouts, success, _gen_retry, _latencies, retry_info = pipeline.generate_and_rollout(
+        behavior=Behavior(name="b_fast_train", description="test behavior"),
+        attempt_dir=str(tmp_path),
+        n_generation_retries=2,
+        n_rollouts=1,
+        num_workers=1,
+        n_training_retries=0,
+        min_expensive_training_seconds=120.0,
+    )
+
+    assert success is False
+    assert pipeline.generate_calls == 3, "fast failures keep the generation-retry budget"
+    assert retry_info["training_failures"] == 0
+
+
+def test_training_retry_budget_allows_configured_extra_retrains(tmp_path):
+    pipeline = _TrainingFailurePipeline(output_dir=str(tmp_path), elapsed=3600.0)
+
+    *_, retry_info = pipeline.generate_and_rollout(
+        behavior=Behavior(name="b_budget", description="test behavior"),
+        attempt_dir=str(tmp_path),
+        n_generation_retries=5,
+        n_rollouts=1,
+        num_workers=1,
+        n_training_retries=1,
+    )
+
+    assert pipeline.generate_calls == 2
+    assert retry_info["training_failures"] == 2
+
+
+def test_empty_rollouts_skip_evaluation_and_propagate_real_error(tmp_path):
+    """No rollouts must not raise, and the next attempt must see the cause.
+
+    Evaluating an empty rollout set used to raise ZeroDivisionError, and
+    "Evaluation failed: division by zero" was the only feedback the next
+    attempt received.
+    """
+    pipeline = _TrainingFailurePipeline(output_dir=str(tmp_path), elapsed=3600.0)
+
+    success, summary = pipeline(
+        behavior=Behavior(name="b_empty", description="test behavior"),
+        num_attempts=2,
+        n_rollouts=1,
+        adherence_threshold=0.8,
+        n_generation_retries=5,
+        num_workers=1,
+        n_training_retries=0,
+    )
+
+    assert success is False
+    assert summary["n_attempts"] == 2
+    assert all(a["adherence"] == 0.0 for a in summary["attempt_summaries"])
+
+    # The second attempt's context must carry the training error, not a
+    # division-by-zero artifact.
+    with open(tmp_path / "attempt_1" / "feedback.json") as f:
+        context = json.load(f)
+    blob = json.dumps(context)
+    assert "division by zero" not in blob
+    assert "actor loss became nan" in blob

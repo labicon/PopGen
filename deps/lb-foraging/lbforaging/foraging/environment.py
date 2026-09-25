@@ -93,6 +93,7 @@ class ForagingEnv(gym.Env):
         grid_observation=False,
         observe_agent_levels=True,
         penalty=0.0,
+        collision_penalty=0.0,
         render_mode=None,
     ):
         self.logger = logging.getLogger(__name__)
@@ -102,6 +103,7 @@ class ForagingEnv(gym.Env):
         self.field = np.zeros(field_size, np.int32)
 
         self.penalty = penalty
+        self.collision_penalty = collision_penalty
 
         if isinstance(min_food_level, Iterable):
             assert (
@@ -662,6 +664,8 @@ class ForagingEnv(gym.Env):
         # and do movements for non colliding players
         for k, v in collisions.items():
             if len(v) > 1:  # make sure no more than an player will arrive at location
+                for player in v:
+                    player.reward -= self.collision_penalty
                 continue
             v[0].position = k
 
@@ -726,6 +730,8 @@ class ForagingEnv(gym.Env):
     def close(self):
         if self.viewer:
             self.viewer.close()
+            self.viewer = None
+        self._rendering_initialized = False
 
     def test_make_gym_obs(self):
         """Test wrapper to test the current observation in a public manner."""

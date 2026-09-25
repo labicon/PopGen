@@ -6,11 +6,9 @@ from typing import Callable
 import torch
 import torch.nn as nn
 import vmas
-from benchmarl.algorithms import IppoConfig, MappoConfig
 from benchmarl.experiment import Experiment, ExperimentConfig
-from benchmarl.models.mlp import MlpConfig
 
-from popgen.envs.utils import apply_rollout_seed
+from popgen.envs.utils import apply_rollout_seed, apply_train_kwargs, load_algorithm_config, load_model_config, resolve_cfg_dir
 
 
 def default_trainable_group(group_map: dict[str, list[str]]) -> dict[str, list[str]]:
@@ -33,12 +31,17 @@ def train_vmas_env(
     teammate_policy: list[nn.Module | Callable] | None = None,
     scenario_kwargs: dict | None = None,
     task_yaml_name=None,
-    mappo_yaml_name="mappo.yaml",
-    ippo_yaml_name="ippo.yaml",
     experiment_yaml_name="base_experiment.yaml",
-    mlp_yaml_name="mlp.yaml",
     callbacks=None,
+    run_name: str | None = None,
+    **kwargs,
 ):
+    if "centralized_critic" in kwargs:
+        raise ValueError(
+            "centralized_critic is not supported. Only IPPO-style (non-centralized) training is available."
+        )
+    prioritized: bool = kwargs.pop("prioritized", True)
+
     if task_yaml_name is None:
         task_yaml_name = f"{scenario_name}.yaml"
 
@@ -52,8 +55,8 @@ def train_vmas_env(
     # 2. Define Custom Scenario Wrapper
     class CustomScenario(OriginalScenario):
         def reward(self, agent):
-            # Only override reward for the first agent
-            if agent == self.world.agents[0]:
+            # Only override reward for the first agent when a custom reward_fn is provided.
+            if reward_fn is not None and agent == self.world.agents[0]:
                 # Let the original scenario compute any internal shared-reward
                 # caches (e.g., simple_tag's `adverary_rew`) used by non-ego agents.
                 _ = super().reward(agent)
@@ -66,7 +69,6 @@ def train_vmas_env(
                 # Keep per-agent reward fields coherent with the overridden ego reward.
                 agent.rew = self.rew
                 return self.rew
-            # Use original reward for other agents
             return super().reward(agent)
 
     # 3. Monkey Patch: Replace make_env in vmas to use CustomScenario
@@ -88,7 +90,8 @@ def train_vmas_env(
     experiment = None
     try:
         # 4. Configure BenchMARL Task
-        task = vmas_task.get_from_yaml(path=str(rl_cfg_dir / task_yaml_name))
+        base_cfg_dir = Path(rl_cfg_dir)
+        task = vmas_task.get_from_yaml(path=str(base_cfg_dir / task_yaml_name))
         if scenario_kwargs:
             task.config.update(scenario_kwargs)
 
@@ -101,37 +104,34 @@ def train_vmas_env(
             group_map = {name: list(agent_names) for name, agent_names in configured_group_map.items()}
         if trainable_group is None:
             trainable_group = default_trainable_group(group_map)
-
         task.config["group_map"] = group_map
+
+        # Resolve the mode-specific subdirectory (self_play / *_training)
+        # for algorithm + experiment configs.
+        rl_cfg_dir = resolve_cfg_dir(base_cfg_dir, teammate_policy)
 
         callbacks = list(callbacks or [])
 
         if teammate_policy:
-            from popgen.agents.callback import TeammatePolicyCallback
+            from popgen.agents.callbacks import select_teammate_callback_cls
 
-            callbacks.append(
-                TeammatePolicyCallback(
-                    teammate_policies=teammate_policy,
-                    trainable_group=trainable_group,
-                )
+            is_population = isinstance(teammate_policy[0], list)
+            callback_cls = select_teammate_callback_cls(
+                is_population=is_population,
+                prioritized=prioritized,
             )
+            callbacks.append(callback_cls(teammate_policies=teammate_policy, trainable_group=trainable_group))
 
         # 5. Configure Algorithm & Experiment
-        mappo_path = rl_cfg_dir / mappo_yaml_name
-        ippo_path = rl_cfg_dir / ippo_yaml_name
-        if ippo_path.exists():
-            algorithm_config = IppoConfig.get_from_yaml(path=str(ippo_path))
-        else:
-            algorithm_config = MappoConfig.get_from_yaml(path=str(mappo_path))
-
+        algorithm_config = load_algorithm_config(rl_cfg_dir)
         experiment_config = ExperimentConfig.get_from_yaml(path=str(rl_cfg_dir / experiment_yaml_name))
-        model_config = MlpConfig.get_from_yaml(path=str(rl_cfg_dir / mlp_yaml_name))
-        critic_model_config = MlpConfig.get_from_yaml(path=str(rl_cfg_dir / mlp_yaml_name))
+        model_config = load_model_config(rl_cfg_dir)
+        critic_model_config = load_model_config(rl_cfg_dir)
 
-        # Disable BenchMARL internal evaluation; B2T evaluates policies via
-        # pipeline rollouts/adherence.
-        experiment_config.evaluation = False
-        experiment_config.evaluation_episodes = 1
+        # Apply caller-supplied overrides to BenchMARL configs (e.g. max_n_frames).
+        apply_train_kwargs(kwargs, experiment_config, algorithm_config, model_config, critic_model_config)
+
+        experiment_config.render = True
 
         # BenchMARL defaults to CUDA in our configs; fall back to CPU if CUDA is unavailable.
         requested_devices = [
@@ -149,32 +149,24 @@ def train_vmas_env(
             if str(getattr(experiment_config, "buffer_device", "")).lower() != "disk":
                 experiment_config.buffer_device = "cpu"
 
-        # B2T does not consume BenchMARL logger outputs; disable them to avoid
-        # wandb/console issues interrupting training.
-        experiment_config.loggers = []
-
         # Override experiment config for output
         experiment_config.save_folder = output_dir
 
-        path_parts = Path(output_dir).parts
-        if "results" in path_parts:
-            # Try to extract identifying parts from path structure:
-            # .../results/DATE/EXPERIMENT_NAME/behavior_X/attempt_Y
-            try:
-                # Find index of 'results' and look ahead
-                res_idx = path_parts.index("results")
-                date_str = path_parts[res_idx + 1]  # e.g. 2026-01-19_05-27-13
-                # behavior_X -> behavior_0 -> 0
-                behavior_str = path_parts[res_idx + 3].split("_")[-1]
-                # attempt_Y -> attempt_0 -> 0
-                attempt_str = path_parts[res_idx + 4].split("_")[-1]
-
-                run_name = f"{date_str}-B{behavior_str}-A{attempt_str}"
-            except (IndexError, ValueError):
-                # Fallback if path structure isn't as expected
+        if run_name is None:
+            path_parts = Path(output_dir).parts
+            if "results" in path_parts:
+                # Try to extract identifying parts from path structure:
+                # .../results/DATE/EXPERIMENT_NAME/behavior_X/attempt_Y
+                try:
+                    res_idx = path_parts.index("results")
+                    date_str = path_parts[res_idx + 1]
+                    behavior_str = path_parts[res_idx + 3].split("_")[-1]
+                    attempt_str = path_parts[res_idx + 4].split("_")[-1]
+                    run_name = f"{date_str}-B{behavior_str}-A{attempt_str}"
+                except (IndexError, ValueError):
+                    run_name = Path(output_dir).name
+            else:
                 run_name = Path(output_dir).name
-        else:
-            run_name = Path(output_dir).name
 
         experiment_config.wandb_extra_kwargs = {"name": run_name, "tags": [scenario_name]}
 
@@ -283,12 +275,20 @@ def _extract_step_group_rewards(
     if rew_t.ndim == 0:
         return [float(rew_t.item())]
 
-    if rew_t.ndim >= 2 and int(rew_t.shape[0]) == int(num_steps):
-        rew_step = rew_t[step_idx]
-    elif rew_t.ndim >= 2 and int(rew_t.shape[1]) == int(num_steps):
-        rew_step = rew_t[:, step_idx]
-    elif rew_t.shape[0] > step_idx:
-        rew_step = rew_t[step_idx]
+    # rollout_td has batch_size (num_envs, T) when returned by env.rollout(),
+    # so rew_t has shape (num_envs, T, n_agents, reward_dim).
+    # Index using batch_dims to correctly extract the reward at step_idx.
+    batch_dims = rollout_td.batch_dims
+    T = rollout_td.shape[-1] if batch_dims >= 1 else 0
+
+    if batch_dims == 2:
+        if step_idx >= T:
+            return []
+        rew_step = rew_t[0, step_idx]  # (n_agents, reward_dim)
+    elif batch_dims == 1:
+        if step_idx >= T:
+            return []
+        rew_step = rew_t[step_idx]  # (n_agents, reward_dim)
     else:
         rew_step = rew_t
 
@@ -377,6 +377,15 @@ def rollout_vmas_env(policy, env, seed: int | None = None, **kwargs):
             trust_policy=True,
             **rollout_kwargs,
         )
+
+    # The callback is called T-1 times for a T-step rollout; the terminal step
+    # is never passed to the callback.  Recover it from rollout_td directly.
+    batch_dims = rollout_td.batch_dims
+    T = rollout_td.shape[-1] if batch_dims >= 1 else 0
+    for t in range(len(states), T):
+        step_td = rollout_td[:, t] if batch_dims == 2 else rollout_td[t : t + 1]
+        states.append(_collect_step_state(step_td))
+
     _attach_rewards_from_rollout(states=states, rollout_td=rollout_td)
 
     return states, images, None

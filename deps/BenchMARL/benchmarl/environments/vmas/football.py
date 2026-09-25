@@ -5,6 +5,7 @@
 #
 
 from dataclasses import dataclass, MISSING
+from typing import List, Optional
 
 
 @dataclass
@@ -64,3 +65,15 @@ class TaskConfig:
     observe_teammates: bool = MISSING
     observe_adversaries: bool = MISSING
     dict_obs: bool = MISSING
+
+    # Optional (low, high) ranges for randomizing the opponent AI strength
+    # per episode (popgen extension, see popgen/envs/football/football_scenario.py).
+    ai_strength_range: Optional[List[float]] = None
+    ai_decision_strength_range: Optional[List[float]] = None
+    ai_precision_strength_range: Optional[List[float]] = None
+
+    # Opponent standoff + dense neutralisation reward (popgen extension, see
+    # popgen/envs/football/football_scenario.py).  Defaults reproduce stock behaviour.
+    red_standoff_radius: float = 0.0
+    neutralize_reward: float = 0.0
+    neutralize_radius: Optional[float] = None

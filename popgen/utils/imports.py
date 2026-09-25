@@ -4,12 +4,34 @@ import os
 import sys
 
 
+def _file_stamp(abs_path: str) -> str | None:
+    """Return a content signature for *abs_path*, or None if unreadable.
+
+    Content-hashed rather than mtime-based: generated artifacts are rewritten
+    in place within seconds on a retry, and filesystem mtime granularity is
+    coarse enough to miss that. These files are a few KB, so hashing is cheap.
+    """
+    try:
+        with open(abs_path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def _module_matches_file(module, abs_path: str) -> bool:
-    """Return True when *module* is a real import of *abs_path*."""
+    """Return True when *module* is a real, up-to-date import of *abs_path*.
+
+    Generated artifacts (``reward.py``, ``policy.py``) are rewritten in place on
+    every retry, so matching the path alone would hand back the previous
+    version's module and silently re-run stale code.
+    """
     module_file = getattr(module, "__file__", None)
     if not isinstance(module_file, str):
         return False
-    return os.path.abspath(module_file) == abs_path
+    if os.path.abspath(module_file) != abs_path:
+        return False
+    stamp = getattr(module, "__popgen_file_stamp__", None)
+    return stamp is not None and stamp == _file_stamp(abs_path)
 
 
 def _load_module_from_file(file_path: str):
@@ -29,13 +51,18 @@ def _load_module_from_file(file_path: str):
     if existing_module is not None:
         if _module_matches_file(existing_module, abs_path):
             return existing_module
-        # Placeholder module is stale for this file; reload from source.
+        # Placeholder, or the file changed on disk since it was loaded;
+        # reload from source.
         del sys.modules[module_name]
 
+    stamp = _file_stamp(abs_path)
     spec = importlib.util.spec_from_file_location(module_name, abs_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load module spec for {abs_path}")
     module = importlib.util.module_from_spec(spec)
+    # Record the source signature so a later rewrite of the same path is
+    # detected instead of being served from sys.modules.
+    module.__popgen_file_stamp__ = stamp
     # Register *before* exec so that recursive imports resolve correctly.
     sys.modules[module_name] = module
     spec.loader.exec_module(module)

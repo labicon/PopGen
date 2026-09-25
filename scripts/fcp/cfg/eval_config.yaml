@@ -1,0 +1,18 @@
+env: point_mass_rendezvous
+
+fcp:
+  self_play_results_dir: null
+
+evaluation:
+  cooperator_dir: null
+  output_subdir: evaluation
+  n_eval_rollouts: 50
+  num_workers: 8
+  seed: null
+
+hydra:
+  run:
+    dir: ${evaluation.cooperator_dir}
+  sweep:
+    dir: ${evaluation.cooperator_dir}
+    subdir: ${hydra.job.num}

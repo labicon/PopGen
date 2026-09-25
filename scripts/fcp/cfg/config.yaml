@@ -1,0 +1,23 @@
+env: point_mass_rendezvous
+
+fcp:
+  # Existing self-play run directory with seed_*/ subdirectories.
+  self_play_results_dir: null
+  # Optional checkpoint file, experiment dir, or FCP run dir to resume from.
+  # When set, self_play_results_dir can be omitted if fcp_population.json is present.
+  restart_from: null
+  # If a seed produced more checkpoints than this, keep only an evenly spaced subset.
+  max_checkpoints_per_seed: 3
+  output_dir: results/${env}/fcp
+  run_name: ${now:%Y-%m-%d_%H-%M-%S}
+
+  # Forwarded as kwargs to env_module.train_fn(...).
+  # Do not set `run_name` here: it is computed by the training pipeline.
+  train_kwargs: {}
+
+hydra:
+  run:
+    dir: scripts/fcp/${fcp.output_dir}/${fcp.run_name}
+  sweep:
+    dir: scripts/fcp/${fcp.output_dir}/${fcp.run_name}
+    subdir: ${hydra.job.num}

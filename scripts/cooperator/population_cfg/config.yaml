@@ -1,0 +1,34 @@
+defaults:
+  - generation: policy_code   # Options: rl_reward, policy_code, llm_agent
+  - behavior: verbalized_sampling_multiturn   # Options: stratified, in_context, verbalized_sampling, verbalized_sampling_multiturn
+  - _self_
+
+# Optional: pass a path to a pre-generated behaviors JSON to skip behavior generation
+behavior_path: ${hydra:runtime.cwd}/results/${env}/${generation.type}/${basename:${generation.model_name}}/${classname:${behavior._target_}}/behaviors/${env}.json
+
+# Environment
+env: lbf
+
+# Evaluation settings
+evaluation:
+  evaluator_model: openrouter/google/gemini-3-flash-preview
+  advisor_model: openrouter/google/gemini-3.1-pro-preview
+  max_alignment_retries: 3
+  n_eval_rollouts: 5
+  adherence_threshold: 0.8
+
+n_behaviors: 4
+n_workers: 9
+n_trials: 1
+seed: 0
+
+# Output (cooperator-local workspace when launched from scripts/cooperator)
+output_dir: ${hydra:runtime.cwd}/results/${env}/${generation.type}/${basename:${generation.model_name}}/${classname:${behavior._target_}}/population
+run_name: ${generation.model_name}
+
+hydra:
+  run:
+    dir: ${output_dir}
+  sweep:
+    dir: ${output_dir}
+    subdir: ${hydra.job.num}

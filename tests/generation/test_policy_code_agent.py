@@ -1,7 +1,7 @@
 import torch
 
 from popgen.agents.policy_code_agent import PolicyCodeAgent
-from popgen.agents.router import MultiPolicyRouter
+from popgen.agents.router import EgoTeammateRouter, MultiPolicyRouter
 from popgen.envs.lbf.utils import ScriptedPolicy, create_env
 
 

@@ -1,7 +1,7 @@
 import os
 import random
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 import yaml
@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from vmas import make_env
 from vmas.scenarios import point_mass_rendezvous as point_mass_rendezvous_scenario
 
-from popgen.envs.vmas_common import default_trainable_group, rollout_vmas_env, train_vmas_env
+from popgen.envs.vmas_common import rollout_vmas_env, train_vmas_env
 
 # ---------------------------------------------------------------------------- #
 #                              Environment Config                              #
@@ -18,6 +18,10 @@ from popgen.envs.vmas_common import default_trainable_group, rollout_vmas_env, t
 
 # Path to local RL config directory
 RL_CFG_DIR = Path(__file__).parent / "rl_cfg"
+
+# Task config overrides applied during self-play population training.
+# Referenced by both population_generation.py (via _build_task) and train_fn.
+SELFPLAY_SCENARIO_KWARGS: dict = {"shared_goal_shaping": True}
 
 ENVIRONMENT_DESCRIPTION = """The game is called "Point Mass Rendezvous".
 The objective of the game is for two agents to coordinate and navigate to the same landmark simultaneously in a 2D space.
@@ -51,9 +55,19 @@ REWARD_API_REFERENCE = """Reward function API (authoritative):
   - For agents/landmarks `e`: `e.state.pos` and (for agents) `e.state.vel` are tensors with leading dim `batch_dim`.
   - Radii are available via `e.shape.radius`.
 - Return value:
-  - Return a torch tensor of shape `(batch_dim,)` on the world device."""
+  - Return a torch tensor of shape `(batch_dim,)` on the world device.
+  - Keep the per-step reward within [-10, 10]. Values outside that range, and any NaN or inf, are clamped at runtime.
+  - Keep dense per-step terms small, around |r| <= 1, and reserve larger values for rare events (order 1-5). The clamp bounds a single step, not the episode: a dense term of 1 per step already accumulates to hundreds over an episode, and returns that large make advantages explode, which drives the policy to NaN and kills the run. Aim for an episode return in the low tens.
+  - Prefer normalized or tanh-shaped dense terms over raw distances or unbounded sums."""
 
-REWARD_EXAMPLE = """Simple sparse reward: +1 if both agents are on the same landmark at the same time step, otherwise 0.
+REWARD_EXAMPLE = """API reference only -- this is the environment's own rendezvous objective, NOT a model for
+the reward you are writing. Copy the tensor shapes and the way state is read; do not copy
+what it rewards. A reward built on "both agents on the same landmark" is behavior-agnostic:
+every behavior trained against it converges on the same rendezvous, whatever its
+description said. Reward the described behavior instead (which landmark this agent favors,
+whether it waits or leads, whether it follows the partner at all).
+
+Simple sparse reward: +1 if both agents are on the same landmark at the same time step, otherwise 0.
 
 ```python
 import torch
@@ -123,32 +137,7 @@ class ActionType(BaseModel):
 # ---------------------------------------------------------------------------- #
 
 
-def build_group_map(task_cfg: dict) -> dict[str, list[str]]:
-    raw_group_map = task_cfg.get("group_map")
-    if raw_group_map:
-        seen: set[str] = set()
-        agent_names: list[str] = []
-        for grouped_agents in raw_group_map.values():
-            for name in grouped_agents:
-                if name not in seen:
-                    seen.add(name)
-                    agent_names.append(name)
-    else:
-        n_agents = task_cfg.get("n_agents")
-        if n_agents is None:
-            raise ValueError(f"Could not infer point-mass agent names from task config {task_cfg}.")
-        agent_names = [f"agent_{i}" for i in range(int(n_agents))]
-
-    if not agent_names:
-        raise ValueError("Point-mass group_map must contain at least one controlled agent.")
-
-    group_map = {"ego": [agent_names[0]]}
-    if len(agent_names) > 1:
-        group_map["teammate"] = agent_names[1:]
-    return group_map
-
-
-def train_fn(reward_fn: Callable | None = None, output_dir: str = None, **kwargs):
+def train_fn(reward_fn: Callable | None = None, output_dir: str | None = None, run_name: str | None = None, **kwargs):
     """
     Trains agents using BenchMARL with a custom reward function.
 
@@ -157,16 +146,23 @@ def train_fn(reward_fn: Callable | None = None, output_dir: str = None, **kwargs
         output_dir: Directory to save results.
     """
     teammate_policy = kwargs.pop("teammate_policy", None)
+    is_self_play = teammate_policy is None  # capture intent before dummy creation
+
+    # Auto-enable reward shaping for self-play population; disable for cooperator/FCP.
+    # Explicit scenario_kwargs["shared_goal_shaping"] from the caller takes precedence.
+    scenario_kwargs = kwargs.pop("scenario_kwargs", {})
+    if "shared_goal_shaping" not in scenario_kwargs:
+        scenario_kwargs["shared_goal_shaping"] = is_self_play
 
     if teammate_policy is None:
-        # Use the training num_envs so ScriptedPolicy captures the right metadata.
-        with open(RL_CFG_DIR / "base_experiment.yaml") as f:
+        # Use the training num_envs so scripted partner policy captures the right metadata.
+        with open(RL_CFG_DIR / "rl_reward" / "base_experiment.yaml") as f:
             experiment_cfg = yaml.safe_load(f)
         num_envs = experiment_cfg.get("on_policy_n_envs_per_worker", 1)
 
         temp_env = create_env(num_envs=num_envs, seed=0, device="cpu")
         try:
-            teammate_policy = [ScriptedPolicy(temp_env)]
+            teammate_policy = [RandomLandmarkPolicy(temp_env)]
         finally:
             temp_env.close()
 
@@ -181,8 +177,9 @@ def train_fn(reward_fn: Callable | None = None, output_dir: str = None, **kwargs
         vmas_task=VmasTask.POINT_MASS_RENDEZVOUS,
         rl_cfg_dir=RL_CFG_DIR,
         group_map=group_map,
-        trainable_group=default_trainable_group(group_map),
         teammate_policy=teammate_policy,
+        run_name=run_name,
+        scenario_kwargs=scenario_kwargs,
         **kwargs,
     )
 
@@ -251,6 +248,30 @@ def serialize_state_fn(rollout_data: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------- #
 
 
+def build_group_map(task_cfg: dict) -> dict[str, list[str]]:
+    """Build semantic group_map with 'ego' and 'teammate' from raw point-mass task config."""
+    raw_group_map = task_cfg.get("group_map")
+    if raw_group_map:
+        seen: set[str] = set()
+        agent_names: list[str] = []
+        for grouped_agents in raw_group_map.values():
+            for name in grouped_agents:
+                if name not in seen:
+                    seen.add(name)
+                    agent_names.append(name)
+    else:
+        n_agents = task_cfg.get("n_agents")
+        if n_agents is None:
+            raise ValueError("Point-mass task config must define 'n_agents' or 'group_map'.")
+        agent_names = [f"agent_{i}" for i in range(int(n_agents))]
+    if not agent_names:
+        raise ValueError("Point-mass group_map must contain at least one controlled agent.")
+    group_map = {"ego": [agent_names[0]]}
+    if len(agent_names) > 1:
+        group_map["teammate"] = agent_names[1:]
+    return group_map
+
+
 def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **kwargs):
     """
     Creates the point mass rendezvous environment using VMAS.
@@ -276,42 +297,218 @@ def create_env(num_envs=1, continuous_actions=True, seed=None, device="cpu", **k
 # ---------------------------------------------------------------------------- #
 
 
-class ScriptedPolicy(torch.nn.Module):
-    """Heuristic policy that moves toward a random landmark.
+def _extract_policy_inputs(obs: torch.Tensor, num_landmarks: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Validate obs tensor and parse landmark and teammate relative positions."""
+    if not isinstance(obs, torch.Tensor):
+        raise TypeError(f"PointMass ScriptedPolicy expected torch.Tensor observation, got {type(obs).__name__}.")
+    if obs.dim() != 2:
+        raise ValueError(f"PointMass ScriptedPolicy expects observation tensor with shape (batch, obs_dim), got {tuple(obs.shape)}.")
+    batch_size = obs.shape[0]
+    landmark_end = 4 + num_landmarks * 2
+    if obs.shape[-1] < landmark_end + 2:
+        raise ValueError(
+            f"PointMass observation too short for {num_landmarks} landmarks: "
+            f"obs_dim={obs.shape[-1]}, expected at least {landmark_end + 2}."
+        )
+    landmark_relative_positions = obs[:, 4:landmark_end].view(batch_size, num_landmarks, 2)
+    other_agent_relative_position = obs[:, landmark_end:landmark_end + 2]
+    return landmark_relative_positions, other_agent_relative_position
 
-    Parses the flattened point mass rendezvous observation vector to extract landmark positions,
-    and moves toward a random landmark in the environment.
 
-    Args:
-        num_landmarks: Number of landmark slots in the observation.
-        num_agents: Number of agent slots in the observation.
-    """
+def _normalize_action(direction: torch.Tensor) -> torch.Tensor:
+    return (direction / (torch.linalg.norm(direction, dim=-1, keepdim=True) + 1e-8)).clamp(-1, 1)
+
+
+class _PointMassScriptedPolicyBase(torch.nn.Module):
+    """Shared utilities for scripted point-mass teammate policies."""
+
     def __init__(self, env=None, num_landmarks=4, num_agents=2):
         super().__init__()
         self.num_envs = env.num_envs if env is not None else 1
         self.num_landmarks = len(env.world.landmarks) if env is not None else num_landmarks
         self.num_agents = len(env.world.agents) if env is not None else num_agents
-        # Use an isolated RNG seeded from os.urandom so torch/random seeds don't affect landmark selection.
-        _rng = random.Random(int.from_bytes(os.urandom(4), "little"))
-        self.target_landmark_idx = torch.tensor([_rng.randrange(self.num_landmarks) for _ in range(self.num_envs)])
-        self.dummy_param = torch.nn.Parameter(torch.zeros(1))  # Dummy parameter to make this a valid nn.Module
+        # nn.Module requires at least one parameter for some execution paths.
+        self.dummy_param = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, obs_tensor: torch.Tensor) -> torch.Tensor:
-        if not isinstance(obs_tensor, torch.Tensor):
-            raise TypeError(f"PointMass ScriptedPolicy expected torch.Tensor observation, got {type(obs_tensor).__name__}.")
-        if obs_tensor.dim() != 2:
-            raise ValueError(
-                f"PointMass ScriptedPolicy expects observation tensor with shape (batch, obs_dim), got {tuple(obs_tensor.shape)}."
-            )
 
-        batch_size = obs_tensor.shape[0]
-        landmark_relative_positions = obs_tensor[:, 4:4 + self.num_landmarks * 2].view(batch_size, self.num_landmarks, 2)
+class RandomLandmarkPolicy(_PointMassScriptedPolicyBase):
+    """Random-commit partner: picks one landmark at reset and keeps pursuing it."""
+
+    def __init__(self, env=None, num_landmarks=4, num_agents=2):
+        super().__init__(env=env, num_landmarks=num_landmarks, num_agents=num_agents)
+        self._rng = random.Random(int.from_bytes(os.urandom(4), "little"))
+        self.target_landmark_idx = torch.tensor(
+            [self._rng.randrange(self.num_landmarks) for _ in range(self.num_envs)],
+            dtype=torch.long,
+        )
+
+    def _ensure_targets(self, batch_size: int) -> None:
+        if self.target_landmark_idx.numel() >= batch_size:
+            return
+        extra = torch.tensor(
+            [self._rng.randrange(self.num_landmarks) for _ in range(batch_size - self.target_landmark_idx.numel())],
+            dtype=torch.long,
+        )
+        self.target_landmark_idx = torch.cat([self.target_landmark_idx, extra], dim=0)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        landmark_relative_positions, _other_agent_relative_position = _extract_policy_inputs(obs, self.num_landmarks)
+        batch_size = obs.shape[0]
+        self._ensure_targets(batch_size)
+        target_idx = self.target_landmark_idx[:batch_size].to(obs.device)
+        direction_to_landmark = landmark_relative_positions[torch.arange(batch_size, device=obs.device), target_idx]
+        return _normalize_action(direction_to_landmark)
+
+
+class ClosestLandmarkPolicy(_PointMassScriptedPolicyBase):
+    """Greedy partner: always moves toward the currently closest landmark."""
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        landmark_relative_positions, _other_agent_relative_position = _extract_policy_inputs(obs, self.num_landmarks)
+        batch_size = obs.shape[0]
+        distances = torch.linalg.norm(landmark_relative_positions, dim=-1)
+        target_idx = torch.argmin(distances, dim=-1)
+        direction_to_landmark = landmark_relative_positions[torch.arange(batch_size, device=obs.device), target_idx]
+        return _normalize_action(direction_to_landmark)
+
+
+class TeammateBiasedLandmarkPolicy(_PointMassScriptedPolicyBase):
+    """Supportive partner: targets the landmark closest to the teammate."""
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        landmark_relative_positions, other_agent_relative_position = _extract_policy_inputs(obs, self.num_landmarks)
+        batch_size = obs.shape[0]
+        # teammate->landmark = (landmark - ego) - (teammate - ego)
+        teammate_to_landmarks = landmark_relative_positions - other_agent_relative_position.unsqueeze(1)
+        teammate_distances = torch.linalg.norm(teammate_to_landmarks, dim=-1)
+        target_idx = torch.argmin(teammate_distances, dim=-1)
+        direction_to_landmark = landmark_relative_positions[torch.arange(batch_size, device=obs.device), target_idx]
+        return _normalize_action(direction_to_landmark)
+
+
+class RegroupThenClosestLandmarkPolicy(_PointMassScriptedPolicyBase):
+    """Two-stage partner: regroup with teammate first, then go to nearest landmark."""
+
+    def __init__(self, env=None, num_landmarks=4, num_agents=2, regroup_distance: float = 0.75):
+        super().__init__(env=env, num_landmarks=num_landmarks, num_agents=num_agents)
+        self.regroup_distance = float(regroup_distance)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        landmark_relative_positions, other_agent_relative_position = _extract_policy_inputs(obs, self.num_landmarks)
+        batch_size = obs.shape[0]
+        landmark_distances = torch.linalg.norm(landmark_relative_positions, dim=-1)
+        target_idx = torch.argmin(landmark_distances, dim=-1)
+        nearest_landmark_direction = landmark_relative_positions[
+            torch.arange(batch_size, device=obs.device),
+            target_idx,
+        ]
+        teammate_distance = torch.linalg.norm(other_agent_relative_position, dim=-1)
+        should_regroup = teammate_distance > self.regroup_distance
+        direction = torch.where(
+            should_regroup.unsqueeze(-1),
+            other_agent_relative_position,
+            nearest_landmark_direction,
+        )
+        return _normalize_action(direction)
+
+
+class FarthestLandmarkPolicy(_PointMassScriptedPolicyBase):
+    """Anti-greedy partner: commits to the farthest landmark on the first step and pursues it persistently."""
+
+    def __init__(self, env=None, num_landmarks=4, num_agents=2):
+        super().__init__(env=env, num_landmarks=num_landmarks, num_agents=num_agents)
+        self.target_landmark_idx: torch.Tensor | None = None
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        landmark_relative_positions, _other_agent_relative_position = _extract_policy_inputs(obs, self.num_landmarks)
+        batch_size = obs.shape[0]
+
         if self.target_landmark_idx is None:
-            _rng = random.Random(int.from_bytes(os.urandom(4), "little"))
-            self.target_landmark_idx = torch.tensor([_rng.randrange(self.num_landmarks) for _ in range(batch_size)])
-        target_idx = self.target_landmark_idx[:batch_size].to(obs_tensor.device)
-        direction_to_landmark = landmark_relative_positions[torch.arange(batch_size, device=obs_tensor.device), target_idx]
-        action = direction_to_landmark / (torch.linalg.norm(direction_to_landmark, dim=-1, keepdim=True) + 1e-8)
-        action = action.clamp(-1, 1)
+            self.target_landmark_idx = obs.new_full((batch_size,), -1, dtype=torch.long)
+        elif self.target_landmark_idx.shape[0] < batch_size:
+            extra = obs.new_full((batch_size - self.target_landmark_idx.shape[0],), -1, dtype=torch.long)
+            self.target_landmark_idx = torch.cat([self.target_landmark_idx, extra], dim=0)
 
+        uncommitted = self.target_landmark_idx[:batch_size] < 0
+        if uncommitted.any():
+            distances = torch.linalg.norm(landmark_relative_positions, dim=-1)
+            farthest_idx = torch.argmax(distances, dim=-1)
+            self.target_landmark_idx[:batch_size] = torch.where(uncommitted, farthest_idx, self.target_landmark_idx[:batch_size])
+
+        target_idx = self.target_landmark_idx[:batch_size].to(obs.device)
+        direction_to_landmark = landmark_relative_positions[torch.arange(batch_size, device=obs.device), target_idx]
+        return _normalize_action(direction_to_landmark)
+
+
+class RegroupThenDivergePolicy(_PointMassScriptedPolicyBase):
+    """Approaches the teammate until nearby, then commits to the landmark farthest from them."""
+
+    def __init__(self, env=None, num_landmarks=4, num_agents=2, regroup_threshold: float = 0.3):
+        super().__init__(env=env, num_landmarks=num_landmarks, num_agents=num_agents)
+        self.regroup_threshold = float(regroup_threshold)
+        self._committed_idx: torch.Tensor | None = None  # -1 = still regrouping
+
+    def _ensure_state(self, batch_size: int, device: torch.device) -> None:
+        if self._committed_idx is None:
+            self._committed_idx = torch.full((batch_size,), -1, dtype=torch.long, device=device)
+        elif self._committed_idx.shape[0] < batch_size:
+            extra = batch_size - self._committed_idx.shape[0]
+            self._committed_idx = torch.cat([self._committed_idx, torch.full((extra,), -1, dtype=torch.long, device=device)])
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        landmark_relative_positions, other_agent_relative_position = _extract_policy_inputs(obs, self.num_landmarks)
+        batch_size = obs.shape[0]
+        self._ensure_state(batch_size, obs.device)
+
+        committed = self._committed_idx[:batch_size]
+
+        # Once close enough to teammate, commit to the landmark farthest from them.
+        teammate_dist = torch.linalg.norm(other_agent_relative_position, dim=-1)
+        should_commit = (teammate_dist < self.regroup_threshold) & (committed < 0)
+        if should_commit.any():
+            teammate_to_landmarks = landmark_relative_positions - other_agent_relative_position.unsqueeze(1)
+            teammate_distances = torch.linalg.norm(teammate_to_landmarks, dim=-1)
+            farthest_from_teammate = torch.argmax(teammate_distances, dim=-1)
+            committed = torch.where(should_commit, farthest_from_teammate, committed)
+            self._committed_idx[:batch_size] = committed
+
+        # Phase 1: move toward teammate. Phase 2: move toward committed landmark.
+        is_committed = committed >= 0
+        target_direction = landmark_relative_positions[torch.arange(batch_size, device=obs.device), committed.clamp(min=0)]
+        action = torch.where(
+            is_committed.unsqueeze(-1),
+            _normalize_action(target_direction),
+            _normalize_action(other_agent_relative_position),
+        )
         return action
+
+
+# Use random landmark policy as the default scripted policy.
+ScriptedPolicy = RandomLandmarkPolicy
+
+EVALUATION_BEHAVIOR_SET: list[dict[str, Any]] = [
+    {
+        "name": "closest_landmark_greedy",
+        "description": "Greedily selects the nearest landmark at each step.",
+        "policy_cls": ClosestLandmarkPolicy,
+    },
+    {
+        "name": "farthest_landmark_commitment",
+        "description": "Always moves toward the currently farthest landmark.",
+        "policy_cls": FarthestLandmarkPolicy,
+    },
+    {
+        "name": "teammate_biased_landmark",
+        "description": "Prioritizes the landmark closest to the teammate.",
+        "policy_cls": TeammateBiasedLandmarkPolicy,
+    },
+    {
+        "name": "regroup_then_diverge",
+        "description": "Approaches the teammate until nearby, then commits to the landmark farthest from them.",
+        "policy_cls": RegroupThenDivergePolicy,
+    },
+]
+
+def get_evaluation_scripted_policies() -> list[Callable[[Any], torch.nn.Module]]:
+    """Return scripted policy factories for evaluation behavior sweeps."""
+    return [entry["policy_cls"] for entry in EVALUATION_BEHAVIOR_SET]

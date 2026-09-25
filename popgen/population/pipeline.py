@@ -8,9 +8,10 @@ from pathlib import Path
 from time import time
 from typing import Any
 
+import litellm
 from pqdm.processes import pqdm
 
-from popgen.agents import MultiPolicyRouter
+from popgen.agents import EgoTeammateRouter, MultiPolicyRouter
 from popgen.agents.reward_policy import (
     latest_reward_training_log,
     load_reward_rollout_artifacts,
@@ -21,9 +22,17 @@ from popgen.population.generation import BaseGenerator
 from popgen.population.types import Behavior
 from popgen.utils.config import LitellmConfig
 from popgen.utils.decorators import track_time
-from popgen.utils.exceptions import format_exc_last_frame
+from popgen.utils.exceptions import TrainingFailure, format_exc_last_frame
 from popgen.utils.imports import import_function_from_file, load_entrypoint
 from popgen.utils.logging import save_rollout, uniform_sample, write_code_file, write_json, write_model_output_record
+from popgen.utils.rewards import DEFAULT_REWARD_CLAMP, sanitize_reward_fn
+from popgen.utils.run_names import (
+    build_population_run_name,
+    extract_attempt_idx_from_path,
+    extract_behavior_idx_from_path,
+    extract_run_date_from_path,
+    infer_env_name,
+)
 from popgen.utils.stats import average_values
 from popgen.utils.warnings import configure_warning_filters
 
@@ -31,12 +40,25 @@ logging.basicConfig(level=logging.INFO)
 configure_warning_filters()
 
 DEFAULT_EVAL_ROLLOUTS = 5
+# Extra RL trainings allowed per alignment attempt after a slow training
+# failure. 0 => a slow failure ends the attempt; the next attempt starts from a
+# fresh directory and a genuinely new reward.
+DEFAULT_TRAINING_RETRIES = 0
+# A training failure only counts against DEFAULT_TRAINING_RETRIES if training
+# ran at least this long. Faster crashes (bad reward shape, for instance) are
+# cheap and stay on the generation-retry budget.
+DEFAULT_MIN_EXPENSIVE_TRAINING_SECONDS = 120.0
 EVAL_ROLLOUT_STATES = 30
 EVAL_ROLLOUT_IMAGES = 3
 
 
-def _load_policy_and_env(policy_type: str, create_env_fn: callable, scripted_policy_fn: callable = None, **kwargs) -> dict[str, Any]:
-    """Load policy artifacts and environment for one behavior attempt."""
+def load_policy_and_env(policy_type: str, create_env_fn: callable, scripted_policy_fn: callable = None, reload_context=None, device: str = "cpu", **kwargs) -> tuple[Any, Any]:
+    """Load policy artifacts and environment for one behavior attempt.
+
+    Always returns an ``(env, policy)`` pair. When ``scripted_policy_fn`` is
+    given, ``policy`` is a router wrapping ego + teammate; otherwise it is the
+    ego policy alone.
+    """
     if policy_type == "PolicyCode":
         from popgen.agents import PolicyCodeAgent
         from popgen.utils.imports import import_all_functions_from_file
@@ -50,6 +72,8 @@ def _load_policy_and_env(policy_type: str, create_env_fn: callable, scripted_pol
         return load_reward_rollout_artifacts(
             save_dir=kwargs["save_dir"],
             scripted_policy_fn=scripted_policy_fn,
+            reload_context=reload_context,
+            device=device,
         )
     elif policy_type == "LLMAgent":
         from popgen.agents import LLMAgent
@@ -91,10 +115,11 @@ def _rollout_worker(args: dict[str, Any]) -> dict[str, Any]:
     configure_warning_filters(force=True)
 
     rollout_fn = args["rollout_fn"]
-    env, policy = _load_policy_and_env(
+    env, policy = load_policy_and_env(
         policy_type=args["policy_type"],
         create_env_fn=args["create_env_fn"],
         scripted_policy_fn=args["scripted_policy_fn"],
+        reload_context=args.get("reload_context"),
         **args.get("loading_kwargs", {}),
     )
 
@@ -173,9 +198,20 @@ class AgentGenerationPipeline(ABC):
         num_workers: int = 8,
         generation_kwargs: dict | None = None,
         evaluation_kwargs: dict | None = None,
-    ) -> tuple[Any, list[Any], bool, int, dict[str, Any]]:
-        """Run generation + rollout + evaluation for one behavior, with retries."""
+        n_training_retries: int = DEFAULT_TRAINING_RETRIES,
+        min_expensive_training_seconds: float = DEFAULT_MIN_EXPENSIVE_TRAINING_SECONDS,
+    ) -> tuple[Any, list[Any], bool, int, dict[str, Any], dict[str, Any]]:
+        """Run generation + rollout + evaluation for one behavior, with retries.
+
+        Cheap failures (generation, import, rollout) may retry up to
+        ``n_generation_retries`` times. Training failures that ran for at least
+        ``min_expensive_training_seconds`` are charged to the much smaller
+        ``n_training_retries`` budget instead, since each one costs tens of
+        minutes of GPU time. Only ``RLAgentGenerationPipeline`` can produce
+        them, so this is inert for policy-code and LLM-agent generation.
+        """
         feedbacks = list(feedbacks) if feedbacks is not None else []
+        n_context_feedbacks = len(feedbacks)
         generation_kwargs = generation_kwargs or {}
         evaluation_kwargs = evaluation_kwargs or {}
 
@@ -184,8 +220,11 @@ class AgentGenerationPipeline(ABC):
         rollout_latencies = []
         generation_latency = 0.0
         success = False
+        training_failures = 0
+        gen_retry = 0
 
         for gen_retry in range(n_generation_retries + 1):
+            failure: BaseException | None = None
             try:
                 generated_item, loading_kwargs, generation_latency = self._generate_policy(
                     behavior=behavior,
@@ -194,15 +233,24 @@ class AgentGenerationPipeline(ABC):
                     **generation_kwargs,
                 )
             except Exception as e:
-                generation_error = f"Generation or training failed: {e}. Please try again."
-                logging.warning(generation_error)
-                feedbacks.append(("", generation_error))
-                continue
+                failure = e
+            else:
+                if isinstance(generated_item, Exception):
+                    failure = generated_item
 
-            if isinstance(generated_item, Exception):
-                generation_error = f"Generation or training failed: {generated_item}. Please try again."
-                logging.warning(generation_error)
+            if failure is not None:
+                # TrainingFailure pre-renders its own message (it is returned,
+                # not raised, so it has no traceback of its own).
+                detail = str(failure) if isinstance(failure, TrainingFailure) else format_exc_last_frame(failure)
+                generation_error = f"Generation or training failed:\n{detail}\nPlease try again."
+                logging.warning(f"[Gen Retry {gen_retry}] {generation_error}")
                 feedbacks.append(("", generation_error))
+
+                if isinstance(failure, TrainingFailure) and failure.elapsed >= min_expensive_training_seconds:
+                    training_failures += 1
+                    if training_failures > n_training_retries:
+                        logging.warning(f"Training retry budget exhausted after {training_failures} slow training failure(s) (last ran {failure.elapsed:.0f}s); abandoning this attempt.")
+                        break
                 continue
 
             try:
@@ -240,8 +288,15 @@ class AgentGenerationPipeline(ABC):
             "generation": generation_latency,
             "rollout": rollout_latencies,
         }
+        # Feedback accumulated across retries lives on this (copied) list and
+        # would otherwise be discarded with the frame; hand it back so the next
+        # attempt's context carries the real error rather than a placeholder.
+        retry_info = {
+            "feedbacks": feedbacks[n_context_feedbacks:],
+            "training_failures": training_failures,
+        }
 
-        return generated_item, rollouts, success, gen_retry, latencies
+        return generated_item, rollouts, success, gen_retry, latencies, retry_info
 
     def __call__(
         self,
@@ -253,11 +308,15 @@ class AgentGenerationPipeline(ABC):
         num_workers: int = 8,
         generation_kwargs: dict | None = None,
         evaluation_kwargs: dict | None = None,
+        n_training_retries: int = DEFAULT_TRAINING_RETRIES,
+        min_expensive_training_seconds: float = DEFAULT_MIN_EXPENSIVE_TRAINING_SECONDS,
     ) -> tuple[bool, dict[str, Any]]:
         """Run generation + rollout + evaluation for one behavior.
 
         `n_generation_retries` controls extra generation attempts inside each
         alignment attempt when generation/training fails or rollouts error out.
+        `n_training_retries` is the separate, much smaller budget for failures
+        of the RL training step itself (see `generate_and_rollout`).
         """
         start_time = time()
         generation_kwargs = generation_kwargs or {}
@@ -277,7 +336,6 @@ class AgentGenerationPipeline(ABC):
                 break
 
             # Create attempt directory for artifacts and logs
-            # Create attempt directory for artifacts and logs
             attempt_dir = os.path.join(self.output_dir, f"attempt_{attempt}")
             os.makedirs(attempt_dir, exist_ok=True)
             logging.info(f"[Attempt {attempt + 1}/{num_attempts}] Processing behavior: {behavior.name}")
@@ -295,7 +353,7 @@ class AgentGenerationPipeline(ABC):
             )
 
             # Step 1: generation & rollouts (with retries):
-            generated_item, rollouts, gen_success, gen_retries, gen_latencies = self.generate_and_rollout(
+            generated_item, rollouts, gen_success, gen_retries, gen_latencies, retry_info = self.generate_and_rollout(
                 behavior=behavior,
                 attempt_dir=attempt_dir,
                 n_generation_retries=n_generation_retries,
@@ -304,21 +362,39 @@ class AgentGenerationPipeline(ABC):
                 num_workers=num_workers,
                 generation_kwargs=generation_kwargs,
                 evaluation_kwargs=evaluation_kwargs,
+                n_training_retries=n_training_retries,
+                min_expensive_training_seconds=min_expensive_training_seconds,
             )
 
             # Step 2: evaluation
-            try:
-                eval_result, eval_elapsed = self._evaluate_policy(
-                    behavior=behavior,
-                    rollouts=rollouts,
-                    behavior_dir=attempt_dir,
-                )
-            except Exception as e:
+            if not rollouts:
+                # Nothing was produced to judge: every retry failed before
+                # rollouts ran. Evaluating an empty set used to raise, and the
+                # resulting "division by zero" was all the next attempt saw.
+                # Note this is deliberately `not rollouts`, not `not
+                # gen_success`: rollouts that ran and errored are still worth
+                # judging -- the evaluator turns them into usable feedback.
                 eval_result = None
                 eval_elapsed = 0.0
-                evaluation_feedback = f"Evaluation failed: {e}"
-                logging.warning(f"[Attempt {attempt + 1}] {evaluation_feedback}")
-                feedbacks.append(("", evaluation_feedback))
+                retry_feedbacks = retry_info["feedbacks"]
+                last_feedback = retry_feedbacks[-1] if retry_feedbacks else ("", "Generation failed with no recorded error.")
+                logging.warning(f"[Attempt {attempt + 1}] No rollouts were produced; skipping evaluation.")
+                feedbacks.append(last_feedback)
+                last_adherence = 0.0
+            else:
+                try:
+                    eval_result, eval_elapsed = self._evaluate_policy(
+                        behavior=behavior,
+                        rollouts=rollouts,
+                        behavior_dir=attempt_dir,
+                    )
+                except Exception as e:
+                    eval_result = None
+                    eval_elapsed = 0.0
+                    evaluation_feedback = f"Evaluation failed: {format_exc_last_frame(e)}"
+                    logging.warning(f"[Attempt {attempt + 1}] {evaluation_feedback}")
+                    feedbacks.append(("", evaluation_feedback))
+                    last_adherence = 0.0
 
             adherence = eval_result.overall_metrics["adherence"] if eval_result is not None else 0.0
 
@@ -359,6 +435,7 @@ class AgentGenerationPipeline(ABC):
                 "success": success,
                 "adherence": adherence,
                 "generation_retries": gen_retries,
+                "training_retries": retry_info["training_failures"],
                 "latencies": {
                     "generation": gen_latencies["generation"],
                     "rollout": sum(float(v) for v in gen_latencies["rollout"]),
@@ -373,6 +450,7 @@ class AgentGenerationPipeline(ABC):
             "behavior": behavior.model_dump(),
             "adherence_threshold": adherence_threshold,
             "n_generation_retries": n_generation_retries,
+            "n_training_retries": n_training_retries,
             "num_workers": num_workers,
             "success": success,
             "attempts_to_success": attempts_to_success,
@@ -414,6 +492,8 @@ class AgentGenerationPipeline(ABC):
                     "policy_type": self.policy_type,
                     "create_env_fn": self.env_module.create_env,
                     "scripted_policy_fn": self.env_module.ScriptedPolicy,
+                    # module-level function -> picklable by reference for spawned workers
+                    "reload_context": getattr(self.env_module, "get_cooperator_reload_context", None),
                     "loading_kwargs": loading_kwargs,
                     "rollout_subfolder": os.path.join(output_path, f"rollout_{rollout_idx}"),
                     "rollout_kwargs": {**rollout_kwargs, "seed": rollout_seed},
@@ -526,6 +606,11 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
 
     policy_type = "RewardFn"
 
+    def __init__(self, *args, train_kwargs: dict | None = None, reward_clamp: float | None = DEFAULT_REWARD_CLAMP, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.train_kwargs = dict(train_kwargs or {})
+        self.reward_clamp = reward_clamp
+
     def _generate_policy(
         self,
         behavior: Behavior,
@@ -554,27 +639,65 @@ class RLAgentGenerationPipeline(AgentGenerationPipeline):
         write_model_output_record(output_dir, gen_code)
 
         training_latency = 0.0
+        compute_reward = None
+        run_name = Path(output_dir).name
         if not isinstance(gen_code, Exception):
-
-            def _train_once() -> None:
-                compute_reward = import_function_from_file(code_file_path, "compute_reward")
-                self.env_module.train_fn(compute_reward, output_dir)
-
             try:
-                _, training_latency = track_time("training")(_train_once)()
+                env_name = infer_env_name(self.env_module)
+                run_date = extract_run_date_from_path(output_dir)
+                behavior_idx = extract_behavior_idx_from_path(output_dir)
+                attempt_idx = extract_attempt_idx_from_path(output_dir)
+                run_name = build_population_run_name(
+                    env_name=env_name,
+                    run_date=run_date,
+                    behavior_idx=behavior_idx,
+                    attempt_idx=attempt_idx,
+                )
+            except (TypeError, ValueError):
+                run_name = Path(output_dir).name
+
+            # Importing the generated module is cheap and its failures (syntax
+            # error, missing `compute_reward`) are trivially fixable, so keep it
+            # out of the training try-block: those must stay on the cheap
+            # generation-retry budget, not the expensive training one.
+            try:
+                compute_reward = import_function_from_file(code_file_path, "compute_reward")
+                compute_reward = sanitize_reward_fn(compute_reward, self.reward_clamp)
             except Exception as e:
                 gen_code = e
-                gen_code = e
-                training_latency = 0.0
 
-        if not isinstance(gen_code, Exception):
+        if not isinstance(gen_code, Exception) and compute_reward is not None:
             from popgen.utils.filesystem import find_reward_checkpoints
 
-            checkpoints = find_reward_checkpoints(output_dir)
-            if not checkpoints:
+            # Retries share this attempt directory, so a previous retry's
+            # checkpoints would otherwise satisfy the "did training produce
+            # anything?" check below.
+            checkpoints_before = {p.resolve() for p in find_reward_checkpoints(output_dir)}
+            started = time()
+            try:
+                self.env_module.train_fn(
+                    reward_fn=compute_reward,
+                    output_dir=output_dir,
+                    run_name=run_name,
+                    **self.train_kwargs,
+                )
+                training_latency = time() - started
+            except Exception as e:
+                # track_time() would discard the elapsed time on failure, and we
+                # need it to tell a seconds-long crash from an hours-long one.
+                gen_code = TrainingFailure(e, elapsed=time() - started, training_log=latest_reward_training_log(output_dir))
+                training_latency = 0.0
+
+        if not isinstance(gen_code, Exception) and compute_reward is not None:
+            new_checkpoints = [p for p in find_reward_checkpoints(output_dir) if p.resolve() not in checkpoints_before]
+            if not new_checkpoints:
                 latest_log = latest_reward_training_log(output_dir)
                 hint = f" Latest training log: {latest_log}. " if latest_log is not None else " "
-                gen_code = FileNotFoundError(f"No checkpoints produced in {output_dir}.{hint}Training likely failed before checkpointing.")
+                gen_code = TrainingFailure(
+                    FileNotFoundError(f"No checkpoints produced in {output_dir}.{hint}Training likely failed before checkpointing."),
+                    elapsed=training_latency,
+                    training_log=latest_log,
+                )
 
         return gen_code, {"save_dir": output_dir}, {"reward_generation": reward_generation_latency, "training": training_latency}
 
