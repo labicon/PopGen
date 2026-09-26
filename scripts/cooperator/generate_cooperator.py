@@ -135,7 +135,7 @@ def main(cfg: DictConfig):
 #       population.env=overcooked \
 #       population.output_dir=scripts/cooperator/results/overcooked/policy_code/gemini-3-flash-preview/verbalized_sampling/n4/20260429_012523 \
 #       cooperator.results_dir=scripts/cooperator/results/overcooked/policy_code/gemini-3-flash-preview/verbalized_sampling/n4/20260429_012523 \
-#       cooperator.restart_from=/home/kanghyun/zeroshot_coordination/scripts/cooperator/results/overcooked/policy_code/gemini-3-flash-preview/verbalized_sampling/n4/20260429_012523/cooperator/overcooked-cooperator-20260429_012523/ippo_overcooked_gru__9c74866d_26_04_29-01_31_12/checkpoints/checkpoint_1200000.pt
+#       cooperator.restart_from=scripts/cooperator/results/overcooked/policy_code/gemini-3-flash-preview/verbalized_sampling/n4/20260429_012523/cooperator/overcooked-cooperator-20260429_012523/ippo_overcooked_gru__9c74866d_26_04_29-01_31_12/checkpoints/checkpoint_1200000.pt
 #
 # When cooperator.restart_from is set, the script restores that checkpoint and
 # continues writing into the resolved cooperator run directory.

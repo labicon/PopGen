@@ -46,7 +46,7 @@ layout_name: large_room     # kitchen layout
 horizon: 400                # max steps per episode
 ```
 
-`ENVIRONMENT_DESCRIPTION` in [utils.py](/home/kang/zeroshot_coordination_dev/popgen/envs/overcooked/utils.py) is written for the currently configured layout. If you change `layout_name`, update that natural-language description as well so LLM-generated policies are not given stale item positions, room size, or task geometry. That prompt is intentionally selective: it emphasizes fixed layout/workspace facts, pot state, wall adjacency, teammate delta, and ego position, and it does not enumerate every auxiliary observation field even when those fields are still present at runtime.
+`ENVIRONMENT_DESCRIPTION` in [utils.py](./utils.py) is written for the currently configured layout. If you change `layout_name`, update that natural-language description as well so LLM-generated policies are not given stale item positions, room size, or task geometry. That prompt is intentionally selective: it emphasizes fixed layout/workspace facts, pot state, wall adjacency, teammate delta, and ego position, and it does not enumerate every auxiliary observation field even when those fields are still present at runtime.
 
 **Available layouts** (from `deps/overcooked_ai/src/overcooked_ai_py/data/layouts/`):
 
@@ -139,7 +139,7 @@ The wrapper now applies a layout-specific projection for `large_room`. Instead o
 - drop `[46:92]` because the duplicated teammate feature block is unused in this wrapper
 - keep `[92:96]` for teammate-relative position and ego absolute position
 
-That compact `large_room` order matches the index description in [utils.py](/home/kang/zeroshot_coordination_dev/popgen/envs/overcooked/utils.py).
+That compact `large_room` order matches the index description in [utils.py](./utils.py).
 
 For LLM policy generation, the prompt in `utils.py` does **not** spell out all of those compact fields. In particular, it avoids highlighting the auxiliary object-delta features (`closest_onion`, `closest_dish`, `closest_soup`, `closest_serving`, `empty_counter`) because those details tended to distract generated policies. The runtime observation still contains them; the prompt simply steers the model toward using fixed map knowledge plus a smaller set of core signals.
 
